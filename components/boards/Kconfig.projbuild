@@ -20,6 +20,10 @@ menu "Board Configuration"
             bool "ESP32 Board with >4M PSRAM"
             depends on IDF_TARGET_ESP32
 
+        config BOARD_ESP32_A1S
+            bool "Ai-Thinker ESP32-A1S Audio Kit (ES8388)"
+            depends on IDF_TARGET_ESP32
+
         config BOARD_ESPARAGUS_AUDIO_BRICK
             bool "Esparagus Audio Brick (ESP32, TAS58xx)"
             depends on IDF_TARGET_ESP32
@@ -44,6 +48,7 @@ menu "Board Configuration"
         default "squeezeamp" if BOARD_SQUEEZEAMP_4M
         default "esp32s3-generic" if BOARD_ESP32S3_GENERIC
         default "esp32-generic" if BOARD_ESP32_GENERIC
+        default "esp32-a1s" if BOARD_ESP32_A1S
         default "esparagus-audio-brick" if BOARD_ESPARAGUS_AUDIO_BRICK
         default "esparagus-audio-brick" if BOARD_ESPARAGUS_AUDIO_BRICK_S3
         default "esparagus-audio-brick" if BOARD_ESPARAGUS_LOUDER

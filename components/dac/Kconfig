@@ -14,9 +14,22 @@ menu "DAC Configuration"
             Build the TI TAS5825M DAC/amplifier driver.
             The board must register it at runtime via dac_register().
 
+    config DAC_ES8388
+        bool "Everest ES8388 codec"
+        default n
+        help
+            Build the ES8388 codec driver wrapper for ESP32-A1S style boards.
+
+    config ES8388_I2C_ADDR
+        int "ES8388 I2C address (7-bit)"
+        default 16
+        depends on DAC_ES8388
+        help
+            7-bit I2C address. ESP32-A1S ES8388 boards usually use 0x10.
+
     config DAC_CONTROLS_VOLUME
         bool
-        default y if DAC_TAS57XX || DAC_TAS58XX
+        default y if DAC_TAS57XX || DAC_TAS58XX || DAC_ES8388
         help
             Hidden option. Set automatically when a hardware DAC driver is enabled.
             When true, the DAC handles volume control and software attenuation

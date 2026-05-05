@@ -27,6 +27,17 @@ int rtsp_crypto_read_block(int socket, rtsp_conn_t *conn, uint8_t *buffer,
                            size_t buffer_size);
 
 /**
+ * Read and decrypt a block, consuming already-received encrypted bytes first.
+ *
+ * This is needed when the plaintext pair-verify response switches the TCP
+ * stream into encrypted mode while the receive buffer already contains bytes
+ * from the next encrypted frame.
+ */
+int rtsp_crypto_read_block_buffered(int socket, rtsp_conn_t *conn,
+                                    uint8_t *pending, size_t *pending_len,
+                                    uint8_t *buffer, size_t buffer_size);
+
+/**
  * Encrypt and write data to socket
  * Splits into multiple blocks if needed (max RTSP_ENCRYPTED_BLOCK_MAX each)
  * Format: [2-byte length (little-endian)][encrypted data + 16-byte tag]

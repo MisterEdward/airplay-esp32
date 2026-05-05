@@ -596,6 +596,7 @@ static void handle_post(int socket, rtsp_conn_t *conn,
       if (conn->hap_session && conn->hap_session->pair_setup_state == 4 &&
           conn->hap_session->session_established) {
         conn->encrypted_mode = true;
+        ESP_LOGI(TAG, "RTSP encryption enabled (transient pair-setup)");
       }
     } else {
       ESP_LOGE(TAG, "Pair-setup failed: err=%d", err);

@@ -42,6 +42,7 @@ esp_err_t hap_pair_setup_m1(hap_session_t *session, const uint8_t *input,
     transient = (flags[0] & 0x10) != 0;
   }
   session->pair_setup_transient = transient;
+  ESP_LOGI(TAG, "Pair-setup M1: transient=%s", transient ? "yes" : "no");
 
   if (session->srp) {
     srp_session_free(session->srp);
@@ -137,6 +138,7 @@ esp_err_t hap_pair_setup_m3(hap_session_t *session, const uint8_t *input,
     session->encrypt_nonce = 0;
     session->decrypt_nonce = 0;
     session->session_established = true;
+    ESP_LOGI(TAG, "Transient pair-setup established RTSP keys");
   }
 
   const uint8_t *server_proof = srp_get_proof(session->srp);

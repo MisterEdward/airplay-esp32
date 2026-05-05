@@ -10,6 +10,39 @@
 
 static const char *TAG = "rtsp_crypto";
 
+static int read_exact(int socket, uint8_t *pending, size_t *pending_len,
+                      uint8_t *dst, size_t len) {
+  size_t received = 0;
+
+  if (pending && pending_len && *pending_len > 0) {
+    size_t n = *pending_len < len ? *pending_len : len;
+    memcpy(dst, pending, n);
+    if (*pending_len > n) {
+      memmove(pending, pending + n, *pending_len - n);
+    }
+    *pending_len -= n;
+    received += n;
+  }
+
+  while (received < len) {
+    ssize_t r = recv(socket, dst + received, len - received, 0);
+    if (r > 0) {
+      received += (size_t)r;
+      continue;
+    }
+    if (r == 0) {
+      errno = ECONNRESET;
+      return -1;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+      continue;
+    }
+    return -1;
+  }
+
+  return 0;
+}
+
 // Send all data, handling partial sends
 static int send_all(int socket, const uint8_t *data, size_t len) {
   size_t sent = 0;
@@ -25,8 +58,16 @@ static int send_all(int socket, const uint8_t *data, size_t len) {
 
 int rtsp_crypto_read_block(int socket, rtsp_conn_t *conn, uint8_t *buffer,
                            size_t buffer_size) {
+  return rtsp_crypto_read_block_buffered(socket, conn, NULL, NULL, buffer,
+                                         buffer_size);
+}
+
+int rtsp_crypto_read_block_buffered(int socket, rtsp_conn_t *conn,
+                                    uint8_t *pending, size_t *pending_len,
+                                    uint8_t *buffer, size_t buffer_size) {
   if (!conn || !conn->hap_session || !conn->encrypted_mode) {
     // Expected during session teardown - not an error
+    errno = EINVAL;
     return -1;
   }
 
@@ -37,19 +78,7 @@ int rtsp_crypto_read_block(int socket, rtsp_conn_t *conn, uint8_t *buffer,
   // recv into garbage interpreted as a fresh length prefix.  Cancellation
   // is handled by shutdown(SHUT_RDWR), which makes recv return a real error.
   uint8_t len_buf[2];
-  size_t received = 0;
-  while (received < 2) {
-    ssize_t r = recv(socket, len_buf + received, 2 - received, 0);
-    if (r > 0) {
-      received += (size_t)r;
-      continue;
-    }
-    if (r == 0) {
-      return -1; // peer closed
-    }
-    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-      continue;
-    }
+  if (read_exact(socket, pending, pending_len, len_buf, sizeof(len_buf)) != 0) {
     return -1;
   }
 
@@ -58,6 +87,7 @@ int rtsp_crypto_read_block(int socket, rtsp_conn_t *conn, uint8_t *buffer,
   if (block_len == 0 || block_len > RTSP_ENCRYPTED_BLOCK_MAX ||
       block_len > buffer_size) {
     ESP_LOGE(TAG, "Invalid encrypted block length: %d", block_len);
+    errno = EBADMSG;
     return -1;
   }
 
@@ -66,23 +96,11 @@ int rtsp_crypto_read_block(int socket, rtsp_conn_t *conn, uint8_t *buffer,
   uint8_t *encrypted = malloc(encrypted_len);
   if (!encrypted) {
     ESP_LOGE(TAG, "Failed to allocate encrypted buffer");
+    errno = ENOMEM;
     return -1;
   }
 
-  received = 0;
-  while (received < encrypted_len) {
-    ssize_t r = recv(socket, encrypted + received, encrypted_len - received, 0);
-    if (r > 0) {
-      received += (size_t)r;
-      continue;
-    }
-    if (r == 0) {
-      free(encrypted);
-      return -1; // peer closed
-    }
-    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-      continue;
-    }
+  if (read_exact(socket, pending, pending_len, encrypted, encrypted_len) != 0) {
     free(encrypted);
     return -1;
   }
@@ -96,7 +114,10 @@ int rtsp_crypto_read_block(int socket, rtsp_conn_t *conn, uint8_t *buffer,
           buffer, &plaintext_len, NULL, encrypted, encrypted_len, len_buf,
           sizeof(len_buf), nonce, conn->hap_session->decrypt_key) != 0) {
     free(encrypted);
-    ESP_LOGE(TAG, "Failed to decrypt frame");
+    ESP_LOGE(TAG, "Failed to decrypt frame: len=%u nonce=%llu pending=%zu",
+             block_len, (unsigned long long)conn->hap_session->decrypt_nonce,
+             pending_len ? *pending_len : 0);
+    errno = EBADMSG;
     return -1;
   }
   free(encrypted);

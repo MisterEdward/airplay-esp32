@@ -138,12 +138,17 @@ static void process_rtsp_buffer(client_slot_t *slot, uint8_t *buffer,
     buffer[total_len] = '\0';
     rtsp_dispatch(slot->socket, slot->conn, buffer, total_len);
     buffer[total_len] = saved;
+    bool switched_to_encrypted = slot->conn && slot->conn->encrypted_mode;
     free(header_str);
 
     if (*buf_len > total_len) {
       memmove(buffer, buffer + total_len, *buf_len - total_len);
     }
     *buf_len -= total_len;
+
+    if (switched_to_encrypted) {
+      break;
+    }
   }
 }
 
@@ -192,6 +197,9 @@ static void client_task(void *pvParameters) {
   }
 
   size_t buf_len = 0;
+  uint8_t *encrypted_pending = NULL;
+  size_t encrypted_pending_len = 0;
+  size_t encrypted_pending_cap = 0;
 
   // Socket timeout for stop signal responsiveness
   struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
@@ -199,6 +207,22 @@ static void client_task(void *pvParameters) {
 
   while (server_running && !slot->should_stop) {
     if (conn->encrypted_mode) {
+      if (buf_len > 0) {
+        if (encrypted_pending_cap < buf_len) {
+          uint8_t *new_pending = realloc(encrypted_pending, buf_len);
+          if (!new_pending) {
+            goto cleanup;
+          }
+          encrypted_pending = new_pending;
+          encrypted_pending_cap = buf_len;
+        }
+        memcpy(encrypted_pending, buffer, buf_len);
+        encrypted_pending_len = buf_len;
+        ESP_LOGI(TAG, "Carried %zu encrypted bytes from plaintext buffer",
+                 encrypted_pending_len);
+        buf_len = 0;
+      }
+
       // Encrypted mode
       while (server_running && conn->encrypted_mode && !slot->should_stop) {
         if (buf_len >= buf_capacity - 1024) {
@@ -216,8 +240,9 @@ static void client_task(void *pvParameters) {
           buf_capacity = new_cap;
         }
 
-        int block_len = rtsp_crypto_read_block(
-            slot->socket, conn, buffer + buf_len, buf_capacity - buf_len);
+        int block_len = rtsp_crypto_read_block_buffered(
+            slot->socket, conn, encrypted_pending, &encrypted_pending_len,
+            buffer + buf_len, buf_capacity - buf_len);
         if (block_len <= 0) {
           if (slot->should_stop || (errno != EAGAIN && errno != EWOULDBLOCK)) {
             goto cleanup;
@@ -260,6 +285,7 @@ static void client_task(void *pvParameters) {
 
 cleanup:
   ESP_LOGI(TAG, "Client slot %d disconnected", slot_idx);
+  free(encrypted_pending);
   free(buffer);
   close(slot->socket);
   slot->socket = -1;

@@ -1,0 +1,3 @@
+description: ES8388 codec driver wrapper for ESP32 AirPlay receiver
+dependencies:
+  espressif/esp_codec_dev: "^1.4.0"

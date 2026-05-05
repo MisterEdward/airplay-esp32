@@ -139,6 +139,9 @@ esp_err_t hap_pair_verify_m3(hap_session_t *session, const uint8_t *input,
                   (uint8_t *)"Control-Write-Encryption-Key", 28,
                   session->decrypt_key, 32);
 
+  session->encrypt_nonce = 0;
+  session->decrypt_nonce = 0;
+
   tlv8_encoder_t enc;
   tlv8_encoder_init(&enc, output, output_capacity);
   tlv8_encode_byte(&enc, TLV_TYPE_STATE, PAIR_VERIFY_STATE_M4);
