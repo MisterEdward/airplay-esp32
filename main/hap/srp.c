@@ -349,6 +349,10 @@ esp_err_t srp_verify_client(srp_session_t *session,
   size_t S_len = mpi_to_bytes_min(&S, S_bytes, sizeof(S_bytes));
   crypto_hash_sha512(session->session_key, S_bytes, S_len);
   session->session_key_len = 64;
+  ESP_LOGW(TAG, "DBG S_len=%zu", S_len);
+  ESP_LOG_BUFFER_HEX_LEVEL("DBG S head", S_bytes, S_len < 32 ? S_len : 32,
+                          ESP_LOG_WARN);
+  ESP_LOG_BUFFER_HEX_LEVEL("DBG K", session->session_key, 64, ESP_LOG_WARN);
 
   // Compute expected M1 = H(H(N)^H(g) || H(I) || s || A || B || K)
   uint8_t expected_m1[64];

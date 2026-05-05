@@ -113,10 +113,32 @@ int rtsp_crypto_read_block_buffered(int socket, rtsp_conn_t *conn,
   if (crypto_aead_chacha20poly1305_ietf_decrypt(
           buffer, &plaintext_len, NULL, encrypted, encrypted_len, len_buf,
           sizeof(len_buf), nonce, conn->hap_session->decrypt_key) != 0) {
-    free(encrypted);
     ESP_LOGE(TAG, "Failed to decrypt frame: len=%u nonce=%llu pending=%zu",
              block_len, (unsigned long long)conn->hap_session->decrypt_nonce,
              pending_len ? *pending_len : 0);
+    ESP_LOG_BUFFER_HEX_LEVEL("DBG dec_key", conn->hap_session->decrypt_key, 32,
+                            ESP_LOG_WARN);
+    ESP_LOG_BUFFER_HEX_LEVEL("DBG nonce", nonce, 12, ESP_LOG_WARN);
+    ESP_LOG_BUFFER_HEX_LEVEL("DBG AAD", len_buf, 2, ESP_LOG_WARN);
+    ESP_LOG_BUFFER_HEX_LEVEL("DBG ct head", encrypted,
+                            encrypted_len < 32 ? encrypted_len : 32,
+                            ESP_LOG_WARN);
+    ESP_LOG_BUFFER_HEX_LEVEL("DBG tag", encrypted + (encrypted_len - 16), 16,
+                            ESP_LOG_WARN);
+
+    // DBG fallback probes — try alternate conventions to identify the bug.
+    if (crypto_aead_chacha20poly1305_ietf_decrypt(
+            buffer, &plaintext_len, NULL, encrypted, encrypted_len, len_buf,
+            sizeof(len_buf), nonce, conn->hap_session->encrypt_key) == 0) {
+      ESP_LOGW(TAG, "DBG SWAPPED keys would decrypt → enc/dec swap bug");
+    }
+    if (crypto_aead_chacha20poly1305_ietf_decrypt(
+            buffer, &plaintext_len, NULL, encrypted, encrypted_len, NULL, 0,
+            nonce, conn->hap_session->decrypt_key) == 0) {
+      ESP_LOGW(TAG, "DBG no-AAD would decrypt → AAD format bug");
+    }
+
+    free(encrypted);
     errno = EBADMSG;
     return -1;
   }

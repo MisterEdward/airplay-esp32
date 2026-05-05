@@ -139,6 +139,11 @@ esp_err_t hap_pair_setup_m3(hap_session_t *session, const uint8_t *input,
     session->decrypt_nonce = 0;
     session->session_established = true;
     ESP_LOGI(TAG, "Transient pair-setup established RTSP keys");
+    ESP_LOG_BUFFER_HEX_LEVEL("DBG srp_K", srp_key, srp_key_len, ESP_LOG_WARN);
+    ESP_LOG_BUFFER_HEX_LEVEL("DBG enc(Read)", session->encrypt_key, 32,
+                            ESP_LOG_WARN);
+    ESP_LOG_BUFFER_HEX_LEVEL("DBG dec(Write)", session->decrypt_key, 32,
+                            ESP_LOG_WARN);
   }
 
   const uint8_t *server_proof = srp_get_proof(session->srp);
