@@ -113,6 +113,21 @@ static void dac_es8388_set_power_mode(dac_power_mode_t mode) {
   bool enable = (mode == DAC_POWER_ON);
   if (enable != s_enabled) {
     s_codec_if->enable(s_codec_if, enable);
+    
+    if (enable && s_ctrl_if && s_ctrl_if->write_reg) {
+      // The default esp_codec_dev driver sets DACCONTROL17/20 to 0x90 (-6dB analog mixer attenuation)
+      // We override it to 0x80 (0dB) to restore 6dB of lost volume.
+      uint8_t mix_vol = 0x80;
+      s_ctrl_if->write_reg(s_ctrl_if, 0x11, 1, &mix_vol, 1); // ES8388_DACCONTROL17
+      s_ctrl_if->write_reg(s_ctrl_if, 0x14, 1, &mix_vol, 1); // ES8388_DACCONTROL20
+
+      // The driver defaults LOUT1/ROUT1 to 0x1E (0dB). 
+      // We override to 0x21 (+3dB maximum analog output gain) for the earphone jack.
+      uint8_t out1_vol = 0x21;
+      s_ctrl_if->write_reg(s_ctrl_if, 0x2E, 1, &out1_vol, 1); // ES8388_DACCONTROL24
+      s_ctrl_if->write_reg(s_ctrl_if, 0x2F, 1, &out1_vol, 1); // ES8388_DACCONTROL25
+    }
+    
     s_enabled = enable;
   }
   if (s_codec_if->mute) {
