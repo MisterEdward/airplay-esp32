@@ -8,19 +8,14 @@
 #include "rtsp_events.h"
 #include "sdkconfig.h"
 #include "settings.h"
-#include <math.h>
 #include <strings.h>
 
 #define TAG "audio_alert"
 
 #define ALERT_DEFAULT_VOLUME 10
 #define ALERT_MAX_REPEAT     20
-#define PHASE_BITS           32
-#define SINE_TABLE_SIZE      256
-#define SINE_TABLE_SCALE     26000
 #define ALERT_IDLE_DAC_DB    (-12.0f)
-#define CHIME_DURATION_MS    920
-#define ALERT_PI            3.14159265358979323846f
+#define CHIME_SAMPLE_RATE    44100
 
 typedef struct {
   bool active;
@@ -31,34 +26,15 @@ typedef struct {
   uint32_t total_frames;
   uint32_t frames_left;
   uint32_t position;
-  uint32_t phase1;
-  uint32_t phase2;
-  uint32_t phase3;
-  uint32_t phase_inc1;
-  uint32_t phase_inc2;
-  uint32_t phase_inc3;
-  uint32_t freq1;
-  uint32_t freq2;
-  uint32_t freq3;
   int32_t volume_q15;
   uint32_t generation;
 } audio_alert_state_t;
 
+extern const uint8_t chime_pcm[];
+extern const size_t chime_pcm_len;
+
 static portMUX_TYPE s_alert_lock = portMUX_INITIALIZER_UNLOCKED;
 static audio_alert_state_t s_alert = {0};
-static int16_t s_sine_table[SINE_TABLE_SIZE];
-
-static void init_sine_table(void) {
-  static bool initialized = false;
-  if (initialized) {
-    return;
-  }
-  for (int i = 0; i < SINE_TABLE_SIZE; i++) {
-    float phase = (2.0f * ALERT_PI * (float)i) / (float)SINE_TABLE_SIZE;
-    s_sine_table[i] = (int16_t)(sinf(phase) * SINE_TABLE_SCALE);
-  }
-  initialized = true;
-}
 
 static void restore_saved_volume(void) {
   float volume_db = -15.0f;
@@ -66,39 +42,6 @@ static void restore_saved_volume(void) {
     volume_db = -15.0f;
   }
   dac_set_volume(volume_db);
-}
-
-static uint32_t ms_to_frames(uint32_t sample_rate, uint32_t ms) {
-  return (sample_rate * ms) / 1000;
-}
-
-static uint32_t phase_inc(uint32_t hz, uint32_t sample_rate) {
-  return (uint32_t)(((uint64_t)hz << PHASE_BITS) / sample_rate);
-}
-
-static void set_freq1(audio_alert_state_t *st, uint32_t hz) {
-  if (st->freq1 != hz) {
-    st->freq1 = hz;
-    st->phase_inc1 = phase_inc(hz, st->sample_rate);
-  }
-}
-
-static void set_freq2(audio_alert_state_t *st, uint32_t hz) {
-  if (st->freq2 != hz) {
-    st->freq2 = hz;
-    st->phase_inc2 = phase_inc(hz, st->sample_rate);
-  }
-}
-
-static void set_freq3(audio_alert_state_t *st, uint32_t hz) {
-  if (st->freq3 != hz) {
-    st->freq3 = hz;
-    st->phase_inc3 = phase_inc(hz, st->sample_rate);
-  }
-}
-
-static int32_t sine_sample(uint32_t phase) {
-  return s_sine_table[phase >> 24];
 }
 
 static int16_t clamp16(int32_t sample) {
@@ -111,73 +54,36 @@ static int16_t clamp16(int32_t sample) {
   return (int16_t)sample;
 }
 
-static uint32_t base_duration_ms(void) {
-  return CHIME_DURATION_MS;
+static size_t chime_sample_count(void) {
+  return chime_pcm_len / sizeof(int16_t);
 }
 
-static int32_t note_envelope_q15(uint32_t pos, uint32_t sample_rate,
-                                 uint32_t start_ms, uint32_t end_ms,
-                                 uint32_t attack_ms, uint32_t release_ms) {
-  uint32_t start = ms_to_frames(sample_rate, start_ms);
-  uint32_t end = ms_to_frames(sample_rate, end_ms);
-  if (end <= start || pos < start || pos >= end) {
+static int16_t chime_sample_at(size_t index) {
+  const uint8_t *sample = chime_pcm + (index * sizeof(int16_t));
+  return (int16_t)((uint16_t)sample[0] | ((uint16_t)sample[1] << 8));
+}
+
+static uint32_t chime_output_frames(uint32_t sample_rate) {
+  size_t samples = chime_sample_count();
+  if (samples == 0 || sample_rate == 0) {
     return 0;
   }
-
-  uint32_t note_pos = pos - start;
-  uint32_t note_len = end - start;
-  uint32_t attack = ms_to_frames(sample_rate, attack_ms);
-  uint32_t release = ms_to_frames(sample_rate, release_ms);
-  if (attack == 0) {
-    attack = 1;
-  }
-  if (release == 0) {
-    release = 1;
-  }
-
-  if (note_pos < attack) {
-    return (int32_t)((note_pos * 32768U) / attack);
-  }
-  if (note_pos + release >= note_len) {
-    uint32_t left = note_len > note_pos ? note_len - note_pos : 0;
-    return (int32_t)((left * 32768U) / release);
-  }
-  return 32768;
+  return (uint32_t)(((uint64_t)samples * sample_rate) / CHIME_SAMPLE_RATE);
 }
 
-static int32_t chime_voice(uint32_t *phase, uint32_t phase_inc, int32_t sample,
-                           int32_t envelope, int32_t gain_q15) {
-  if (envelope <= 0) {
+static int32_t sample_chime(audio_alert_state_t *st) {
+  uint32_t sr = st->sample_rate ? st->sample_rate : CHIME_SAMPLE_RATE;
+  uint32_t frames = chime_output_frames(sr);
+  size_t samples = chime_sample_count();
+  if (frames == 0 || samples == 0) {
     return 0;
   }
-
-  *phase += phase_inc;
-  int32_t voice = (sample * envelope) >> 15;
-  return (voice * gain_q15) >> 15;
-}
-
-static int32_t synth_sample(audio_alert_state_t *st) {
-  uint32_t sr = st->sample_rate ? st->sample_rate : 44100;
-  uint32_t chime_frames = ms_to_frames(sr, CHIME_DURATION_MS);
-  uint32_t pos = chime_frames > 0 ? st->position % chime_frames : st->position;
-  int32_t sample = 0;
-
-  set_freq1(st, 988);
-  set_freq2(st, 1319);
-  set_freq3(st, 1760);
-
-  int32_t env1 = note_envelope_q15(pos, sr, 0, 260, 18, 120);
-  sample += chime_voice(&st->phase1, st->phase_inc1, sine_sample(st->phase1),
-                        env1, 19000);
-
-  int32_t env2 = note_envelope_q15(pos, sr, 115, 520, 20, 210);
-  sample += chime_voice(&st->phase2, st->phase_inc2, sine_sample(st->phase2),
-                        env2, 16500);
-
-  int32_t env3 = note_envelope_q15(pos, sr, 300, 900, 28, 360);
-  sample += chime_voice(&st->phase3, st->phase_inc3, sine_sample(st->phase3),
-                        env3, 10500);
-
+  uint32_t pos = st->position % frames;
+  size_t index = (size_t)(((uint64_t)pos * CHIME_SAMPLE_RATE) / sr);
+  if (index >= samples) {
+    index = samples - 1;
+  }
+  int32_t sample = chime_sample_at(index);
   sample = (sample * st->volume_q15) >> 15;
   return sample;
 }
@@ -209,11 +115,11 @@ esp_err_t audio_alert_init(void) {
   if (initialized) {
     return ESP_OK;
   }
-  init_sine_table();
   if (rtsp_events_register(alert_event_cb, NULL) != 0) {
     return ESP_FAIL;
   }
   initialized = true;
+  ESP_LOGI(TAG, "Loaded chime sample: %u frames", (unsigned)chime_sample_count());
   return ESP_OK;
 }
 
@@ -272,12 +178,11 @@ esp_err_t audio_alert_play(const audio_alert_config_t *config) {
   }
 
   uint32_t sample_rate = CONFIG_OUTPUT_SAMPLE_RATE_HZ;
-  uint32_t frames = ms_to_frames(sample_rate, base_duration_ms());
-  frames *= repeat;
-
   bool should_power_dac = false;
   portENTER_CRITICAL(&s_alert_lock);
   should_power_dac = !s_alert.airplay_playing;
+  uint32_t frames = chime_output_frames(sample_rate);
+  frames *= repeat;
   s_alert.generation++;
   s_alert.active = true;
   s_alert.owns_dac = should_power_dac;
@@ -286,15 +191,6 @@ esp_err_t audio_alert_play(const audio_alert_config_t *config) {
   s_alert.total_frames = frames;
   s_alert.frames_left = frames;
   s_alert.position = 0;
-  s_alert.phase1 = 0;
-  s_alert.phase2 = 0;
-  s_alert.phase3 = 0;
-  s_alert.phase_inc1 = 0;
-  s_alert.phase_inc2 = 0;
-  s_alert.phase_inc3 = 0;
-  s_alert.freq1 = 0;
-  s_alert.freq2 = 0;
-  s_alert.freq3 = 0;
   s_alert.volume_q15 = ((int32_t)volume * 32768) / 100;
   portEXIT_CRITICAL(&s_alert_lock);
 
@@ -353,7 +249,7 @@ void audio_alert_mix(int16_t *pcm, size_t stereo_frames, uint32_t sample_rate) {
   portEXIT_CRITICAL(&s_alert_lock);
 
   for (size_t i = 0; i < stereo_frames && local.frames_left > 0; i++) {
-    int32_t alert = synth_sample(&local);
+    int32_t alert = sample_chime(&local);
     pcm[i * 2] = clamp16((int32_t)pcm[i * 2] + alert);
     pcm[i * 2 + 1] = clamp16((int32_t)pcm[i * 2 + 1] + alert);
     local.position++;
@@ -366,15 +262,6 @@ void audio_alert_mix(int16_t *pcm, size_t stereo_frames, uint32_t sample_rate) {
     s_alert.total_frames = local.total_frames;
     s_alert.frames_left = local.frames_left;
     s_alert.position = local.position;
-    s_alert.phase1 = local.phase1;
-    s_alert.phase2 = local.phase2;
-    s_alert.phase3 = local.phase3;
-    s_alert.phase_inc1 = local.phase_inc1;
-    s_alert.phase_inc2 = local.phase_inc2;
-    s_alert.phase_inc3 = local.phase_inc3;
-    s_alert.freq1 = local.freq1;
-    s_alert.freq2 = local.freq2;
-    s_alert.freq3 = local.freq3;
     if (s_alert.frames_left == 0) {
       finished = true;
       should_power_off = s_alert.owns_dac && !s_alert.airplay_playing;

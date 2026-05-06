@@ -4,6 +4,7 @@ set( SRC_FILES
     "settings.c"
     "audio/audio_receiver.c"
     "audio/audio_alert.c"
+    "audio/chime_pcm.c"
     "audio/audio_stream.c"
     "audio/audio_stream_realtime.c"
     "audio/audio_stream_buffered.c"

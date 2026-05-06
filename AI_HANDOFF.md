@@ -88,8 +88,8 @@ Add local sound alerts that can be triggered over HTTP and mixed over AirPlay 2 
 
 **Implementation Applied:**
 *   Added `main/audio/audio_alert.c` and `main/audio/audio_alert.h`.
-*   Alert sound is a single synthetic, firmware-builtin `chime`.
-*   The chime is an original soft Apple Pay-like tone; no Apple audio asset is embedded.
+*   Alert sound is a single firmware-builtin `chime`.
+*   The chime plays embedded mono PCM generated into `main/audio/chime_pcm.c`.
 *   Mixed alerts into the normal I2S output path in `main/audio/audio_output.c`.
 *   If AirPlay is playing, alert audio is added over the current PCM.
 *   If AirPlay is idle, alert audio is mixed over the silence stream and powers the DAC on for the alert.
