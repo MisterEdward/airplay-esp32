@@ -1,5 +1,6 @@
 #include "audio_output.h"
 
+#include "audio_alert.h"
 #include "audio_receiver.h"
 #include "audio_resample.h"
 #include "led.h"
@@ -11,6 +12,7 @@
 #include "rtsp_server.h"
 #include <inttypes.h>
 #include <stdlib.h>
+#include <string.h>
 
 // SIDE NOTE; providing power from GPIO pins is capped ~20mA.
 #if CONFIG_I2S_GND_IO >= 0
@@ -90,14 +92,17 @@ static void playback_task(void *arg) {
         play_buf = resample_buf;
       }
       apply_volume(play_buf, play_samples * 2);
+      audio_alert_mix(play_buf, play_samples, OUTPUT_RATE);
       led_audio_feed(play_buf, play_samples);
       i2s_channel_write(tx_handle, play_buf, play_samples * 4, &written,
                         portMAX_DELAY);
       taskYIELD();
     } else {
+      audio_alert_mix(silence, FRAME_SAMPLES, OUTPUT_RATE);
       led_audio_feed(silence, FRAME_SAMPLES);
       i2s_channel_write(tx_handle, silence, (size_t)FRAME_SAMPLES * 4, &written,
                         pdMS_TO_TICKS(10));
+      memset(silence, 0, (size_t)FRAME_SAMPLES * 2 * sizeof(int16_t));
       vTaskDelay(1);
     }
   }

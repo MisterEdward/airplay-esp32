@@ -15,6 +15,7 @@
 #include "ethernet.h"
 #include "ota.h"
 #include "log_stream.h"
+#include "audio_alert.h"
 #include "rtsp_server.h"
 #include "esp_app_desc.h"
 #include "freertos/FreeRTOS.h"
@@ -310,6 +311,72 @@ static esp_err_t system_restart_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+static esp_err_t alert_list_handler(httpd_req_t *req) {
+  char json[160];
+  snprintf(json, sizeof(json),
+           "{\"success\":true,\"sounds\":%s,\"active\":%s}\n",
+           audio_alert_names_json(), audio_alert_is_active() ? "true" : "false");
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+  return ESP_OK;
+}
+
+static esp_err_t alert_play_handler(httpd_req_t *req) {
+  char query[160] = {0};
+  char name[32] = "alarm";
+  char value[16] = {0};
+  int volume = 85;
+  int repeat = 1;
+
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    httpd_query_key_value(query, "name", name, sizeof(name));
+    if (httpd_query_key_value(query, "sound", value, sizeof(value)) == ESP_OK) {
+      strlcpy(name, value, sizeof(name));
+    }
+    if (httpd_query_key_value(query, "volume", value, sizeof(value)) ==
+        ESP_OK) {
+      volume = atoi(value);
+    }
+    if (httpd_query_key_value(query, "repeat", value, sizeof(value)) ==
+        ESP_OK) {
+      repeat = atoi(value);
+    }
+  }
+
+  if (volume < 1) {
+    volume = 1;
+  } else if (volume > 100) {
+    volume = 100;
+  }
+  if (repeat < 1) {
+    repeat = 1;
+  } else if (repeat > 20) {
+    repeat = 20;
+  }
+
+  esp_err_t err =
+      audio_alert_play_name(name, (uint8_t)volume, (uint8_t)repeat);
+  if (err != ESP_OK) {
+    httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Unknown alert sound");
+    return ESP_FAIL;
+  }
+
+  char json[160];
+  snprintf(json, sizeof(json),
+           "{\"success\":true,\"sound\":\"%s\",\"volume\":%d,\"repeat\":%d}\n",
+           name, volume, repeat);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+  return ESP_OK;
+}
+
+static esp_err_t alert_stop_handler(httpd_req_t *req) {
+  audio_alert_stop();
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_sendstr(req, "{\"success\":true}\n");
+  return ESP_OK;
+}
+
 /* ================================================================== */
 /*  SPIFFS File Management API                                         */
 /* ================================================================== */
@@ -581,7 +648,7 @@ esp_err_t web_server_start(uint16_t port) {
   config.max_open_sockets = 3; // Limit to save lwIP socket slots for AirPlay
 #endif
   config.lru_purge_enable = true; // Reclaim stale sockets when all are in use
-  config.max_uri_handlers = 20;   // Room for captive portal + EQ handlers
+  config.max_uri_handlers = 30;   // Room for captive portal + alert + EQ handlers
   config.max_resp_headers = 8;
   config.stack_size = 8192;
 
@@ -633,6 +700,31 @@ esp_err_t web_server_start(uint16_t port) {
                                     .method = HTTP_POST,
                                     .handler = system_restart_handler};
   httpd_register_uri_handler(s_server, &system_restart_uri);
+
+  httpd_uri_t alert_list_uri = {.uri = "/api/alert/list",
+                                .method = HTTP_GET,
+                                .handler = alert_list_handler};
+  httpd_register_uri_handler(s_server, &alert_list_uri);
+
+  httpd_uri_t alert_play_uri = {.uri = "/api/alert/play",
+                                .method = HTTP_GET,
+                                .handler = alert_play_handler};
+  httpd_register_uri_handler(s_server, &alert_play_uri);
+
+  httpd_uri_t alarm_play_uri = {.uri = "/api/alarm/play",
+                                .method = HTTP_GET,
+                                .handler = alert_play_handler};
+  httpd_register_uri_handler(s_server, &alarm_play_uri);
+
+  httpd_uri_t sound_play_uri = {.uri = "/api/sound/play",
+                                .method = HTTP_GET,
+                                .handler = alert_play_handler};
+  httpd_register_uri_handler(s_server, &sound_play_uri);
+
+  httpd_uri_t alert_stop_uri = {.uri = "/api/alert/stop",
+                                .method = HTTP_GET,
+                                .handler = alert_stop_handler};
+  httpd_register_uri_handler(s_server, &alert_stop_uri);
 
   // File management API
   httpd_uri_t fs_upload_uri = {.uri = "/api/fs/upload",

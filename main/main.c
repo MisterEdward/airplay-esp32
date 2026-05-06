@@ -1,4 +1,5 @@
 #include "audio_output.h"
+#include "audio_alert.h"
 #include "audio_receiver.h"
 #include "audio_stream.h"
 #include "buttons.h"
@@ -201,6 +202,7 @@ void app_main(void) {
   spiffs_storage_init();
   log_stream_init();
   ESP_ERROR_CHECK(playback_control_init());
+  ESP_ERROR_CHECK(audio_alert_init());
   led_init();
 
   // Initialize board-specific hardware (includes I2C/SPI bus for display and
