@@ -20,8 +20,6 @@ static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
 
   switch (event) {
   case RTSP_EVENT_CLIENT_CONNECTED:
-    dac_set_power_mode(DAC_POWER_OFF);
-    break;
   case RTSP_EVENT_PAUSED:
     dac_set_power_mode(DAC_POWER_STANDBY);
     break;

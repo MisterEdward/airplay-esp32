@@ -37,6 +37,11 @@
 // and must be discarded rather than played.  10 s is well above the deepest
 // observed AirPlay 2 pre-buffer depth and well below any real seek delta.
 #define POST_FLUSH_STALE_THRESHOLD_US 10000000LL // 10 seconds
+// POST_FLUSH_TIMEOUT_US: maximum duration of the post_flush bypass.  After a
+// seek/flush the phone's pre-buffer window causes frames to appear hundreds of
+// ms early.  We play them immediately for this duration so the user hears audio
+// right away, then revert to normal timing so the anchor can enforce A/V sync.
+#define POST_FLUSH_TIMEOUT_US 500000LL // 500 ms
 
 static const char *TAG = "audio_time";
 // consecutive_early_frames is now a field in audio_timing_t so it resets
@@ -118,27 +123,6 @@ static bool compute_early_us(const audio_timing_t *timing,
   *early_us = (target_ns - now_ns) / 1000LL;
 
   return true;
-}
-
-static void rebase_anchor_to_now(audio_timing_t *timing,
-                                 uint32_t rtp_timestamp,
-                                 sync_mode_t sync_mode) {
-  int64_t now_ns = (int64_t)esp_timer_get_time() * 1000LL;
-  int64_t play_at_ns = now_ns + (int64_t)HARDWARE_OUTPUT_LATENCY_US * 1000LL;
-
-  timing->anchor_rtp_time = rtp_timestamp;
-  timing->anchor_local_time_ns = play_at_ns;
-  switch (sync_mode) {
-  case SYNC_MODE_PTP:
-    timing->anchor_network_time_ns = play_at_ns + ptp_clock_get_offset_ns();
-    break;
-  case SYNC_MODE_NTP:
-    timing->anchor_network_time_ns = play_at_ns + ntp_clock_get_offset_ns();
-    break;
-  default:
-    timing->anchor_network_time_ns = play_at_ns;
-    break;
-  }
 }
 
 void audio_timing_init(audio_timing_t *timing, size_t pending_capacity) {
@@ -389,9 +373,8 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
     // may be stale by hundreds of ms (startup buffer fill delay + pre-buffer
     // depth), so frames appear early or late through no fault of the stream.
     // Enforcing timing here causes silence or cascading re-flushes.
-    // post_flush clears on the first accepted new-position frame.  If that
-    // frame is off-time, we make it the new anchor so the next DMA block does
-    // not briefly output silence.
+    // post_flush clears only when a frame is genuinely on-time, at which point
+    // the anchor has settled and normal timing can re-engage.
     if (timing->anchor_valid && format->sample_rate > 0) {
       int64_t early_us = 0;
       if (compute_early_us(timing, format, hdr->rtp_timestamp, sync_mode,
@@ -401,9 +384,9 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
           // several seconds ahead of the anchor's current position after a
           // seek, so frames appear early through no fault of the stream.
           //
-          // Track the start time for stale-frame detection logs.  Once a
-          // post-flush frame is accepted, rebase timing to that frame so the
-          // next DMA block does not fall back into the normal silence path.
+          // Track the start time so we can exit post_flush after a timeout
+          // rather than requiring early to reach ±TIMING_THRESHOLD_US (which
+          // may never happen if the pre-buffer depth exceeds the threshold).
           if (timing->post_flush_start_us == 0) {
             timing->post_flush_start_us = esp_timer_get_time();
           }
@@ -438,19 +421,20 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
             // buffer will play immediately rather than waiting out the anchor.
             return 0;
           }
-          // Within pre-buffer depth — play immediately and make this frame the
-          // new timing base.  Scrubs are user-driven single-speaker playback;
-          // avoiding an audible gap is more important than preserving the old
-          // anchor's pre-buffer delay.
-          bool on_time = early_us >= -TIMING_THRESHOLD_US &&
-                         early_us <= TIMING_THRESHOLD_US;
-          if (!on_time) {
-            rebase_anchor_to_now(timing, hdr->rtp_timestamp, sync_mode);
+          // Within pre-buffer depth — play and check if we should exit.
+          // Exit post_flush when either:
+          //  1. early is within ±TIMING_THRESHOLD_US (anchor is on-time), or
+          //  2. POST_FLUSH_TIMEOUT_US has elapsed (pre-buffer depth exceeds
+          //     threshold but anchor is stable — let normal timing take over
+          //     so frames are held until their scheduled play point).
+          if ((early_us >= -TIMING_THRESHOLD_US &&
+               early_us <= TIMING_THRESHOLD_US) ||
+              flush_elapsed >= POST_FLUSH_TIMEOUT_US) {
+            ESP_LOGI(TAG, "post_flush done: early=%lld ms, elapsed=%lld ms",
+                     early_us / 1000LL, flush_elapsed / 1000LL);
+            timing->post_flush = false;
+            timing->post_flush_start_us = 0;
           }
-          ESP_LOGI(TAG, "post_flush done: early=%lld ms, elapsed=%lld ms",
-                   early_us / 1000LL, flush_elapsed / 1000LL);
-          timing->post_flush = false;
-          timing->post_flush_start_us = 0;
           timing->consecutive_early_frames = 0;
           timing->consecutive_late_frames = 0;
           // Fall through to play the frame.
