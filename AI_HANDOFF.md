@@ -78,3 +78,13 @@ While audio playback works flawlessly over AirPlay, the absolute volume level on
         *   100% now reaches ES8388 `-6 dB`.
     *   Resulting intent: 50% remains comfortable, while max volume has more headroom.
 *   Verified again with `~/.platformio/penv/bin/pio run -e esp32-a1s`: build succeeds.
+
+**Follow-up Scrub/Connect Artifacts:**
+*   User reported a short weird audio drop after scrubbing and a bass-drop/pop after connecting via AirPlay.
+*   Scrub hypothesis: `post_flush` exited after its timeout while frames were still early, so normal timing briefly inserted silence to catch the anchor.
+*   Fix applied in `main/audio/audio_timing.c`: on the first accepted post-flush frame, rebase the anchor to the current playout position instead of falling into the silence path.
+*   Connect pop hypothesis: the ESP32-A1S board moved ES8388 into standby on `RTSP_EVENT_CLIENT_CONNECTED`, which can wake analog output before stable playback.
+*   Fix applied:
+    *   `components/boards/esp32-a1s/board.c`: keep ES8388 off on client connect; only power on at `RTSP_EVENT_PLAYING`.
+    *   `components/dac_es8388/dac_es8388.c`: mute before ES8388 power transitions and add short settle delays around enable/disable.
+*   Verified with `~/.platformio/penv/bin/pio run -e esp32-a1s`: build succeeds.

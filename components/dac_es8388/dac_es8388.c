@@ -7,6 +7,8 @@
 #include "esp_check.h"
 #include "esp_codec_dev_defaults.h"
 #include "esp_codec_dev_types.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 
 #define TAG "ES8388 DAC"
@@ -153,9 +155,18 @@ static void dac_es8388_set_power_mode(dac_power_mode_t mode) {
 
   bool enable = (mode == DAC_POWER_ON);
   if (enable != s_enabled) {
+    if (s_codec_if->mute) {
+      s_codec_if->mute(s_codec_if, true);
+    }
+    if (!enable) {
+      vTaskDelay(pdMS_TO_TICKS(4));
+    }
+
     s_codec_if->enable(s_codec_if, enable);
     
     if (enable && s_ctrl_if && s_ctrl_if->write_reg) {
+      vTaskDelay(pdMS_TO_TICKS(8));
+
       // Route DAC straight to the output mixers at 0 dB.
       uint8_t mix_vol = 0x80;
       s_ctrl_if->write_reg(s_ctrl_if, 0x27, 1, &mix_vol, 1); // ES8388_DACCONTROL17
