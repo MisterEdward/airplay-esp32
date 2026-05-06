@@ -88,21 +88,16 @@ Add local sound alerts that can be triggered over HTTP and mixed over AirPlay 2 
 
 **Implementation Applied:**
 *   Added `main/audio/audio_alert.c` and `main/audio/audio_alert.h`.
-*   Alerts are synthetic, firmware-builtin sounds: `alarm`, `beep`, `chime`, `bell`.
+*   Alert sound is a single synthetic, firmware-builtin `chime`.
+*   The chime is an original soft Apple Pay-like tone; no Apple audio asset is embedded.
 *   Mixed alerts into the normal I2S output path in `main/audio/audio_output.c`.
 *   If AirPlay is playing, alert audio is added over the current PCM.
 *   If AirPlay is idle, alert audio is mixed over the silence stream and powers the DAC on for the alert.
 *   Added HTTP endpoints in `main/network/web_server.c`:
     *   `GET /api/alert/list`
-    *   `GET /api/alert/play?name=alarm&volume=85&repeat=1`
-    *   `GET /api/alarm/play?name=alarm&volume=85&repeat=1`
-    *   `GET /api/sound/play?name=alarm&volume=85&repeat=1`
+    *   `GET /api/alert/play?name=chime&volume=20&repeat=1`
     *   `GET /api/alert/stop`
-*   Aliases accepted for sound names:
-    *   `alarm` / `siren`
-    *   `beep` / `ping`
-    *   `chime`
-    *   `bell`
+*   Only accepted sound name: `chime`.
 *   Registered `audio_alert_init()` during app startup.
 *   Verified with `~/.platformio/penv/bin/pio run -e esp32-a1s`: build succeeds.
 *   OTA firmware artifact: `.pio/build/esp32-a1s/firmware.bin`.

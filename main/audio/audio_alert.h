@@ -6,10 +6,7 @@
 #include <stdint.h>
 
 typedef enum {
-  AUDIO_ALERT_ALARM = 0,
-  AUDIO_ALERT_BEEP,
-  AUDIO_ALERT_CHIME,
-  AUDIO_ALERT_BELL,
+  AUDIO_ALERT_CHIME = 0,
 } audio_alert_id_t;
 
 typedef struct {

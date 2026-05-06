@@ -323,9 +323,9 @@ static esp_err_t alert_list_handler(httpd_req_t *req) {
 
 static esp_err_t alert_play_handler(httpd_req_t *req) {
   char query[160] = {0};
-  char name[32] = "alarm";
+  char name[32] = "chime";
   char value[16] = {0};
-  int volume = 85;
+  int volume = 20;
   int repeat = 1;
 
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
@@ -648,7 +648,7 @@ esp_err_t web_server_start(uint16_t port) {
   config.max_open_sockets = 3; // Limit to save lwIP socket slots for AirPlay
 #endif
   config.lru_purge_enable = true; // Reclaim stale sockets when all are in use
-  config.max_uri_handlers = 30;   // Room for captive portal + alert + EQ handlers
+  config.max_uri_handlers = 30;   // Room for captive portal + chime + EQ handlers
   config.max_resp_headers = 8;
   config.stack_size = 8192;
 
@@ -710,16 +710,6 @@ esp_err_t web_server_start(uint16_t port) {
                                 .method = HTTP_GET,
                                 .handler = alert_play_handler};
   httpd_register_uri_handler(s_server, &alert_play_uri);
-
-  httpd_uri_t alarm_play_uri = {.uri = "/api/alarm/play",
-                                .method = HTTP_GET,
-                                .handler = alert_play_handler};
-  httpd_register_uri_handler(s_server, &alarm_play_uri);
-
-  httpd_uri_t sound_play_uri = {.uri = "/api/sound/play",
-                                .method = HTTP_GET,
-                                .handler = alert_play_handler};
-  httpd_register_uri_handler(s_server, &sound_play_uri);
 
   httpd_uri_t alert_stop_uri = {.uri = "/api/alert/stop",
                                 .method = HTTP_GET,
