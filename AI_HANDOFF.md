@@ -37,7 +37,7 @@ After successfully connecting and trying to access the device's IP in a browser,
 
 ---
 
-## 3. Investigating Low Audio Volume on ES8388 (CURRENTLY UNSOLVED)
+## 3. Low Audio Volume on ES8388 (FIX APPLIED, NEEDS HARDWARE LISTEN TEST)
 
 **Problem:** 
 While audio playback works flawlessly over AirPlay, the absolute volume level on the 3.5mm earphone jack (`LOUT1`/`ROUT1`) is extremely quiet, even when the volume on the source device (iPhone/Mac) is pushed to 100%.
@@ -49,16 +49,32 @@ While audio playback works flawlessly over AirPlay, the absolute volume level on
     *   *Action:* We injected a fake hardware gain compensation (`hw_gain.pa_gain = -15.0`) into the `es8388_codec_cfg_t` struct in `components/dac_es8388/dac_es8388.c`.
     *   *Outcome:* This merely shifted the volume curve. The digital volume reached its absolute maximum (0dB) prematurely when the phone was at 50% volume. Pushing the phone from 50% to 100% resulted in no volume increase, and the absolute maximum volume was still far too quiet. **This change was reverted.**
 
-2.  **Analog Mixer & Output Overrides (Failed):**
+2.  **Analog Mixer & Output Overrides (Original Attempt Failed):**
     *   *Hypothesis:* The `esp_codec_dev` ES8388 driver initializes the analog mixer and output registers with high attenuation.
     *   *Action:* We examined `es8388_codec.c` inside the ESP-IDF managed components and found that it defaults the analog mixer (`DACCONTROL17`, `DACCONTROL20`) to `-6dB` (`0x90`). It also defaults `LOUT1/ROUT1` (`DACCONTROL24`, `DACCONTROL25`) to `0dB` (`0x1E`).
     *   *Action Taken:* We added manual I2C overrides in `dac_es8388_set_power_mode()` (inside `dac_es8388.c`) right after the codec is enabled:
         *   Overrode Reg `0x11` (DACCONTROL17) and Reg `0x14` (DACCONTROL20) to `0x80` (0dB mixer attenuation).
         *   Overrode Reg `0x2E` (DACCONTROL24) and Reg `0x2F` (DACCONTROL25) to `0x21` (+3dB maximum analog gain for LOUT1/ROUT1).
-    *   *Outcome:* Despite forcing the analog stages to their absolute maximum gain settings, the user reports the 3.5mm headphone output is **still extremely quiet at 100% volume.**
+    *   *Outcome:* This attempt had a register-address bug. It meant to write `DACCONTROL17` and `DACCONTROL20`, but wrote `0x11` and `0x14`. In the local `esp_codec_dev` register map, the correct addresses are `0x27` and `0x2A`.
 
-**Next Steps for the AI Agent:**
-*   The ESP32-A1S AudioKit board has specific hardware routing quirks. Ensure that the I2S digital PCM data being fed to the ES8388 isn't being aggressively scaled down in software *before* it reaches the DAC (check `airplay_get_volume_q15()` or `apply_volume()` in `main/audio/audio_output.c`).
-*   Verify the exact I2S data format (16-bit vs 32-bit). If the ESP32 is sending 16-bit samples but the ES8388 is configured to expect 24-bit or 32-bit words, the samples will be shifted down significantly (e.g., a 16-bit sample read as the top 16 bits of a 32-bit word, or vice-versa, depending on alignment), resulting in massive volume loss.
-*   Check the ES8388 datasheet to ensure there isn't another global analog attenuation register (like an ALC or DRC setting) squashing the signal.
-*   Investigate if the ES8388's internal ADC-to-DAC loopback might be active and interfering with the digital I2S input.
+**Resolution Applied:**
+*   Updated `components/dac_es8388/dac_es8388.c`.
+*   Changed the ES8388 default volume from `-12 dB` to `0 dB`.
+*   Clamped ES8388 volume requests to the codec's supported `-96..0 dB` range.
+*   Corrected mixer override writes to `0x27` / `0x2A`.
+*   Raised both output pairs to `0x21` (`+3 dB`): `LOUT1/ROUT1` and `LOUT2/ROUT2`. This matters because ESP32-A1S board revisions can route the physical jack differently.
+*   Verified with `~/.platformio/penv/bin/pio run -e esp32-a1s`: build succeeds.
+
+**Next Step:**
+*   Flash and listen-test the earphone jack. If it is still too quiet, the remaining likely cause is hardware-level output/load behavior rather than AirPlay scaling or I2S format.
+
+**Follow-up Volume Scale Tuning:**
+*   The first fix made the jack too loud.
+*   Updated `components/dac_es8388/dac_es8388.c` again:
+    *   AirPlay minimum (`-30 dB`, source 0%) now forces ES8388 mute.
+    *   AirPlay volume now uses a piecewise ES8388 curve:
+        *   0% is silent.
+        *   50% stays around ES8388 `-30 dB`.
+        *   100% now reaches ES8388 `-6 dB`.
+    *   Resulting intent: 50% remains comfortable, while max volume has more headroom.
+*   Verified again with `~/.platformio/penv/bin/pio run -e esp32-a1s`: build succeeds.

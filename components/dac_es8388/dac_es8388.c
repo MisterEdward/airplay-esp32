@@ -11,11 +11,20 @@
 
 #define TAG "ES8388 DAC"
 
+#define AIRPLAY_MIN_DB      (-30.0f)
+#define AIRPLAY_MID_DB      (-15.0f)
+#define AIRPLAY_MAX_DB      0.0f
+#define ES8388_MUTED_DB     (-96.0f)
+#define ES8388_MIN_PLAY_DB  (-48.0f)
+#define ES8388_MID_PLAY_DB  (-30.0f)
+#define ES8388_MAX_PLAY_DB  (-6.0f)
+
 static const audio_codec_ctrl_if_t *s_ctrl_if = NULL;
 static const audio_codec_gpio_if_t *s_gpio_if = NULL;
 static const audio_codec_if_t *s_codec_if = NULL;
 static bool s_enabled = false;
-static float s_volume_db = -12.0f;
+static float s_volume_db = 0.0f;
+static bool s_volume_muted = false;
 
 static esp_err_t codec_ret_to_esp(int ret) {
   return ret == ESP_CODEC_DEV_OK ? ESP_OK : ESP_FAIL;
@@ -95,13 +104,45 @@ static esp_err_t dac_es8388_deinit(void) {
     s_ctrl_if = NULL;
   }
   s_enabled = false;
+  s_volume_muted = false;
   return ESP_OK;
 }
 
+static float dac_es8388_map_volume(float airplay_db, bool *mute) {
+  if (airplay_db <= AIRPLAY_MIN_DB) {
+    *mute = true;
+    return ES8388_MUTED_DB;
+  }
+
+  *mute = false;
+  if (airplay_db >= AIRPLAY_MAX_DB) {
+    return ES8388_MAX_PLAY_DB;
+  }
+
+  if (airplay_db <= AIRPLAY_MID_DB) {
+    float normalized =
+        (airplay_db - AIRPLAY_MIN_DB) / (AIRPLAY_MID_DB - AIRPLAY_MIN_DB);
+    return ES8388_MIN_PLAY_DB +
+           normalized * (ES8388_MID_PLAY_DB - ES8388_MIN_PLAY_DB);
+  }
+
+  float normalized =
+      (airplay_db - AIRPLAY_MID_DB) / (AIRPLAY_MAX_DB - AIRPLAY_MID_DB);
+  return ES8388_MID_PLAY_DB +
+         normalized * (ES8388_MAX_PLAY_DB - ES8388_MID_PLAY_DB);
+}
+
 static void dac_es8388_set_volume(float volume_db) {
+  bool muted = false;
+  float codec_db = dac_es8388_map_volume(volume_db, &muted);
   s_volume_db = volume_db;
+  s_volume_muted = muted;
+
   if (s_codec_if != NULL && s_codec_if->set_vol) {
-    s_codec_if->set_vol(s_codec_if, volume_db);
+    s_codec_if->set_vol(s_codec_if, codec_db);
+  }
+  if (s_codec_if != NULL && s_codec_if->mute && s_enabled) {
+    s_codec_if->mute(s_codec_if, muted);
   }
 }
 
@@ -115,23 +156,23 @@ static void dac_es8388_set_power_mode(dac_power_mode_t mode) {
     s_codec_if->enable(s_codec_if, enable);
     
     if (enable && s_ctrl_if && s_ctrl_if->write_reg) {
-      // The default esp_codec_dev driver sets DACCONTROL17/20 to 0x90 (-6dB analog mixer attenuation)
-      // We override it to 0x80 (0dB) to restore 6dB of lost volume.
+      // Route DAC straight to the output mixers at 0 dB.
       uint8_t mix_vol = 0x80;
-      s_ctrl_if->write_reg(s_ctrl_if, 0x11, 1, &mix_vol, 1); // ES8388_DACCONTROL17
-      s_ctrl_if->write_reg(s_ctrl_if, 0x14, 1, &mix_vol, 1); // ES8388_DACCONTROL20
+      s_ctrl_if->write_reg(s_ctrl_if, 0x27, 1, &mix_vol, 1); // ES8388_DACCONTROL17
+      s_ctrl_if->write_reg(s_ctrl_if, 0x2A, 1, &mix_vol, 1); // ES8388_DACCONTROL20
 
-      // The driver defaults LOUT1/ROUT1 to 0x1E (0dB). 
-      // We override to 0x21 (+3dB maximum analog output gain) for the earphone jack.
-      uint8_t out1_vol = 0x21;
-      s_ctrl_if->write_reg(s_ctrl_if, 0x2E, 1, &out1_vol, 1); // ES8388_DACCONTROL24
-      s_ctrl_if->write_reg(s_ctrl_if, 0x2F, 1, &out1_vol, 1); // ES8388_DACCONTROL25
+      // Some ESP32-A1S boards route the jack to OUT2, so boost both pairs.
+      uint8_t out_vol = 0x21;
+      s_ctrl_if->write_reg(s_ctrl_if, 0x2E, 1, &out_vol, 1); // ES8388_DACCONTROL24 LOUT1
+      s_ctrl_if->write_reg(s_ctrl_if, 0x2F, 1, &out_vol, 1); // ES8388_DACCONTROL25 ROUT1
+      s_ctrl_if->write_reg(s_ctrl_if, 0x30, 1, &out_vol, 1); // ES8388_DACCONTROL26 LOUT2
+      s_ctrl_if->write_reg(s_ctrl_if, 0x31, 1, &out_vol, 1); // ES8388_DACCONTROL27 ROUT2
     }
     
     s_enabled = enable;
   }
   if (s_codec_if->mute) {
-    s_codec_if->mute(s_codec_if, !enable);
+    s_codec_if->mute(s_codec_if, !enable || s_volume_muted);
   }
 }
 
