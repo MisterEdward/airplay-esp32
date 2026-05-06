@@ -95,7 +95,7 @@ Add local sound alerts that can be triggered over HTTP and mixed over AirPlay 2 
 *   If AirPlay is idle, alert audio is mixed over the silence stream and powers the DAC on for the alert.
 *   Added HTTP endpoints in `main/network/web_server.c`:
     *   `GET /api/alert/list`
-    *   `GET /api/alert/play?name=chime&volume=20&repeat=1`
+    *   `GET /api/alert/play?name=chime&volume=10&repeat=1`
     *   `GET /api/alert/stop`
 *   Only accepted sound name: `chime`.
 *   Registered `audio_alert_init()` during app startup.

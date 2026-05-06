@@ -325,7 +325,7 @@ static esp_err_t alert_play_handler(httpd_req_t *req) {
   char query[160] = {0};
   char name[32] = "chime";
   char value[16] = {0};
-  int volume = 20;
+  int volume = 10;
   int repeat = 1;
 
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {

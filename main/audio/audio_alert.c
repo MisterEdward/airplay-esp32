@@ -13,7 +13,7 @@
 
 #define TAG "audio_alert"
 
-#define ALERT_DEFAULT_VOLUME 20
+#define ALERT_DEFAULT_VOLUME 10
 #define ALERT_MAX_REPEAT     20
 #define PHASE_BITS           32
 #define SINE_TABLE_SIZE      256
