@@ -11,6 +11,7 @@
 #include "audio_decoder.h"
 #include "audio_output.h"
 #include "audio_receiver_internal.h"
+#include "audio_servo.h"
 #include "audio_stream.h"
 #include "audio_timing.h"
 #include "ptp_clock.h"
@@ -504,6 +505,13 @@ void audio_receiver_seek_flush(void) {
   audio_receiver_flush();
   receiver.timing.post_flush = true;
   receiver.timing.post_flush_start_us = 0; // will be set on first frame
+  // Flush the I2S DMA ring buffer so old pre-seek audio doesn't play out
+  // as audible static/ramp while new-position frames are still in flight.
+  audio_output_flush();
+  // Reset the servo so it starts from 0 ppm instead of ramping from the
+  // pre-seek correction (e.g. -250 ppm → +500 ppm), which is audible as a
+  // pitch "swoop" during the first ~1.6 s after a seek.
+  audio_servo_init();
   // Request that the RTP gate be armed as soon as the next anchor arrives.
   // This covers the forward-seek case where the buffer is already empty by
   // the time SETRATEANCHORTIME arrives, so the seek-detection heuristic
