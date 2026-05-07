@@ -488,6 +488,12 @@ static void handle_get(int socket, rtsp_conn_t *conn, const rtsp_request_t *req,
     plist_dict_string(&p, "pi", "00000000-0000-0000-0000-000000000000");
     plist_dict_string(&p, "name", device_name);
 
+    uint32_t buffered_latency_us = audio_receiver_get_output_latency_us() +
+                                   audio_receiver_get_hardware_latency_us();
+    ESP_LOGI(TAG,
+             "/info: audioFormats=[type96], latency96=0us, latency103=%luus",
+             (unsigned long)buffered_latency_us);
+
     // Audio formats array
     plist_dict_array_begin(&p, "audioFormats");
     plist_dict_begin(&p);
@@ -514,9 +520,7 @@ static void handle_get(int socket, rtsp_conn_t *conn, const rtsp_request_t *req,
     plist_dict_int(&p, "type", 103);
     plist_dict_int(&p, "audioType", 0x64);
     plist_dict_int(&p, "inputLatencyMicros", 0);
-    plist_dict_int(&p, "outputLatencyMicros",
-                   audio_receiver_get_output_latency_us() +
-                       audio_receiver_get_hardware_latency_us());
+    plist_dict_int(&p, "outputLatencyMicros", buffered_latency_us);
     plist_dict_end(&p);
     plist_array_end(&p);
 
@@ -972,6 +976,12 @@ static void handle_setup(int socket, rtsp_conn_t *conn,
           audio_format_t format = {0};
           rtsp_codec_configure(codec_type, &format, sample_rate,
                                samples_per_frame);
+          ESP_LOGI(TAG,
+                   "SETUP stream[%zu]: type=%lld ct=%lld sr=%lld spf=%lld "
+                   "ekey=%zu eiv=%zu shk=%zu",
+                   i, (long long)stream_type, (long long)codec_type,
+                   (long long)sample_rate, (long long)samples_per_frame,
+                   ekey_len, eiv_len, shk_len);
           audio_receiver_set_format(&format);
         }
       }
@@ -1682,7 +1692,7 @@ static void handle_setrateanchortime(int socket, rtsp_conn_t *conn,
       rtp_time = (uint64_t)value;
     }
 
-    ESP_LOGI(TAG, "SETRATEANCHORTIME: secs=%llu, rtp=%llu, rate=%.1f",
+    ESP_LOGI(TAG, "SETRATEANCHORTIME: secs=%llu, rtp=%llu, rate=%.6f",
              (unsigned long long)network_time_secs,
              (unsigned long long)rtp_time, rate);
 
@@ -1702,7 +1712,7 @@ static void handle_setrateanchortime(int socket, rtsp_conn_t *conn,
     audio_output_flush();
     rtsp_events_emit(RTSP_EVENT_PAUSED, NULL);
   } else {
-    ESP_LOGI(TAG, "SETRATEANCHORTIME: rate=%.1f -> RESUMING (was_paused=%d)",
+    ESP_LOGI(TAG, "SETRATEANCHORTIME: rate=%.6f -> RESUMING (was_paused=%d)",
              rate, conn->stream_paused);
     conn->stream_paused = false;
     audio_receiver_set_playing(true);

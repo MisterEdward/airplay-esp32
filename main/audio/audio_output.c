@@ -7,6 +7,7 @@
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
 #include "esp_check.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "rtsp_server.h"
@@ -46,6 +47,54 @@ static volatile bool playback_running = false;
 static TaskHandle_t playback_task_handle = NULL;
 static volatile int source_rate = 44100;
 static volatile bool resample_reinit_needed = false;
+
+// I2S write cadence telemetry (drained by audio_telemetry).
+static portMUX_TYPE write_stats_lock = portMUX_INITIALIZER_UNLOCKED;
+static int64_t last_write_us = 0;
+static uint32_t write_count = 0;
+static uint64_t write_sum_us = 0;
+static uint32_t write_max_us = 0;
+static uint32_t silence_write_count = 0;
+
+static inline void record_i2s_write(bool is_silence) {
+  int64_t now = esp_timer_get_time();
+  portENTER_CRITICAL(&write_stats_lock);
+  if (last_write_us != 0) {
+    int64_t delta = now - last_write_us;
+    if (delta < 0) {
+      delta = 0;
+    }
+    if (delta > 0xFFFFFFFFLL) {
+      delta = 0xFFFFFFFFLL;
+    }
+    write_count++;
+    write_sum_us += (uint64_t)delta;
+    if ((uint32_t)delta > write_max_us) {
+      write_max_us = (uint32_t)delta;
+    }
+  }
+  if (is_silence) {
+    silence_write_count++;
+  }
+  last_write_us = now;
+  portEXIT_CRITICAL(&write_stats_lock);
+}
+
+void audio_output_drain_write_stats(audio_output_write_stats_t *out) {
+  if (!out) {
+    return;
+  }
+  portENTER_CRITICAL(&write_stats_lock);
+  out->writes = write_count;
+  out->avg_us = write_count ? (uint32_t)(write_sum_us / write_count) : 0;
+  out->max_us = write_max_us;
+  out->silence_writes = silence_write_count;
+  write_count = 0;
+  write_sum_us = 0;
+  write_max_us = 0;
+  silence_write_count = 0;
+  portEXIT_CRITICAL(&write_stats_lock);
+}
 
 static void apply_volume(int16_t *buf, size_t n) {
 #ifndef CONFIG_DAC_CONTROLS_VOLUME
@@ -96,12 +145,14 @@ static void playback_task(void *arg) {
       led_audio_feed(play_buf, play_samples);
       i2s_channel_write(tx_handle, play_buf, play_samples * 4, &written,
                         portMAX_DELAY);
+      record_i2s_write(false);
       taskYIELD();
     } else {
       audio_alert_mix(silence, FRAME_SAMPLES, OUTPUT_RATE);
       led_audio_feed(silence, FRAME_SAMPLES);
       i2s_channel_write(tx_handle, silence, (size_t)FRAME_SAMPLES * 4, &written,
                         pdMS_TO_TICKS(10));
+      record_i2s_write(true);
       memset(silence, 0, (size_t)FRAME_SAMPLES * 2 * sizeof(int16_t));
       vTaskDelay(1);
     }
@@ -204,6 +255,8 @@ void audio_output_flush(void) {
 
 void audio_output_set_source_rate(int rate) {
   if (rate > 0 && rate != source_rate) {
+    ESP_LOGI(TAG, "Source rate changed: %d -> %d Hz (output=%d Hz)",
+             source_rate, rate, OUTPUT_RATE);
     source_rate = rate;
     resample_reinit_needed = true;
   }

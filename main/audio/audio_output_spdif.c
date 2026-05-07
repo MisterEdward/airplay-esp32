@@ -322,3 +322,9 @@ void audio_output_set_source_rate(int rate) {
     resample_reinit_needed = true;
   }
 }
+
+void audio_output_drain_write_stats(audio_output_write_stats_t *out) {
+  if (out) {
+    *out = (audio_output_write_stats_t){0};
+  }
+}

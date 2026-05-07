@@ -31,6 +31,13 @@ typedef struct __attribute__((packed)) {
 #define AUDIO_BUFFER_SIZE (MAX_RING_BUFFER_FRAMES * BYTES_PER_FRAME)
 
 typedef struct {
+  uint32_t samples;     // Number of depth samples accumulated
+  uint32_t sum;         // Sum of all samples (frames)
+  uint32_t min;         // Minimum depth observed (frames), UINT32_MAX if empty
+  uint32_t max;         // Maximum depth observed (frames)
+} audio_buffer_depth_stats_t;
+
+typedef struct {
   uint8_t *pool;                // Pre-allocated frame data in PSRAM
   uint16_t *sorted;             // Slot indices sorted by RTP timestamp
   uint16_t *free_stack;         // Stack of free slot indices
@@ -43,6 +50,9 @@ typedef struct {
   uint8_t *frame_buffer;        // Temp assembly buffer
   int16_t *decode_buffer;       // Decode buffer pointer
   size_t decode_capacity_samples;
+
+  // Depth telemetry (sampled by consumer in audio_timing_read).
+  audio_buffer_depth_stats_t depth_stats;
 } audio_buffer_t;
 
 esp_err_t audio_buffer_init(audio_buffer_t *buffer);
@@ -63,3 +73,18 @@ bool audio_buffer_queue_decoded(audio_buffer_t *buffer, audio_stats_t *stats,
  * buffer without removing it.  Returns false if the buffer is empty.
  */
 bool audio_buffer_oldest_timestamp(audio_buffer_t *buffer, uint32_t *timestamp);
+
+/**
+ * Record one buffer-depth sample. Cheap; safe to call from the consumer task
+ * on every DMA tick.  Used by the telemetry task to compute min/max/avg over
+ * the last reporting window.
+ */
+void audio_buffer_sample_depth(audio_buffer_t *buffer);
+
+/**
+ * Snapshot and reset the depth-stats accumulator. Returns the stats observed
+ * since the last call (or since init).  The accumulator is cleared so the
+ * next window starts fresh.
+ */
+void audio_buffer_drain_depth_stats(audio_buffer_t *buffer,
+                                    audio_buffer_depth_stats_t *out);

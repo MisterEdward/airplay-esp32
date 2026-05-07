@@ -171,11 +171,18 @@ size_t audio_resample_max_output(size_t in_frames) {
 
 #else /* CONFIG_OUTPUT_SAMPLE_RATE_HZ == 44100 — no resampling needed */
 
+#include "esp_log.h"
+
+static const char *TAG = "audio_resample";
+
 bool audio_resample_init(uint32_t input_rate, uint32_t output_rate,
                          int channels) {
-  (void)input_rate;
-  (void)output_rate;
   (void)channels;
+  if (input_rate != output_rate) {
+    ESP_LOGW(TAG,
+             "Resampler is compiled out for 44100 Hz output: input=%lu output=%lu",
+             (unsigned long)input_rate, (unsigned long)output_rate);
+  }
   return true;
 }
 

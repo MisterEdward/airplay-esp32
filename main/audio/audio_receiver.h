@@ -57,6 +57,18 @@ typedef struct {
   uint32_t late_frames;
   uint16_t last_seq;
   uint32_t last_timestamp;
+  // Realtime UDP (type=96) telemetry — populated by audio_stream_realtime.
+  uint32_t seq_gap_events;              // Number of detected sequence gaps
+  uint32_t seq_gap_total_packets;       // Sum of gap sizes (missing packets)
+  uint32_t max_seq_gap;                 // Largest single gap observed
+  uint32_t nack_requests_sent;          // NACK packets dispatched
+  uint32_t nack_send_errors;            // sendto errors when transmitting NACKs
+  uint32_t retransmit_packets_received; // 0x56-wrapped retransmit RTP packets
+  // RFC 3550 inter-arrival jitter, in RTP timestamp units, fixed-point Q4
+  // (multiply by 1/16 to get the standard J value). Updated only on in-order,
+  // non-retransmit packets.
+  uint32_t arrival_jitter_q4;
+  int32_t last_rtp_ts_delta; // Last RTP timestamp delta between in-order pkts
 } audio_stats_t;
 
 /**
@@ -228,3 +240,23 @@ void audio_receiver_stop_buffered_only(void);
  * Set the stream type (realtime vs buffered)
  */
 void audio_receiver_set_stream_type(audio_stream_type_t type);
+
+/**
+ * Get the active stream type (or AUDIO_STREAM_NONE if no stream selected).
+ */
+audio_stream_type_t audio_receiver_get_active_stream_type(void);
+
+/**
+ * Drain and reset the buffer-depth telemetry accumulator.  Provides min/max/
+ * mean buffer depth (in frames) sampled over the last reporting window.
+ */
+void audio_receiver_drain_buffer_depth(uint32_t *samples, uint32_t *min,
+                                       uint32_t *max, uint32_t *avg);
+
+/**
+ * Drain and reset the drift telemetry accumulator.  Provides the most-negative
+ * (most "behind anchor") and most-positive (most "early") values of early_us
+ * sampled in audio_timing_read since the last call.
+ */
+void audio_receiver_drain_drift(int32_t *min_us, int32_t *max_us,
+                                uint32_t *samples);

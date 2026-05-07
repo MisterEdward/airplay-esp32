@@ -491,6 +491,20 @@ void ptp_clock_get_stats(ptp_stats_t *stats) {
           : 0;
   stats->filtered_offset_ns = ptp.filtered_offset_ns;
 
+  // Max deviation from filtered (median) offset across the sample buffer.
+  int64_t max_dev = 0;
+  for (int i = 0; i < ptp.sample_fill; i++) {
+    int64_t dev = ptp.samples[i] - ptp.filtered_offset_ns;
+    if (dev < 0) {
+      dev = -dev;
+    }
+    if (dev > max_dev) {
+      max_dev = dev;
+    }
+  }
+  stats->max_dev_ns = max_dev;
+  stats->locked = ptp.locked;
+
   if (ptp.locked && ptp.lock_start_ms > 0) {
     uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
     stats->lock_time_ms = now_ms - ptp.lock_start_ms;

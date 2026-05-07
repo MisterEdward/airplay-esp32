@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -7,6 +8,13 @@
 #include "esp_log.h"
 
 static const char *TAG = "audio_buf";
+
+static inline void depth_stats_reset(audio_buffer_depth_stats_t *s) {
+  s->samples = 0;
+  s->sum = 0;
+  s->min = UINT32_MAX;
+  s->max = 0;
+}
 
 /* ---------- helpers for the slot pool ---------- */
 
@@ -166,6 +174,8 @@ esp_err_t audio_buffer_init(audio_buffer_t *buffer) {
   buffer->decode_buffer =
       (int16_t *)(buffer->frame_buffer + sizeof(audio_frame_header_t));
   buffer->decode_capacity_samples = MAX_SAMPLES_PER_FRAME;
+
+  depth_stats_reset(&buffer->depth_stats);
 
   ESP_LOGI(TAG, "Sorted buffer created: %d slots × %zu bytes = %zu bytes",
            buffer->capacity, buffer->slot_size,
@@ -342,6 +352,37 @@ bool audio_buffer_oldest_timestamp(audio_buffer_t *buffer,
   *timestamp = slot_timestamp(buffer, buffer->sorted[0]);
   portEXIT_CRITICAL(&buffer->lock);
   return true;
+}
+
+/* ---------- depth telemetry ---------- */
+
+void audio_buffer_sample_depth(audio_buffer_t *buffer) {
+  if (!buffer) {
+    return;
+  }
+  portENTER_CRITICAL(&buffer->lock);
+  uint32_t depth = (uint32_t)buffer->count;
+  audio_buffer_depth_stats_t *s = &buffer->depth_stats;
+  s->samples++;
+  s->sum += depth;
+  if (depth < s->min) {
+    s->min = depth;
+  }
+  if (depth > s->max) {
+    s->max = depth;
+  }
+  portEXIT_CRITICAL(&buffer->lock);
+}
+
+void audio_buffer_drain_depth_stats(audio_buffer_t *buffer,
+                                    audio_buffer_depth_stats_t *out) {
+  if (!buffer || !out) {
+    return;
+  }
+  portENTER_CRITICAL(&buffer->lock);
+  *out = buffer->depth_stats;
+  depth_stats_reset(&buffer->depth_stats);
+  portEXIT_CRITICAL(&buffer->lock);
 }
 
 /* ---------- queue decoded (splits large frames into chunks) ---------- */

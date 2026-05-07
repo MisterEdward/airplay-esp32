@@ -1,4 +1,5 @@
 #include <inttypes.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,7 +14,21 @@
 #define HARDWARE_OUTPUT_LATENCY_US    46000  // ~46ms I2S DMA latency
 #define MIN_STARTUP_FRAMES            4
 #define DRIFT_ADJUST_THRESHOLD_FRAMES 2
-#define TIMING_THRESHOLD_US           40000 // 40ms early/late threshold
+#define TIMING_THRESHOLD_US           40000 // 40ms early threshold (legacy)
+// Early threshold: how far in the future a frame can be before we hold it
+// pending and emit silence. Kept tight (40ms) because relaxing it would let
+// frames play ahead of their anchor, introducing audible A/V drift.
+#define TIMING_THRESHOLD_EARLY_US 40000
+// Late threshold: how far past its anchor a frame can be and still play.
+// Wider than the early threshold because WiFi-induced i2s_channel_write stalls
+// (observed 30-50ms in telemetry on the realtime UDP path) shift the read
+// point past the anchor temporarily — dropping those frames produces audible
+// silence.  But the threshold can't be too wide either: once drift accumulates
+// it persists indefinitely (the I2S clock is the master, we can't speed up
+// playback), creating a perceptible A/V delay on video sources.  60ms absorbs
+// the typical stall while keeping steady-state drift bounded enough to stay
+// imperceptible against video.
+#define TIMING_THRESHOLD_LATE_US  60000
 // If a frame is late by more than this, flush the whole buffer at once
 // instead of draining one frame per DMA callback (which would cause seconds
 // of silence while thousands of stale frames are individually dropped).
@@ -42,6 +57,14 @@
 // ms early.  We play them immediately for this duration so the user hears audio
 // right away, then revert to normal timing so the anchor can enforce A/V sync.
 #define POST_FLUSH_TIMEOUT_US 500000LL // 500 ms
+// COMPUTE_EARLY_SANITY_LIMIT_US: if computed early_us exceeds this magnitude
+// (5 minutes), the math is wrong — typically caused by anchor_network_time_ns
+// from a different PTP master combined with a stale ptp offset.  Treat the
+// result as "not computable" so audio_timing_read falls through to the
+// post_flush bypass / no-anchor path instead of triggering a bulk-flush loop.
+// 5 minutes is far above any legitimate buffer depth (~21 s for buf103) and
+// far below the magnitudes seen on a master mismatch (>500_000 s).
+#define COMPUTE_EARLY_SANITY_LIMIT_US (300LL * 1000000LL)
 
 static const char *TAG = "audio_time";
 // consecutive_early_frames is now a field in audio_timing_t so it resets
@@ -122,6 +145,15 @@ static bool compute_early_us(const audio_timing_t *timing,
   int64_t now_ns = (int64_t)esp_timer_get_time() * 1000LL;
   *early_us = (target_ns - now_ns) / 1000LL;
 
+  // Sanity: a result wildly outside any plausible buffer depth means the
+  // anchor's clock universe doesn't match ours (typically: PTP master changed
+  // but ptp_offset is still locked to the old master).  Refuse to answer so
+  // audio_timing_read doesn't bulk-flush in a loop.
+  if (*early_us > COMPUTE_EARLY_SANITY_LIMIT_US ||
+      *early_us < -COMPUTE_EARLY_SANITY_LIMIT_US) {
+    return false;
+  }
+
   return true;
 }
 
@@ -133,6 +165,8 @@ void audio_timing_init(audio_timing_t *timing, size_t pending_capacity) {
   memset(timing, 0, sizeof(*timing));
   timing->output_latency_us = DEFAULT_BUFFER_LATENCY_US;
   timing->playing = true;
+  timing->drift_min_us = INT32_MAX;
+  timing->drift_max_us = INT32_MIN;
 
   if (pending_capacity > 0) {
     timing->pending_frame = (uint8_t *)malloc(pending_capacity);
@@ -158,6 +192,28 @@ void audio_timing_reset(audio_timing_t *timing) {
   timing->post_flush_start_us = 0;
   timing->deferred_flush_pending = false;
   timing->flush_until_ts = 0;
+  timing->drift_min_us = INT32_MAX;
+  timing->drift_max_us = INT32_MIN;
+  timing->drift_samples = 0;
+}
+
+void audio_timing_drain_drift(audio_timing_t *timing, int32_t *min_us,
+                              int32_t *max_us, uint32_t *samples) {
+  if (!timing) {
+    if (min_us) *min_us = 0;
+    if (max_us) *max_us = 0;
+    if (samples) *samples = 0;
+    return;
+  }
+  uint32_t s = timing->drift_samples;
+  int32_t mn = (s > 0) ? timing->drift_min_us : 0;
+  int32_t mx = (s > 0) ? timing->drift_max_us : 0;
+  timing->drift_min_us = INT32_MAX;
+  timing->drift_max_us = INT32_MIN;
+  timing->drift_samples = 0;
+  if (min_us) *min_us = mn;
+  if (max_us) *max_us = mx;
+  if (samples) *samples = s;
 }
 
 void audio_timing_set_format(audio_timing_t *timing,
@@ -243,6 +299,7 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
   }
 
   const audio_format_t *format = &stream->format;
+  audio_buffer_sample_depth(buffer);
   int buffered_frames = audio_buffer_get_frame_count(buffer);
 
   // Wait for enough buffer before starting
@@ -379,6 +436,18 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       int64_t early_us = 0;
       if (compute_early_us(timing, format, hdr->rtp_timestamp, sync_mode,
                            &early_us)) {
+        // Drift telemetry: track per-window min/max of early_us so the
+        // telemetry task can show actual A/V skew.  Saturate to int32 range.
+        int32_t early_clamped = (early_us > INT32_MAX) ? INT32_MAX
+                              : (early_us < INT32_MIN) ? INT32_MIN
+                                                       : (int32_t)early_us;
+        if (early_clamped < timing->drift_min_us) {
+          timing->drift_min_us = early_clamped;
+        }
+        if (early_clamped > timing->drift_max_us) {
+          timing->drift_max_us = early_clamped;
+        }
+        timing->drift_samples++;
         if (timing->post_flush) {
           // Bypass: play regardless of early/late — the phone pre-buffers
           // several seconds ahead of the anchor's current position after a
@@ -427,8 +496,8 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
           //  2. POST_FLUSH_TIMEOUT_US has elapsed (pre-buffer depth exceeds
           //     threshold but anchor is stable — let normal timing take over
           //     so frames are held until their scheduled play point).
-          if ((early_us >= -TIMING_THRESHOLD_US &&
-               early_us <= TIMING_THRESHOLD_US) ||
+          if ((early_us >= -TIMING_THRESHOLD_LATE_US &&
+               early_us <= TIMING_THRESHOLD_EARLY_US) ||
               flush_elapsed >= POST_FLUSH_TIMEOUT_US) {
             ESP_LOGI(TAG, "post_flush done: early=%lld ms, elapsed=%lld ms",
                      early_us / 1000LL, flush_elapsed / 1000LL);
@@ -438,7 +507,7 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
           timing->consecutive_early_frames = 0;
           timing->consecutive_late_frames = 0;
           // Fall through to play the frame.
-        } else if (early_us > TIMING_THRESHOLD_US) {
+        } else if (early_us > TIMING_THRESHOLD_EARLY_US) {
           timing->consecutive_early_frames++;
 
           // If we have had an implausibly long run of early frames the anchor
@@ -459,11 +528,13 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
             // This is the normal path for pre-buffered audio after a pause.
             static int early_count = 0;
             early_count++;
-            if (early_count % 100 == 1) {
-              ESP_LOGD(TAG,
-                       "Frame too early #%d: %lld ms, buffered=%d, pending=%d",
-                       early_count, early_us / 1000LL, buffered_frames,
-                       timing->pending_valid ? 1 : 0);
+            if (timing->consecutive_early_frames == 1 ||
+                early_count % 100 == 1) {
+              ESP_LOGI(TAG,
+                       "Frame too early: early=%lld ms consecutive=%d "
+                       "buffered=%d pending=%d",
+                       early_us / 1000LL, timing->consecutive_early_frames,
+                       buffered_frames, timing->pending_valid ? 1 : 0);
             }
             if (!from_pending && timing->pending_frame &&
                 item_size <= timing->pending_frame_capacity) {
@@ -475,7 +546,7 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
             memset(out, 0, samples * channels * sizeof(int16_t));
             return samples;
           }
-        } else if (early_us < -TIMING_THRESHOLD_US) {
+        } else if (early_us < -TIMING_THRESHOLD_LATE_US) {
           // Reset consecutive early counter on late/normal frames
           timing->consecutive_early_frames = 0;
           timing->consecutive_late_frames++;

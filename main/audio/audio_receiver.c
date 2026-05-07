@@ -27,6 +27,15 @@ static audio_receiver_state_t receiver = {0};
 
 static void audio_receiver_reset_stats(void) {
   memset(&receiver.stats, 0, sizeof(receiver.stats));
+  // Reset per-receiver jitter tracking too so the first packet of a new
+  // session doesn't compute a multi-second arrival delta against the previous
+  // session's last_arrival_local_us (showing as a huge fake jitter spike).
+  receiver.last_arrival_local_us = 0;
+  receiver.last_arrival_rtp_ts = 0;
+  receiver.jitter_initialised = false;
+  // Forget the last seen PTP master so the first anchor of a new session
+  // doesn't trigger a false "master changed" event.
+  receiver.last_anchor_clock_id = 0;
 }
 
 static void audio_receiver_reset_blocks(void) {
@@ -130,6 +139,12 @@ void audio_receiver_set_format(const audio_format_t *format) {
   receiver.realtime_stream->format = *format;
   receiver.buffered_stream->format = *format;
 
+  ESP_LOGI(TAG,
+           "Audio format: codec=%s sr=%d ch=%d bits=%d frame=%d maxspf=%lu",
+           format->codec, format->sample_rate, format->channels,
+           format->bits_per_sample, format->frame_size,
+           (unsigned long)format->max_samples_per_frame);
+
   audio_decoder_destroy(receiver.decoder);
   receiver.decoder = NULL;
 
@@ -179,6 +194,35 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
   if (!receiver.stream) {
     return;
   }
+
+  // Detect a PTP master change.  AirPlay 2 senders include a non-zero
+  // networkTimeTimelineID (clock_id) in SETRATEANCHORTIME / 0xD7 timing
+  // packets.  When the sender switches (e.g. iPhone disconnects and Mac
+  // takes over, or iPhone-mirroring-to-Mac creates a chained AirPlay session
+  // with a new master) the clock_id changes.  Without resetting PTP here,
+  // ptp_clock_get_offset_ns() still reflects the lock to the previous master
+  // while anchor_network_time_ns now references the new master's PTP timeline
+  // — compute_early_us then produces nonsense (observed: 511_452 seconds
+  // early), which on the post_flush path triggers a runaway bulk-flush loop
+  // and audio cuts out within half a second.
+  if (clock_id != 0 && receiver.last_anchor_clock_id != 0 &&
+      clock_id != receiver.last_anchor_clock_id) {
+    ESP_LOGW(TAG,
+             "PTP master changed (clock_id %llu -> %llu) — clearing PTP lock "
+             "and invalidating anchor; falling back to local timing until "
+             "re-lock",
+             (unsigned long long)receiver.last_anchor_clock_id,
+             (unsigned long long)clock_id);
+    ptp_clock_clear();
+    audio_buffer_flush(&receiver.buffer);
+    audio_timing_reset(&receiver.timing);
+    receiver.timing.post_flush = true;
+    receiver.timing.post_flush_start_us = 0;
+    receiver.arm_gate_on_next_anchor = false;
+    receiver.discard_before_rtp_valid = false;
+    receiver.discard_above_rtp_valid = false;
+  }
+  receiver.last_anchor_clock_id = clock_id;
 
   // Detect a seek where the buffer content is far displaced from the new
   // anchor position.  Threshold is 5 seconds of samples — large enough to
@@ -491,4 +535,34 @@ void audio_receiver_pause(void) {
 
 uint16_t audio_receiver_get_buffered_port(void) {
   return receiver.buffered_port;
+}
+
+audio_stream_type_t audio_receiver_get_active_stream_type(void) {
+  if (!receiver.stream || !receiver.stream->running) {
+    return AUDIO_STREAM_NONE;
+  }
+  return receiver.stream->type;
+}
+
+void audio_receiver_drain_drift(int32_t *min_us, int32_t *max_us,
+                                uint32_t *samples) {
+  audio_timing_drain_drift(&receiver.timing, min_us, max_us, samples);
+}
+
+void audio_receiver_drain_buffer_depth(uint32_t *samples, uint32_t *min_out,
+                                       uint32_t *max_out, uint32_t *avg_out) {
+  audio_buffer_depth_stats_t s;
+  audio_buffer_drain_depth_stats(&receiver.buffer, &s);
+  if (samples) {
+    *samples = s.samples;
+  }
+  if (min_out) {
+    *min_out = s.samples ? s.min : 0;
+  }
+  if (max_out) {
+    *max_out = s.max;
+  }
+  if (avg_out) {
+    *avg_out = s.samples ? (s.sum / s.samples) : 0;
+  }
 }

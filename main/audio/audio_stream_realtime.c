@@ -139,9 +139,11 @@ static void send_resend_request(audio_receiver_state_t *state,
                        sizeof(state->client_control_addr));
   if (ret < 0) {
     state->last_resend_error_time_us = now;
+    state->stats.nack_send_errors++;
     ESP_LOGD(TAG, "NACK sendto failed: %d", errno);
   } else {
     state->last_resend_error_time_us = 0;
+    state->stats.nack_requests_sent++;
     ESP_LOGD(TAG, "NACK sent: seq=%u count=%u", first_seq, count);
   }
 }
@@ -178,6 +180,7 @@ static bool realtime_receive_packet(audio_stream_t *stream, uint8_t *packet,
   if (is_retransmit) {
     rtp_data += 4;
     rtp_len -= 4;
+    state->stats.retransmit_packets_received++;
   }
 
   uint16_t seq = 0;
@@ -203,10 +206,48 @@ static bool realtime_receive_packet(audio_stream_t *stream, uint8_t *packet,
         }
         if (gap > 0 && gap < MAX_RESEND_GAP) {
           state->stats.packets_dropped += gap;
+          state->stats.seq_gap_events++;
+          state->stats.seq_gap_total_packets += (uint32_t)gap;
+          if ((uint32_t)gap > state->stats.max_seq_gap) {
+            state->stats.max_seq_gap = (uint32_t)gap;
+          }
           send_resend_request(state, expected_seq, (uint16_t)gap);
         }
       }
     }
+
+    /* RFC 3550 inter-arrival jitter (in RTP timestamp units, fixed-point Q4).
+       D(i, i-1) = (Rj - Ri) - (Sj - Si)
+         Rj/Ri: receiver wall-clock (in same units as RTP, i.e. samples)
+         Sj/Si: RTP timestamps
+       J = J + (|D| - J) / 16  →  store J*16 to keep one bit of fraction. */
+    int64_t now_us = esp_timer_get_time();
+    int sample_rate = stream->format.sample_rate;
+    if (sample_rate <= 0) {
+      sample_rate = 44100;
+    }
+    int32_t rtp_ts_delta = (int32_t)(timestamp - state->last_arrival_rtp_ts);
+    if (state->jitter_initialised) {
+      int64_t arrival_delta_us = now_us - state->last_arrival_local_us;
+      int64_t arrival_delta_samples =
+          (arrival_delta_us * sample_rate) / 1000000LL;
+      int64_t d = arrival_delta_samples - (int64_t)rtp_ts_delta;
+      if (d < 0) {
+        d = -d;
+      }
+      /* J*16 += |D| - J  (i.e. drop the /16 since we store J*16). */
+      int32_t jq4 = (int32_t)state->stats.arrival_jitter_q4;
+      jq4 += (int32_t)d - (jq4 >> 4);
+      if (jq4 < 0) {
+        jq4 = 0;
+      }
+      state->stats.arrival_jitter_q4 = (uint32_t)jq4;
+      state->stats.last_rtp_ts_delta = rtp_ts_delta;
+    } else {
+      state->jitter_initialised = true;
+    }
+    state->last_arrival_local_us = now_us;
+    state->last_arrival_rtp_ts = timestamp;
 
     state->stats.last_seq = seq;
     state->stats.last_timestamp = timestamp;

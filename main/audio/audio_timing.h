@@ -48,6 +48,12 @@ typedef struct {
   // mutex (write flush_until_ts first, arm bool second; read bool first).
   bool deferred_flush_pending;
   uint32_t flush_until_ts;
+  // Drift telemetry: most-negative early_us seen since last drain.
+  // Sampled in audio_timing_read on every frame that has a valid early_us
+  // computation.  drift_min_us is signed: negative means "behind anchor".
+  int32_t drift_min_us;
+  int32_t drift_max_us;
+  uint32_t drift_samples;
 } audio_timing_t;
 
 void audio_timing_init(audio_timing_t *timing, size_t pending_capacity);
@@ -63,6 +69,16 @@ void audio_timing_set_anchor(audio_timing_t *timing,
                              const audio_format_t *format, uint64_t clock_id,
                              uint64_t network_time_ns, uint32_t rtp_time);
 void audio_timing_set_playing(audio_timing_t *timing, bool playing);
+
+/**
+ * Drain and reset the drift telemetry accumulator.  Returns the most negative
+ * (most "behind anchor") and most positive (most "early") early_us values
+ * observed since the last call, plus the number of samples in the window.
+ * NB: not thread-safe vs. the audio task; small inaccuracies on the boundary
+ * are acceptable for telemetry.
+ */
+void audio_timing_drain_drift(audio_timing_t *timing, int32_t *min_us,
+                              int32_t *max_us, uint32_t *samples);
 size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
                          const audio_stream_t *stream, audio_stats_t *stats,
                          int16_t *out, size_t samples);

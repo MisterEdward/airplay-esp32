@@ -54,6 +54,25 @@ typedef struct {
   bool retransmit_enabled;                // True when client address is set
   int64_t last_resend_error_time_us;      // Backoff timer on sendto failure
 
+  // RFC 3550 inter-arrival jitter tracking (realtime UDP path).
+  // last_arrival_local_us: esp_timer time when previous in-order packet arrived.
+  // last_arrival_rtp_ts:   RTP timestamp of that previous packet.
+  // jitter_initialised:    false until two consecutive packets observed.
+  int64_t last_arrival_local_us;
+  uint32_t last_arrival_rtp_ts;
+  bool jitter_initialised;
+
+  // PTP master tracking: clock_id from the most recent anchor.  When a new
+  // anchor arrives with a different clock_id (sender switched, e.g. iPhone ->
+  // Mac), the old PTP offset is stale relative to the new master's clock and
+  // compute_early_us produces nonsense (anchor_network_time_ns from the new
+  // master minus offset locked to the old master).  Detecting the change here
+  // lets us force ptp_clock_clear() so the slave re-locks to the new master,
+  // and during the re-lock window we fall back to SYNC_MODE_NONE (local
+  // anchor_local_time_ns) which is always correct.  Zero is reserved for
+  // AirPlay 1 NTP-style anchors that don't carry a clock_id.
+  uint64_t last_anchor_clock_id;
+
   // Post-seek RTP gates: together they form a window [discard_before_rtp,
   // discard_above_rtp] around the new anchor.  Frames outside the window are
   // discarded in audio_stream_process_frame before they enter the ring buffer,

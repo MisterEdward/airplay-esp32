@@ -55,6 +55,8 @@ typedef struct {
   int64_t last_offset_ns;     // Last measured offset
   int64_t filtered_offset_ns; // Filtered/averaged offset
   uint32_t lock_time_ms;      // Time since lock achieved (0 if not locked)
+  int64_t max_dev_ns;         // Max deviation from median across sample buffer
+  bool locked;                // Current lock state
 } ptp_stats_t;
 
 void ptp_clock_get_stats(ptp_stats_t *stats);

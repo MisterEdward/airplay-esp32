@@ -48,3 +48,17 @@ void audio_output_set_sample_rate(uint32_t rate);
  * The resampler is re-initialized if the rate changes.
  */
 void audio_output_set_source_rate(int rate);
+
+/**
+ * I2S write-cadence telemetry: time between successive i2s_channel_write
+ * calls in the playback task.  Useful for diagnosing realtime UDP playout
+ * stalls.  Drains and resets the accumulator on read.
+ */
+typedef struct {
+  uint32_t writes;       // Number of i2s writes in the window
+  uint32_t avg_us;       // Mean inter-write interval (us)
+  uint32_t max_us;       // Largest inter-write interval (us)
+  uint32_t silence_writes; // Writes that emitted silence (no source samples)
+} audio_output_write_stats_t;
+
+void audio_output_drain_write_stats(audio_output_write_stats_t *out);
