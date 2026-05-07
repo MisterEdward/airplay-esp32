@@ -260,3 +260,9 @@ void audio_receiver_drain_buffer_depth(uint32_t *samples, uint32_t *min,
  */
 void audio_receiver_drain_drift(int32_t *min_us, int32_t *max_us,
                                 uint32_t *samples);
+
+/**
+ * Read the smoothed drift signal that the rate servo uses as its setpoint.
+ * Updated on every frame in audio_timing_read; non-destructive read.
+ */
+int32_t audio_receiver_get_smoothed_drift_us(void);

@@ -4,6 +4,7 @@ set( SRC_FILES
     "settings.c"
     "audio/audio_receiver.c"
     "audio/audio_alert.c"
+    "audio/audio_servo.c"
     "audio/audio_telemetry.c"
     "audio/chime_pcm.c"
     "audio/audio_stream.c"

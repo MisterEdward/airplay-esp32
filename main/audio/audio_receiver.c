@@ -549,6 +549,10 @@ void audio_receiver_drain_drift(int32_t *min_us, int32_t *max_us,
   audio_timing_drain_drift(&receiver.timing, min_us, max_us, samples);
 }
 
+int32_t audio_receiver_get_smoothed_drift_us(void) {
+  return audio_timing_get_smoothed_drift_us(&receiver.timing);
+}
+
 void audio_receiver_drain_buffer_depth(uint32_t *samples, uint32_t *min_out,
                                        uint32_t *max_out, uint32_t *avg_out) {
   audio_buffer_depth_stats_t s;

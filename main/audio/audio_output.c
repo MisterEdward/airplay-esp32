@@ -3,6 +3,7 @@
 #include "audio_alert.h"
 #include "audio_receiver.h"
 #include "audio_resample.h"
+#include "audio_servo.h"
 #include "led.h"
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
@@ -109,15 +110,21 @@ static void playback_task(void *arg) {
   int16_t *pcm = malloc((size_t)(FRAME_SAMPLES + 1) * 2 * sizeof(int16_t));
   int16_t *silence = calloc((size_t)FRAME_SAMPLES * 2, sizeof(int16_t));
   int16_t *resample_buf = malloc(MAX_RESAMPLE_FRAMES * 2 * sizeof(int16_t));
-  if (!pcm || !silence || !resample_buf) {
+  // Servo output buffer.  Worst case the linear-interp servo emits in_frames
+  // outputs (rate near 1.0); sized identically to resample_buf for headroom.
+  int16_t *servo_buf = malloc(MAX_RESAMPLE_FRAMES * 2 * sizeof(int16_t));
+  if (!pcm || !silence || !resample_buf || !servo_buf) {
     ESP_LOGE(TAG, "Failed to allocate buffers");
     free(pcm);
     free(silence);
-    playback_task_handle = NULL;
     free(resample_buf);
+    free(servo_buf);
+    playback_task_handle = NULL;
     vTaskDelete(NULL);
     return;
   }
+
+  audio_servo_init();
 
   size_t written;
   while (playback_running) {
@@ -128,24 +135,41 @@ static void playback_task(void *arg) {
     if (flush_requested) {
       flush_requested = false;
       audio_resample_reset();
+      audio_servo_reset();
       i2s_channel_disable(tx_handle);
       i2s_channel_enable(tx_handle);
     }
+    // Drift servo: pull the smoothed drift signal and update the controller
+    // before consuming this chunk.  When idle (no anchor / paused) the
+    // controller pulls correction back toward zero on its own.
+    audio_servo_update(audio_receiver_get_smoothed_drift_us(),
+                       audio_receiver_is_playing());
+
     size_t samples = audio_receiver_read(pcm, FRAME_SAMPLES + 1);
     if (samples > 0) {
-      int16_t *play_buf = pcm;
-      size_t play_samples = samples;
+      int16_t *intermediate_buf = pcm;
+      size_t intermediate_samples = samples;
       if (audio_resample_is_active()) {
-        play_samples = audio_resample_process(pcm, samples, resample_buf,
-                                              MAX_RESAMPLE_FRAMES);
-        play_buf = resample_buf;
+        intermediate_samples = audio_resample_process(
+            pcm, samples, resample_buf, MAX_RESAMPLE_FRAMES);
+        intermediate_buf = resample_buf;
       }
-      apply_volume(play_buf, play_samples * 2);
-      audio_alert_mix(play_buf, play_samples, OUTPUT_RATE);
-      led_audio_feed(play_buf, play_samples);
-      i2s_channel_write(tx_handle, play_buf, play_samples * 4, &written,
-                        portMAX_DELAY);
-      record_i2s_write(false);
+
+      // Linear-interp resample at rate 1.0 ± current correction.  Identity
+      // (with one input-frame delay) when correction is zero.
+      size_t play_samples = audio_servo_process(
+          intermediate_buf, intermediate_samples, servo_buf,
+          MAX_RESAMPLE_FRAMES);
+      int16_t *play_buf = servo_buf;
+
+      if (play_samples > 0) {
+        apply_volume(play_buf, play_samples * 2);
+        audio_alert_mix(play_buf, play_samples, OUTPUT_RATE);
+        led_audio_feed(play_buf, play_samples);
+        i2s_channel_write(tx_handle, play_buf, play_samples * 4, &written,
+                          portMAX_DELAY);
+        record_i2s_write(false);
+      }
       taskYIELD();
     } else {
       audio_alert_mix(silence, FRAME_SAMPLES, OUTPUT_RATE);
@@ -160,6 +184,8 @@ static void playback_task(void *arg) {
 
   free(pcm);
   free(silence);
+  free(resample_buf);
+  free(servo_buf);
   playback_task_handle = NULL;
   vTaskDelete(NULL);
 }

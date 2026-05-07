@@ -10,6 +10,7 @@
 
 #include "audio_output.h"
 #include "audio_receiver.h"
+#include "audio_servo.h"
 #include "ptp_clock.h"
 
 #define AUDIO_TELEMETRY_INTERVAL_MS 1000
@@ -107,7 +108,7 @@ static void telemetry_task(void *arg) {
              " jitter=%" PRIu32 "smp dts=%" PRId32
              " | buf min/avg/max=%" PRIu32 "/%" PRIu32 "/%" PRIu32
              " ur=%" PRIu32 " late=%" PRIu32
-             " | drift min/max=%" PRId32 "/%" PRId32 "ms"
+             " | drift min/max=%" PRId32 "/%" PRId32 "ms servo=%" PRId32 "ppm"
              " | i2s w=%" PRIu32 " avg=%" PRIu32 "us max=%" PRIu32
              "us sil=%" PRIu32
              " | ptp lock=%d t=%" PRIu32 "ms off=%" PRId64
@@ -118,6 +119,7 @@ static void telemetry_task(void *arg) {
              depth_max, d_underruns, d_late,
              drift_samples ? drift_min / 1000 : 0,
              drift_samples ? drift_max / 1000 : 0,
+             audio_servo_get_correction_ppm(),
              ws.writes, ws.avg_us, ws.max_us,
              ws.silence_writes, pts.locked ? 1 : 0, pts.lock_time_ms,
              pts.filtered_offset_ns, pts.max_dev_ns, d_decrypt_err);

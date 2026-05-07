@@ -195,6 +195,15 @@ void audio_timing_reset(audio_timing_t *timing) {
   timing->drift_min_us = INT32_MAX;
   timing->drift_max_us = INT32_MIN;
   timing->drift_samples = 0;
+  timing->smoothed_drift_us = 0;
+  timing->smoothed_drift_valid = false;
+}
+
+int32_t audio_timing_get_smoothed_drift_us(const audio_timing_t *timing) {
+  if (!timing || !timing->smoothed_drift_valid) {
+    return 0;
+  }
+  return timing->smoothed_drift_us;
 }
 
 void audio_timing_drain_drift(audio_timing_t *timing, int32_t *min_us,
@@ -448,6 +457,20 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
           timing->drift_max_us = early_clamped;
         }
         timing->drift_samples++;
+        // EMA for the rate servo's setpoint.  alpha = 1/128 -> ~1 s time
+        // constant at the ~125 Hz frame cadence.  Skip the update for absurd
+        // values that compute_early_us already filters; this is just a
+        // belt-and-braces guard against poisoning the integrator if the
+        // sanity gate is ever loosened.
+        if (early_us > -1000000LL && early_us < 1000000LL) {
+          if (!timing->smoothed_drift_valid) {
+            timing->smoothed_drift_us = (int32_t)early_us;
+            timing->smoothed_drift_valid = true;
+          } else {
+            int32_t diff = (int32_t)early_us - timing->smoothed_drift_us;
+            timing->smoothed_drift_us += diff / 128;
+          }
+        }
         if (timing->post_flush) {
           // Bypass: play regardless of early/late — the phone pre-buffers
           // several seconds ahead of the anchor's current position after a

@@ -54,6 +54,12 @@ typedef struct {
   int32_t drift_min_us;
   int32_t drift_max_us;
   uint32_t drift_samples;
+  // Smoothed drift signal for the rate servo.  EMA over early_us with a ~1 s
+  // time constant (alpha = 1/128 at ~125 Hz frame rate).  Updated on every
+  // frame with a valid compute_early_us result; preserved across drains
+  // because it represents an ongoing physical quantity, not a window stat.
+  int32_t smoothed_drift_us;
+  bool smoothed_drift_valid;
 } audio_timing_t;
 
 void audio_timing_init(audio_timing_t *timing, size_t pending_capacity);
@@ -79,6 +85,13 @@ void audio_timing_set_playing(audio_timing_t *timing, bool playing);
  */
 void audio_timing_drain_drift(audio_timing_t *timing, int32_t *min_us,
                               int32_t *max_us, uint32_t *samples);
+
+/**
+ * Read the smoothed drift signal (does NOT reset).  Returns the value of
+ * smoothed_drift_us, or 0 if the EMA has never been seeded.  Used by the
+ * audio rate servo as its setpoint.
+ */
+int32_t audio_timing_get_smoothed_drift_us(const audio_timing_t *timing);
 size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
                          const audio_stream_t *stream, audio_stats_t *stats,
                          int16_t *out, size_t samples);
