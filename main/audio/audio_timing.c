@@ -52,11 +52,16 @@
 // and must be discarded rather than played.  10 s is well above the deepest
 // observed AirPlay 2 pre-buffer depth and well below any real seek delta.
 #define POST_FLUSH_STALE_THRESHOLD_US 10000000LL // 10 seconds
-// POST_FLUSH_TIMEOUT_US: maximum duration of the post_flush bypass.  After a
-// seek/flush the phone's pre-buffer window causes frames to appear hundreds of
-// ms early.  We play them immediately for this duration so the user hears audio
-// right away, then revert to normal timing so the anchor can enforce A/V sync.
-#define POST_FLUSH_TIMEOUT_US 500000LL // 500 ms
+// POST_FLUSH_TIMEOUT_US: safety backstop for the post_flush bypass.  The
+// primary exit is the on-time convergence check below; this timeout prevents
+// infinite bypass if the anchor never settles.  At MAX_CORRECTION_PPM=500 the
+// servo converges ~130 ms of structural post-seek drift in ~2.5 minutes;
+// 5 minutes gives comfortable headroom.
+#define POST_FLUSH_TIMEOUT_US 300000000LL // 5 min
+// Number of consecutive on-time frames (within the normal TIMING_THRESHOLD
+// window) before exiting post_flush.  Prevents exiting on a single lucky
+// frame amidst jitter.
+#define POST_FLUSH_ONTIME_EXIT_COUNT 10
 // COMPUTE_EARLY_SANITY_LIMIT_US: if computed early_us exceeds this magnitude
 // (5 minutes), the math is wrong — typically caused by anchor_network_time_ns
 // from a different PTP master combined with a stale ptp offset.  Treat the
@@ -190,6 +195,7 @@ void audio_timing_reset(audio_timing_t *timing) {
   timing->consecutive_late_frames = 0;
   timing->post_flush = false;
   timing->post_flush_start_us = 0;
+  timing->post_flush_ontime_count = 0;
   timing->deferred_flush_pending = false;
   timing->flush_until_ts = 0;
   timing->drift_min_us = INT32_MAX;
@@ -427,6 +433,7 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
         // immediately rather than waiting out the phone's pre-buffer window.
         timing->post_flush = true;
         timing->post_flush_start_us = 0;
+        timing->post_flush_ontime_count = 0;
         return 0;
       }
     }
@@ -514,18 +521,30 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
             return 0;
           }
           // Within pre-buffer depth — play and check if we should exit.
-          // Exit post_flush when either:
-          //  1. early is within ±TIMING_THRESHOLD_US (anchor is on-time), or
-          //  2. POST_FLUSH_TIMEOUT_US has elapsed (pre-buffer depth exceeds
-          //     threshold but anchor is stable — let normal timing take over
-          //     so frames are held until their scheduled play point).
-          if ((early_us >= -TIMING_THRESHOLD_LATE_US &&
-               early_us <= TIMING_THRESHOLD_EARLY_US) ||
+          // Exit post_flush only when frames are within the NORMAL timing
+          // thresholds (±60ms/40ms).  The servo runs during post_flush
+          // (EMA updates are not suppressed), converging the structural
+          // ~130 ms post-seek drift at up to MAX_CORRECTION_PPM.  At
+          // 500 ppm this takes ~2.5 minutes — during which all frames
+          // play unconditionally with zero silence.
+          bool frame_ontime =
+              (early_us >= -TIMING_THRESHOLD_LATE_US &&
+               early_us <= TIMING_THRESHOLD_EARLY_US);
+          if (frame_ontime) {
+            timing->post_flush_ontime_count++;
+          } else {
+            timing->post_flush_ontime_count = 0;
+          }
+          if (timing->post_flush_ontime_count >= POST_FLUSH_ONTIME_EXIT_COUNT ||
               flush_elapsed >= POST_FLUSH_TIMEOUT_US) {
-            ESP_LOGI(TAG, "post_flush done: early=%lld ms, elapsed=%lld ms",
-                     early_us / 1000LL, flush_elapsed / 1000LL);
+            ESP_LOGI(TAG,
+                     "post_flush done: early=%lld ms, elapsed=%lld ms, "
+                     "ontime=%d",
+                     early_us / 1000LL, flush_elapsed / 1000LL,
+                     timing->post_flush_ontime_count);
             timing->post_flush = false;
             timing->post_flush_start_us = 0;
+            timing->post_flush_ontime_count = 0;
           }
           timing->consecutive_early_frames = 0;
           timing->consecutive_late_frames = 0;
