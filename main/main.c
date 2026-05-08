@@ -38,6 +38,7 @@ static const char *TAG = "main";
 
 static bool s_airplay_started = false;
 static bool s_airplay_infrastructure_ready = false;
+static bool s_startup_audio_test_done = false;
 
 static void start_airplay_services(void) {
   if (s_airplay_started) {
@@ -66,6 +67,15 @@ static void start_airplay_services(void) {
   audio_output_start();
 
   ESP_ERROR_CHECK(rtsp_server_start());
+
+  if (!s_startup_audio_test_done) {
+    if (audio_alert_play_name("chime", 40, 1) == ESP_OK) {
+      ESP_LOGI(TAG, "Startup audio test triggered");
+      s_startup_audio_test_done = true;
+    } else {
+      ESP_LOGW(TAG, "Startup audio test failed to trigger");
+    }
+  }
 
   s_airplay_started = true;
   playback_control_set_source(PLAYBACK_SOURCE_AIRPLAY);
