@@ -33,9 +33,23 @@ esp_err_t bt_a2dp_sink_init(const char *device_name,
                             bt_a2dp_state_cb_t state_cb);
 
 /**
+ * Fully stop the Bluetooth A2DP stack when AirPlay owns the device.
+ *
+ * This disables discoverability, deinitializes A2DP/AVRCP/Bluedroid and
+ * disables/deinitializes the BT controller. Classic BT memory is not released,
+ * because that would prevent starting BT again before reboot.
+ */
+esp_err_t bt_a2dp_sink_stop(void);
+
+/**
  * Check if a Bluetooth A2DP audio session is active.
  */
 bool bt_a2dp_sink_is_connected(void);
+
+/**
+ * Check if the BT controller/host stack is currently running.
+ */
+bool bt_a2dp_sink_is_running(void);
 
 /**
  * Enable or disable Bluetooth discoverability/connectability.

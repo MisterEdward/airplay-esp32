@@ -62,6 +62,10 @@
 // window) before exiting post_flush.  Prevents exiting on a single lucky
 // frame amidst jitter.
 #define POST_FLUSH_ONTIME_EXIT_COUNT 10
+// During seek/track-skip recovery, do not play audio that is already far
+// behind the sender timeline.  Dropping a short burst catches up cleanly;
+// playing it sounds like choppy/low-FPS audio and leaves A/V sync wrong.
+#define POST_FLUSH_LATE_CATCHUP_US 120000LL
 // COMPUTE_EARLY_SANITY_LIMIT_US: if computed early_us exceeds this magnitude
 // (5 minutes), the math is wrong — typically caused by anchor_network_time_ns
 // from a different PTP master combined with a stale ptp offset.  Treat the
@@ -520,13 +524,29 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
             // buffer will play immediately rather than waiting out the anchor.
             return 0;
           }
-          // Within pre-buffer depth — play and check if we should exit.
-          // Exit post_flush only when frames are within the NORMAL timing
-          // thresholds (±60ms/40ms).  The servo runs during post_flush
-          // (EMA updates are not suppressed), converging the structural
-          // ~130 ms post-seek drift at up to MAX_CORRECTION_PPM.  At
-          // 500 ppm this takes ~2.5 minutes — during which all frames
-          // play unconditionally with zero silence.
+          // Late after a seek means we are about to play old-position audio
+          // behind the sender's timeline.  Drop frames quickly until we catch
+          // up; this gives a short clean mute instead of choppy desync.
+          if (early_us < -POST_FLUSH_LATE_CATCHUP_US) {
+            if (stats) {
+              stats->late_frames++;
+            }
+            if (timing->consecutive_late_frames == 0) {
+              ESP_LOGW(TAG, "post_flush catch-up: dropping %lld ms late audio",
+                       -early_us / 1000LL);
+            }
+            timing->consecutive_late_frames++;
+            if (from_pending) {
+              timing->pending_valid = false;
+              timing->pending_frame_len = 0;
+            } else {
+              audio_buffer_return(buffer, item);
+            }
+            continue;
+          }
+
+          // Within the acceptable post-seek window — play and check if we
+          // should exit.  Exit only when frames are within normal thresholds.
           bool frame_ontime =
               (early_us >= -TIMING_THRESHOLD_LATE_US &&
                early_us <= TIMING_THRESHOLD_EARLY_US);

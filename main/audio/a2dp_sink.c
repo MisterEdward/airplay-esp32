@@ -75,7 +75,10 @@ typedef struct {
   void *param;
 } bt_app_msg_t;
 
-enum { BT_APP_SIG_WORK_DISPATCH = 0 };
+enum {
+  BT_APP_SIG_WORK_DISPATCH = 0,
+  BT_APP_SIG_STOP,
+};
 enum { BT_APP_EVT_STACK_UP = 0 };
 
 /* ========================================================================== */
@@ -97,6 +100,8 @@ static volatile bool s_connected = false;
 static volatile bool s_audio_started = false;
 static volatile bool s_avrc_playing = false; /* AVRCP play state (instant) */
 static volatile bool s_i2s_task_running = false;
+static volatile bool s_bt_running = false;
+static bool s_ble_mem_released = false;
 static bool s_bt_discoverable = true;
 static uint8_t s_avrc_volume = 64; /* 0-127, AVRCP absolute volume */
 static volatile bool s_vol_ntf_pending =
@@ -109,6 +114,7 @@ static ringbuf_mode_t s_ringbuf_mode = RINGBUF_MODE_PREFETCHING;
 static TaskHandle_t s_bt_task_handle = NULL;
 static TaskHandle_t s_i2s_task_handle = NULL;
 static QueueHandle_t s_bt_task_queue = NULL;
+static SemaphoreHandle_t s_a2dp_deinit_sem = NULL;
 
 static uint32_t s_sample_rate = 44100;
 
@@ -149,12 +155,18 @@ static void bt_app_task(void *arg) {
   bt_app_msg_t msg;
   while (true) {
     if (xQueueReceive(s_bt_task_queue, &msg, portMAX_DELAY) == pdTRUE) {
+      if (msg.sig == BT_APP_SIG_STOP) {
+        free(msg.param);
+        break;
+      }
       if (msg.sig == BT_APP_SIG_WORK_DISPATCH && msg.cb) {
         msg.cb(msg.event, msg.param);
       }
       free(msg.param);
     }
   }
+  s_bt_task_handle = NULL;
+  vTaskDelete(NULL);
 }
 
 /* ========================================================================== */
@@ -379,6 +391,10 @@ static void bt_a2dp_evt_handler(uint16_t event, void *param) {
              a2d->a2d_prof_stat.init_state == ESP_A2D_INIT_SUCCESS
                  ? "inited"
                  : "deinited");
+    if (a2d->a2d_prof_stat.init_state == ESP_A2D_DEINIT_SUCCESS &&
+        s_a2dp_deinit_sem) {
+      xSemaphoreGive(s_a2dp_deinit_sem);
+    }
     break;
 
   default:
@@ -746,22 +762,61 @@ esp_err_t bt_a2dp_sink_init(const char *device_name,
                             bt_a2dp_state_cb_t state_cb) {
   s_state_cb = state_cb;
 
+  if (s_bt_running) {
+    bt_a2dp_sink_set_discoverable(s_bt_discoverable);
+    return ESP_OK;
+  }
+
   ESP_LOGI(TAG, "Initializing Bluetooth A2DP Sink: %s", device_name);
 
   // Release BLE memory — we only need Classic BT
-  ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
+  if (!s_ble_mem_released) {
+    esp_err_t rel_err = esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
+    if (rel_err != ESP_OK && rel_err != ESP_ERR_NOT_FOUND) {
+      ESP_LOGW(TAG, "BLE memory release failed: %s",
+               esp_err_to_name(rel_err));
+    } else {
+      s_ble_mem_released = true;
+    }
+  }
+
+  // Create the BT app task and event queue before profiles can emit callbacks.
+  s_bt_task_queue = xQueueCreate(BT_TASK_QLEN, sizeof(bt_app_msg_t));
+  if (s_bt_task_queue == NULL) {
+    ESP_LOGE(TAG, "Failed to create BT task queue");
+    return ESP_ERR_NO_MEM;
+  }
+
+  BaseType_t task_ok =
+      task_create_spiram(bt_app_task, "bt_app", BT_TASK_STACK, NULL,
+                         BT_TASK_PRIO, &s_bt_task_handle, NULL);
+  if (task_ok != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create BT app task");
+    vQueueDelete(s_bt_task_queue);
+    s_bt_task_queue = NULL;
+    return ESP_ERR_NO_MEM;
+  }
+
+  s_a2dp_deinit_sem = xSemaphoreCreateBinary();
+  if (s_a2dp_deinit_sem == NULL) {
+    ESP_LOGE(TAG, "Failed to create A2DP deinit semaphore");
+    bt_a2dp_sink_stop();
+    return ESP_ERR_NO_MEM;
+  }
 
   // Initialize BT controller
   esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
   esp_err_t err = esp_bt_controller_init(&bt_cfg);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "BT controller init failed: %s", esp_err_to_name(err));
+    bt_a2dp_sink_stop();
     return err;
   }
 
   err = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "BT controller enable failed: %s", esp_err_to_name(err));
+    bt_a2dp_sink_stop();
     return err;
   }
 
@@ -773,36 +828,124 @@ esp_err_t bt_a2dp_sink_init(const char *device_name,
   err = esp_bluedroid_init_with_cfg(&bluedroid_cfg);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Bluedroid init failed: %s", esp_err_to_name(err));
+    bt_a2dp_sink_stop();
     return err;
   }
 
   err = esp_bluedroid_enable();
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(err));
+    bt_a2dp_sink_stop();
     return err;
   }
 
   // Set device name
   esp_bt_gap_set_device_name(device_name);
 
-  // Create the BT app task and event queue
-  s_bt_task_queue = xQueueCreate(BT_TASK_QLEN, sizeof(bt_app_msg_t));
-  if (s_bt_task_queue == NULL) {
-    ESP_LOGE(TAG, "Failed to create BT task queue");
-    return ESP_ERR_NO_MEM;
-  }
-
-  BaseType_t ret =
-      task_create_spiram(bt_app_task, "bt_app", BT_TASK_STACK, NULL,
-                         BT_TASK_PRIO, &s_bt_task_handle, NULL);
-  if (ret != pdPASS) {
-    ESP_LOGE(TAG, "Failed to create BT app task");
-    return ESP_ERR_NO_MEM;
-  }
-
   // Dispatch stack-up event to app task
   bt_app_work_dispatch(bt_stack_evt_handler, BT_APP_EVT_STACK_UP, NULL, 0);
 
+  s_bt_running = true;
+  return ESP_OK;
+}
+
+esp_err_t bt_a2dp_sink_stop(void) {
+  if (!s_bt_running &&
+      esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE &&
+      esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED &&
+      s_bt_task_queue == NULL && s_a2dp_deinit_sem == NULL) {
+    return ESP_OK;
+  }
+
+  if (s_connected) {
+    ESP_LOGW(TAG, "Refusing to stop BT while an A2DP client is connected");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  ESP_LOGI(TAG, "Stopping Bluetooth A2DP Sink");
+
+  esp_bluedroid_status_t bt_stack_status = esp_bluedroid_get_status();
+  if (bt_stack_status == ESP_BLUEDROID_STATUS_ENABLED) {
+    esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+    i2s_task_stop();
+
+    if (s_a2dp_deinit_sem) {
+      xSemaphoreTake(s_a2dp_deinit_sem, 0);
+    }
+    esp_err_t err = esp_avrc_ct_deinit();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+      ESP_LOGW(TAG, "AVRCP CT deinit failed: %s", esp_err_to_name(err));
+    }
+    err = esp_avrc_tg_deinit();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+      ESP_LOGW(TAG, "AVRCP TG deinit failed: %s", esp_err_to_name(err));
+    }
+    err = esp_a2d_sink_deinit();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+      ESP_LOGW(TAG, "A2DP sink deinit failed: %s", esp_err_to_name(err));
+    } else if (s_a2dp_deinit_sem) {
+      xSemaphoreTake(s_a2dp_deinit_sem, pdMS_TO_TICKS(1000));
+    }
+
+    err = esp_bluedroid_disable();
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Bluedroid disable failed: %s", esp_err_to_name(err));
+    }
+    bt_stack_status = esp_bluedroid_get_status();
+  }
+
+  if (bt_stack_status == ESP_BLUEDROID_STATUS_INITIALIZED) {
+    esp_err_t err = esp_bluedroid_deinit();
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Bluedroid deinit failed: %s", esp_err_to_name(err));
+    }
+  } else if (bt_stack_status == ESP_BLUEDROID_STATUS_ENABLED) {
+    ESP_LOGW(TAG, "Bluedroid still enabled, skipping deinit");
+  }
+
+  esp_bt_controller_status_t ctrl_status = esp_bt_controller_get_status();
+  if (ctrl_status == ESP_BT_CONTROLLER_STATUS_ENABLED) {
+    esp_err_t err = esp_bt_controller_disable();
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "BT controller disable failed: %s", esp_err_to_name(err));
+    }
+    ctrl_status = esp_bt_controller_get_status();
+  }
+  if (ctrl_status == ESP_BT_CONTROLLER_STATUS_INITED) {
+    esp_err_t err = esp_bt_controller_deinit();
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "BT controller deinit failed: %s", esp_err_to_name(err));
+    }
+  } else if (ctrl_status == ESP_BT_CONTROLLER_STATUS_ENABLED) {
+    ESP_LOGW(TAG, "BT controller still enabled, skipping deinit");
+  }
+
+  if (s_a2dp_deinit_sem) {
+    vSemaphoreDelete(s_a2dp_deinit_sem);
+    s_a2dp_deinit_sem = NULL;
+  }
+  if (s_bt_task_queue) {
+    bt_app_msg_t stop_msg = {.sig = BT_APP_SIG_STOP};
+    xQueueSend(s_bt_task_queue, &stop_msg, 0);
+    for (int i = 0; s_bt_task_handle != NULL && i < 40; i++) {
+      vTaskDelay(pdMS_TO_TICKS(25));
+    }
+    if (s_bt_task_handle == NULL) {
+      vQueueDelete(s_bt_task_queue);
+      s_bt_task_queue = NULL;
+    } else {
+      ESP_LOGW(TAG, "BT app task did not stop in time");
+    }
+  }
+
+  s_connected = false;
+  s_audio_started = false;
+  s_avrc_playing = false;
+  s_vol_ntf_pending = false;
+  s_sample_rate = 44100;
+  s_bt_running = false;
+  audio_output_set_sample_rate(44100);
+  ESP_LOGI(TAG, "Bluetooth stopped");
   return ESP_OK;
 }
 
@@ -810,8 +953,16 @@ bool bt_a2dp_sink_is_connected(void) {
   return s_connected;
 }
 
+bool bt_a2dp_sink_is_running(void) {
+  return s_bt_running;
+}
+
 void bt_a2dp_sink_set_discoverable(bool discoverable) {
   s_bt_discoverable = discoverable;
+  if (!s_bt_running ||
+      esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
+    return;
+  }
   if (s_connected) {
     return;
   }

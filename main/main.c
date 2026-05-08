@@ -39,8 +39,78 @@ static const char *TAG = "main";
 static bool s_airplay_started = false;
 static bool s_airplay_infrastructure_ready = false;
 static bool s_startup_audio_test_done = false;
+#ifdef CONFIG_BT_A2DP_ENABLE
+static bool s_airplay_client_active = false;
+static bool s_airplay_event_registered = false;
+static TaskHandle_t s_bt_stop_task_handle = NULL;
+static void on_bt_state_changed(bool connected);
+static void on_airplay_client_event(rtsp_event_t event,
+                                    const rtsp_event_data_t *data,
+                                    void *user_data);
+#endif
+
+#ifdef CONFIG_BT_A2DP_ENABLE
+static void start_bt_services(void) {
+  if (bt_a2dp_sink_is_running()) {
+    bt_a2dp_sink_set_discoverable(true);
+    return;
+  }
+
+  char bt_name[65];
+  settings_get_device_name(bt_name, sizeof(bt_name));
+  esp_err_t bt_err = bt_a2dp_sink_init(bt_name, on_bt_state_changed);
+  if (bt_err != ESP_OK) {
+    ESP_LOGE(TAG, "BT A2DP init failed: %s", esp_err_to_name(bt_err));
+    return;
+  }
+  if (!s_airplay_event_registered) {
+    rtsp_events_register(on_airplay_client_event, NULL);
+    s_airplay_event_registered = true;
+  }
+}
+
+static void stop_bt_services(void) {
+  if (!bt_a2dp_sink_is_running()) {
+    return;
+  }
+  bt_a2dp_sink_set_discoverable(false);
+  esp_err_t err = bt_a2dp_sink_stop();
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "BT stop skipped: %s", esp_err_to_name(err));
+  }
+}
+
+static void bt_stop_task(void *arg) {
+  (void)arg;
+  stop_bt_services();
+  s_bt_stop_task_handle = NULL;
+  if (!s_airplay_client_active && !bt_a2dp_sink_is_connected()) {
+    start_bt_services();
+  }
+  vTaskDelete(NULL);
+}
+
+static void stop_bt_services_async(void) {
+  if (!bt_a2dp_sink_is_running() || s_bt_stop_task_handle != NULL) {
+    return;
+  }
+  BaseType_t ok = task_create_spiram(bt_stop_task, "bt_stop", 4096, NULL, 5,
+                                     &s_bt_stop_task_handle, NULL);
+  if (ok != pdPASS) {
+    ESP_LOGW(TAG, "BT stop task failed, stopping synchronously");
+    stop_bt_services();
+  }
+}
+#endif
 
 static void start_airplay_services(void) {
+#ifdef CONFIG_BT_A2DP_ENABLE
+  if (bt_a2dp_sink_is_connected()) {
+    ESP_LOGI(TAG, "BT connected — AirPlay start deferred");
+    return;
+  }
+#endif
+
   if (s_airplay_started) {
     return;
   }
@@ -59,11 +129,11 @@ static void start_airplay_services(void) {
     ESP_ERROR_CHECK(hap_init());
     ESP_ERROR_CHECK(audio_receiver_init());
     ESP_ERROR_CHECK(audio_output_init());
-    mdns_airplay_init();
     audio_telemetry_start();
     s_airplay_infrastructure_ready = true;
   }
 
+  mdns_airplay_init();
   audio_output_start();
 
   ESP_ERROR_CHECK(rtsp_server_start());
@@ -90,6 +160,7 @@ static void stop_airplay_services(void) {
   ESP_LOGI(TAG, "Stopping AirPlay services...");
 
   rtsp_server_stop();
+  mdns_airplay_deinit();
   audio_output_stop();
 
   s_airplay_started = false;
@@ -143,6 +214,11 @@ static void network_monitor_task(void *pvParameters) {
       ESP_LOGI(TAG, "Network up (eth=%s, wifi=%s)", eth_up ? "yes" : "no",
                wifi_up ? "yes" : "no");
       start_airplay_services();
+#ifdef CONFIG_BT_A2DP_ENABLE
+      if (!s_airplay_client_active && !bt_a2dp_sink_is_connected()) {
+        start_bt_services();
+      }
+#endif
       if (dns_running) {
         dns_server_stop();
         dns_running = false;
@@ -170,6 +246,7 @@ static void on_bt_state_changed(bool connected) {
     if (ethernet_is_connected() || wifi_is_connected()) {
       start_airplay_services();
     }
+    bt_a2dp_sink_set_discoverable(true);
   }
 }
 
@@ -183,17 +260,19 @@ static void on_airplay_client_event(rtsp_event_t event,
   }
   switch (event) {
   case RTSP_EVENT_CLIENT_CONNECTED:
-    ESP_LOGI(TAG, "AirPlay client connected — disabling BT");
-    bt_a2dp_sink_set_discoverable(false);
+    ESP_LOGI(TAG, "AirPlay client connected — stopping BT");
+    s_airplay_client_active = true;
+    stop_bt_services_async();
     break;
   case RTSP_EVENT_PAUSED:
     // V1 grace period active — keep BT hidden so the phone reconnects
     // to AirPlay rather than falling back to BT.
-    ESP_LOGI(TAG, "AirPlay paused — keeping BT hidden");
+    ESP_LOGI(TAG, "AirPlay paused — keeping BT stopped");
     break;
   case RTSP_EVENT_DISCONNECTED:
     ESP_LOGI(TAG, "AirPlay client disconnected — enabling BT");
-    bt_a2dp_sink_set_discoverable(true);
+    s_airplay_client_active = false;
+    start_bt_services();
     break;
   default:
     break;
@@ -215,6 +294,12 @@ void app_main(void) {
   log_stream_init();
   ESP_ERROR_CHECK(playback_control_init());
   ESP_ERROR_CHECK(audio_alert_init());
+#ifdef CONFIG_BT_A2DP_ENABLE
+  if (!s_airplay_event_registered) {
+    rtsp_events_register(on_airplay_client_event, NULL);
+    s_airplay_event_registered = true;
+  }
+#endif
   led_init();
 
   // Initialize board-specific hardware (includes I2C/SPI bus for display and
@@ -291,15 +376,8 @@ void app_main(void) {
 
 #ifdef CONFIG_BT_A2DP_ENABLE
   // Initialize Bluetooth A2DP Sink
-  {
-    char bt_name[65];
-    settings_get_device_name(bt_name, sizeof(bt_name));
-    esp_err_t bt_err = bt_a2dp_sink_init(bt_name, on_bt_state_changed);
-    if (bt_err != ESP_OK) {
-      ESP_LOGE(TAG, "BT A2DP init failed: %s", esp_err_to_name(bt_err));
-    } else {
-      rtsp_events_register(on_airplay_client_event, NULL);
-    }
+  if (!s_airplay_client_active) {
+    start_bt_services();
   }
 #endif
 

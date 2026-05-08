@@ -14,7 +14,7 @@ CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
 # Security Setup
 # SSP requires a screen on the device to show the code
 CONFIG_BT_SSP_ENABLED=n
-CONFIG_BT_PIN_CODE="05032026"
+CONFIG_BT_PIN_CODE="338273"
 
 
 # Disable BLE host stack — A2DP uses Classic BT only.  Disabling BLE avoids

@@ -61,6 +61,11 @@ static int current_slot = 0;
 // to send a DACP resume command and keep waiting for reconnect.
 static volatile bool s_resume_requested = false;
 
+static void server_task_exit(void) {
+  server_task_handle = NULL;
+  vTaskDelete(NULL);
+}
+
 // Public API for volume control
 void airplay_set_volume(float volume_db) {
   client_slot_t *c = &clients[current_slot];
@@ -168,6 +173,7 @@ static void client_task(void *pvParameters) {
     return;
   }
   slot->conn = conn;
+  rtsp_events_emit(RTSP_EVENT_CLIENT_CONNECTED, NULL);
 
   // Get client IP address for timing requests
   struct sockaddr_in peer_addr;
@@ -431,7 +437,7 @@ static void server_task(void *pvParameters) {
   server_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (server_socket < 0) {
     ESP_LOGE(TAG, "Failed to create socket: %d", errno);
-    vTaskDelete(NULL);
+    server_task_exit();
     return;
   }
 
@@ -448,7 +454,7 @@ static void server_task(void *pvParameters) {
     ESP_LOGE(TAG, "Failed to bind: %d", errno);
     close(server_socket);
     server_socket = -1;
-    vTaskDelete(NULL);
+    server_task_exit();
     return;
   }
 
@@ -456,7 +462,7 @@ static void server_task(void *pvParameters) {
     ESP_LOGE(TAG, "Failed to listen: %d", errno);
     close(server_socket);
     server_socket = -1;
-    vTaskDelete(NULL);
+    server_task_exit();
     return;
   }
 
@@ -535,7 +541,7 @@ static void server_task(void *pvParameters) {
     server_socket = -1;
   }
 
-  vTaskDelete(NULL);
+  server_task_exit();
 }
 
 esp_err_t rtsp_server_start(void) {
@@ -562,8 +568,10 @@ void rtsp_server_stop(void) {
     server_socket = -1;
   }
 
+  for (int i = 0; server_task_handle != NULL && i < 40; i++) {
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
   if (server_task_handle != NULL) {
-    vTaskDelay(pdMS_TO_TICKS(100));
-    server_task_handle = NULL;
+    ESP_LOGW(TAG, "RTSP server task did not stop in time");
   }
 }

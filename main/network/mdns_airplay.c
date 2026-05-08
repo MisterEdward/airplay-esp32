@@ -1,6 +1,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "mdns.h"
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -11,6 +12,8 @@
 #include "settings.h"
 
 static const char *TAG = "mdns_airplay";
+static bool s_mdns_started = false;
+static bool s_services_published = false;
 
 // Feature flags are defined in rtsp_handlers.h (shared with /info handler)
 
@@ -30,6 +33,10 @@ static const char *TAG = "mdns_airplay";
 #define AIRPLAY_MODEL "AudioAccessory5,1"
 
 void mdns_airplay_init(void) {
+  if (s_services_published) {
+    return;
+  }
+
   char mac_str[18];
   char device_id[18];
   char features_str[32];
@@ -60,8 +67,12 @@ void mdns_airplay_init(void) {
   snprintf(service_name, sizeof(service_name), "%02X%02X%02X%02X%02X%02X@%s",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], device_name);
 
-  // Initialize mDNS
-  ESP_ERROR_CHECK(mdns_init());
+  // Initialize mDNS once. Keep it alive for DACP queries even when AirPlay is
+  // temporarily unpublished while Bluetooth owns playback.
+  if (!s_mdns_started) {
+    ESP_ERROR_CHECK(mdns_init());
+    s_mdns_started = true;
+  }
 
   // Set hostname
   ESP_ERROR_CHECK(mdns_hostname_set(device_name));
@@ -138,4 +149,31 @@ void mdns_airplay_init(void) {
     ESP_LOGE(TAG, "Failed to add _raop._tcp service: %s",
              esp_err_to_name(err_raop));
   }
+
+  s_services_published = true;
+  ESP_LOGI(TAG, "AirPlay mDNS services published");
+}
+
+void mdns_airplay_deinit(void) {
+  if (!s_services_published) {
+    return;
+  }
+
+  esp_err_t err;
+#ifndef CONFIG_AIRPLAY_FORCE_V1
+  err = mdns_service_remove("_airplay", "_tcp");
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to remove _airplay._tcp service: %s",
+             esp_err_to_name(err));
+  }
+#endif
+
+  err = mdns_service_remove("_raop", "_tcp");
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to remove _raop._tcp service: %s",
+             esp_err_to_name(err));
+  }
+
+  s_services_published = false;
+  ESP_LOGI(TAG, "AirPlay mDNS services removed");
 }
