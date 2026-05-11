@@ -15,14 +15,48 @@
 
 #include "audio_crypto.h"
 #include "network/socket_utils.h"
+#include "ntp_clock.h"
+#include "ptp_clock.h"
 
 #define BUFFERED_AUDIO_PACKET_SIZE 8192
 #define AUDIO_BUFFERED_STACK_SIZE  4096
+#define PRODUCER_LATE_SKIP_US      60000LL
 
 static StaticTask_t s_buffered_tcb;
 static StackType_t *s_buffered_stack;
 
 static const char *TAG = "audio_buf";
+
+static bool buffered_packet_target_us(const audio_receiver_state_t *state,
+                                      uint32_t timestamp,
+                                      int64_t *target_us) {
+  if (!state || !state->timing.anchor_valid || !target_us) {
+    return false;
+  }
+
+  int sr = state->stream->format.sample_rate;
+  if (sr <= 0) {
+    sr = 44100;
+  }
+
+  int32_t diff = (int32_t)(timestamp - state->timing.anchor_rtp_time);
+  int64_t frame_offset_ns = ((int64_t)diff * 1000000000LL) / sr;
+  int64_t target_ns;
+
+  if (ptp_clock_is_locked()) {
+    target_ns = (int64_t)state->timing.anchor_network_time_ns -
+                ptp_clock_get_offset_ns() + frame_offset_ns;
+  } else if (ntp_clock_is_locked()) {
+    target_ns = (int64_t)state->timing.anchor_network_time_ns -
+                ntp_clock_get_offset_ns() + frame_offset_ns;
+  } else {
+    target_ns = state->timing.anchor_local_time_ns + frame_offset_ns;
+  }
+
+  target_ns -= (int64_t)audio_timing_get_hardware_latency() * 1000LL;
+  *target_us = target_ns / 1000LL;
+  return true;
+}
 
 // Read exact number of bytes, but keep waiting on timeout if paused
 // Returns: positive = bytes read, 0 = connection closed, -1 = error
@@ -211,23 +245,17 @@ static void buffered_audio_task(void *pvParameters) {
       // WiFi stall during normal playback also gets producer-side
       // relief.  Shairport-sync does the same.
       //
-      // Uses anchor_local_time_ns (set when the RTSP task handled
-      // SETRATEANCHORTIME) rather than PTP-adjusted time.  Difference
-      // is bounded by PTP servo accuracy (low single-digit ms), well
-      // below the 60 ms threshold.
+      // Uses the same clock universe as audio_timing.c: PTP/NTP-adjusted
+      // network anchor when locked, local anchor only as fallback. This keeps
+      // producer-side drops aligned with the consumer's early/late decision.
       if (state->timing.anchor_valid) {
-        int sr = state->stream->format.sample_rate;
-        if (sr <= 0) {
-          sr = 44100;
-        }
-        int32_t diff = (int32_t)(timestamp - state->timing.anchor_rtp_time);
-        int64_t target_us =
-            (int64_t)(state->timing.anchor_local_time_ns / 1000LL) +
-            ((int64_t)diff * 1000000LL) / sr;
-        int64_t lead_us = target_us - esp_timer_get_time();
-        if (lead_us < -60000LL) {
-          state->stats.packets_dropped++;
-          continue;
+        int64_t target_us = 0;
+        if (buffered_packet_target_us(state, timestamp, &target_us)) {
+          int64_t lead_us = target_us - esp_timer_get_time();
+          if (lead_us < -PRODUCER_LATE_SKIP_US) {
+            state->stats.packets_dropped++;
+            continue;
+          }
         }
       }
 

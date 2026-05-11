@@ -330,11 +330,12 @@ Total silence: ~3 s.  All telemetry buckets in between show `sil=100+/100+` (100
 **Comparison vs shairport-sync**
 Shairport's producer-side gate is `lead_time >= 0` (zero tolerance).  They compute `buffer_should_be_time` via `frame_to_local_time(...)` which is `frame_to_ptp_local_time` when PTP is the timing source — i.e. they use PTP-adjusted target on the producer side.  That confirms approach (1) above is the correct direction.  Shairport file: `/tmp/shairport-sync/ap2_buffered_audio_processor.c:506` (`lead_time >= 0`); `/tmp/shairport-sync/rtp.c:1877` (`frame_to_local_time`).  Their player.c also implements a soxr-based resampler that adapts the rate continuously — closer to approach (2) — but with a much wider correction range than our ±500 ppm servo.
 
-**Why I didn't ship the fix in this session**
-Approach (1) is straightforward but requires plumbing `ptp_clock_get_offset_ns()` access into `audio_stream_buffered.c` and gating on `ptp_clock_is_locked()`.  Approach (2) is more invasive (new servo mode, integration with `playback_task`).  Both deserve their own evaluation cycle.  Current state is at a stable, sync-correct, no-glitch local minimum.
+**Current implementation note (2026-05-11)**
+Approach (1) is now implemented in `audio_stream_buffered.c`: producer-side late skip computes packet target time with the same clock universe as `audio_timing.c` (`anchor_network_time_ns - ptp/ntp_offset + frame_offset - hardware_latency`, falling back to `anchor_local_time_ns` only when PTP/NTP are unlocked).  Build passes for `esp32-a1s`.  Needs hardware seek testing.
+
+Approach (2) is still unimplemented.  If the hardware test still shows multi-second silence, add the bounded catch-up resampler mode next.
 
 **Diagnostic markers when you pick this up**
 * In telemetry after a seek: look for `drift min` worsening over multiple seconds despite `dec=100+` per second — that's the PTP-vs-local mismatch in action, not a decoder bottleneck.
 * `post_flush done: early=−XX ms, elapsed=YYYY ms`: `YYYY` is the dead air length; `XX` is the steady-state offset the servo will then take 10+ minutes to (not) recover from.
 * `ptp lock=1 t=NNN`: if `NNN` is consistently > 100 ms, the producer/consumer anchor mismatch is the dominant contributor to seek silence.
-
