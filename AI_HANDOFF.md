@@ -266,3 +266,21 @@ Logs currently show SRP / encryption debug dumps such as:
 These leak key material and flood logs.
 They should be removed or hidden behind a compile-time debug option.
 This is not likely the audio bug, but it makes debugging harder and is unsafe.
+
+---
+
+## 6. AirPlay 2 Seek Synchronization / Gap Fix
+
+**Problem:**
+When seeking or starting a track from 0 on an AirPlay 2 buffered stream (e.g., from an iPhone), the device experienced a massive 15-second gap of silence followed by completely desynchronized audio (a "missing lyric" effect). The previous AI agent attempted to fix this by modifying the PTP clock anchor, which broke multi-room sync.
+
+**Investigation:**
+The root cause was twofold:
+1. **Flawed Pre-Decode RTP Gates:** The system used `discard_before_rtp` and `discard_above_rtp` gates to drop stale packets. Because new AirPlay tracks start with random RTP timestamps, the 32-bit wrap-around math caused the new valid track's burst packets to evaluate as "stale" and drop *before* decoding.
+2. **TCP Buffer Drain Delay:** The TCP socket buffer holds megabytes (~15s) of stale audio from the old track. When a new track starts, the ESP32 takes a few seconds to drain this old data. The `post_flush` late catch-up mechanism correctly identified these old frames as late but could only drop 8 frames per 10ms (due to being inside the I2S DMA callback), taking ~15 seconds of real-time stuttering to catch up. A previous fix attempted to `audio_buffer_flush` the entire ring buffer, but that blindly destroyed the valid on-time burst packets sitting right behind the stale packets.
+
+**Resolution:**
+*   **Removed RTP Gates:** Completely removed the `discard_before_rtp` and `discard_above_rtp` logic from `audio_stream.c` and `audio_receiver.c` to prevent false drops of valid burst packets.
+*   **Fast-Forward DMA:** Reverted the destructive `audio_buffer_flush` in the `post_flush` catch-up path and instead increased the DMA callback's attempt loop limit (`audio_timing_read`) from `8` to `500`. This allows the pipeline to instantly "fast-forward" through the late TCP backlog in microseconds, dropping only truly late frames and stopping exactly when it hits the new track's burst.
+*   **Buffer Refill Pause:** Added a strict 200ms `ready_time_us` pause lock when `playout_started` is reset. This cleanly pauses the I2S pipeline, preventing audio stuttering while the system fast-forwards through the network latency and allowing the buffer to settle.
+*   **Result:** The 15-second gap is eliminated, track skips feature a clean ~200ms pause, and synchronization is perfect without touching the PTP anchor. The changes are documented further in `AIRPLAY_SEEK_FIX.md`.

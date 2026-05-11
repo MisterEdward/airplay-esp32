@@ -73,30 +73,29 @@ typedef struct {
   // AirPlay 1 NTP-style anchors that don't carry a clock_id.
   uint64_t last_anchor_clock_id;
 
-  // Post-seek RTP gates: together they form a window [discard_before_rtp,
-  // discard_above_rtp] around the new anchor.  Frames outside the window are
-  // discarded in audio_stream_process_frame before they enter the ring buffer,
-  // preventing the stale-frame / repeated-bulk-flush loop.
-  //
-  //   discard_before_rtp — drop frames with RTP < anchor (forward-seek stale)
-  //   discard_above_rtp  — drop frames with RTP > anchor+10s (backward-seek
-  //                        stale, e.g. seek-to-start where old pre-buffer
-  //                        frames have much higher RTP than the new anchor)
-  //
-  // Both are always armed together; whichever direction the seek went, one
-  // gate fires and the other is harmless.  Each self-disarms on the first
-  // frame that passes it (FIFO TCP order guarantees stale frames drain first).
-  // Written by the RTSP task, read by the TCP buffered task — uint32_t write
-  // is atomic on Xtensa; arm bool last so reader never sees stale threshold.
-  uint32_t discard_before_rtp;
-  bool discard_before_rtp_valid;
-  uint32_t discard_above_rtp;
-  bool discard_above_rtp_valid;
   // Set by audio_receiver_seek_flush() to ensure the gates are armed on the
   // next SETRATEANCHORTIME even when the buffer was already empty (forward
   // seek: flush empties buffer before anchor arrives, so seek detection in
   // set_anchor_time would otherwise find no oldest_rtp and skip arming).
   bool arm_gate_on_next_anchor;
+
+  // Pre-decode TCP-stale-skip deadline.  Set to esp_timer_get_time() + 3 s
+  // by audio_receiver_seek_flush() and by the seek path in
+  // audio_receiver_set_anchor_time().  While now() < seek_drain_until_us,
+  // the buffered TCP task discards packets whose RTP is far outside the
+  // keep window around the new anchor — this drains the OS TCP socket
+  // backlog (several seconds of pre-flush audio) at network speed instead
+  // of decoder speed.  Time-bounded rather than tied to timing.post_flush
+  // because post_flush can persist much longer than the actual drain (it
+  // only exits when 10 consecutive frames land within ±60 ms; if the
+  // post-seek steady-state drift settles outside that band, post_flush
+  // would stay true forever and the static `anchor_rtp + 15 s` window
+  // would eventually reject all real-time packets as wall clock advances,
+  // killing playback dead a few seconds after every seek).  3 s is well
+  // above any plausible TCP drain time (sender pre-buffer ≤ ~10 s
+  // delivered at multi-x real-time over WiFi) and short enough that a
+  // run-on into normal-play packets is harmless.
+  int64_t seek_drain_until_us;
 } audio_receiver_state_t;
 
 bool audio_stream_process_frame(audio_receiver_state_t *state,

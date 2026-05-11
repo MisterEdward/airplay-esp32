@@ -11,6 +11,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "audio_crypto.h"
 #include "network/socket_utils.h"
@@ -125,6 +126,58 @@ static void buffered_audio_task(void *pvParameters) {
       uint32_t seq_no = (packet[1] << 16) | (packet[2] << 8) | packet[3];
       uint32_t timestamp =
           (packet[4] << 24) | (packet[5] << 16) | (packet[6] << 8) | packet[7];
+
+      // Pre-decode stale-packet skip during post-seek catch-up.
+      //
+      // After a FLUSH/seek the OS TCP socket can hold several seconds of
+      // pre-flush audio that the sender pushed before learning of the seek.
+      // If we decrypt+decode every byte, the decoder feeds the ring buffer
+      // with old-position PCM that audio_timing_read then has to discard
+      // frame-by-frame.  Even with the in-loop drain, this stalls the user
+      // for several seconds per seek (the bottleneck becomes decoder
+      // throughput rather than network throughput).
+      //
+      // Instead, while the seek-drain window is open, peek at the
+      // packet's RTP timestamp BEFORE doing any crypto/decoder work and
+      // drop packets whose RTP is far outside the keep window around the
+      // new anchor.  Skipping decrypt+decode on stale packets drains the
+      // TCP backlog at network speed (a few hundred ms instead of
+      // seconds) and lets the first genuinely current packet hit the
+      // ring buffer cleanly.
+      //
+      // The window is TIME-BOUNDED via state->seek_drain_until_us (3 s
+      // post-seek), NOT tied to timing.post_flush — post_flush can stay
+      // true much longer than the actual drain (it only exits on 10
+      // consecutive ±60 ms frames; if steady-state drift settles outside
+      // that band, post_flush persists indefinitely and an anchor-RTP
+      // window would eventually reject all real-time packets as wall
+      // clock advances, killing playback dead a few seconds after every
+      // seek).
+      //
+      // The receiver-level fields written by the RTSP task and read here
+      // are aligned 32-bit (anchor_rtp_time, anchor_valid) or 64-bit
+      // (seek_drain_until_us); reads may transiently see torn 64-bit
+      // values during a write but the worst case is one packet
+      // misclassified, which is harmless.
+      if (state->timing.anchor_valid &&
+          esp_timer_get_time() < state->seek_drain_until_us) {
+        int sr = state->stream->format.sample_rate;
+        if (sr <= 0) {
+          sr = 44100;
+        }
+        int32_t diff = (int32_t)(timestamp - state->timing.anchor_rtp_time);
+        // Keep window: -2 s before anchor (small slack for slightly-stale
+        // pre-flush data the sender legitimately re-sends) to +15 s after
+        // (covers the pre-buffer burst AirPlay 2 typically sends after a
+        // seek).  Anything outside is unambiguously from the wrong song
+        // position.
+        const int32_t k_before = -2 * sr;
+        const int32_t k_after = 15 * sr;
+        if (diff < k_before || diff > k_after) {
+          state->stats.packets_dropped++;
+          continue;
+        }
+      }
 
       uint8_t *decrypted = state->decrypt_buffer;
       size_t decrypt_capacity = state->decrypt_buffer_size;

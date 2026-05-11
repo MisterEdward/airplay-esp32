@@ -62,10 +62,14 @@
 // window) before exiting post_flush.  Prevents exiting on a single lucky
 // frame amidst jitter.
 #define POST_FLUSH_ONTIME_EXIT_COUNT 10
-// During seek/track-skip recovery, do not play audio that is already far
-// behind the sender timeline.  Dropping a short burst catches up cleanly;
-// playing it sounds like choppy/low-FPS audio and leaves A/V sync wrong.
-#define POST_FLUSH_LATE_CATCHUP_US 120000LL
+// During seek/track-skip recovery, drop frames that are more than this far
+// behind the sender timeline.  Must match TIMING_THRESHOLD_LATE_US so the
+// 500-attempt fast-forward loop drops ALL late frames (the "past portion" of
+// the phone's pre-buffer burst) and only plays once it reaches genuinely
+// on-time data.  A wider threshold (e.g. 700 ms) causes permanent desync:
+// the servo's ±500 ppm clamp cannot recover hundreds of ms of offset, so
+// playback stays permanently behind the sender's timeline.
+#define POST_FLUSH_LATE_CATCHUP_US 60000LL
 // COMPUTE_EARLY_SANITY_LIMIT_US: if computed early_us exceeds this magnitude
 // (5 minutes), the math is wrong — typically caused by anchor_network_time_ns
 // from a different PTP master combined with a stale ptp offset.  Treat the
@@ -101,9 +105,21 @@ static void update_timing_targets(audio_timing_t *timing,
   uint64_t latency_samples =
       ((uint64_t)timing->output_latency_us * (uint64_t)format->sample_rate) /
       1000000ULL;
+  // The ring buffer stores frames as chunks of at most AAC_FRAMES_PER_PACKET
+  // (352) samples per slot — see audio_buffer_queue_decoded, which splits a
+  // 1024-sample AAC frame into three 352-sample chunks.  audio_buffer_get_frame_count
+  // returns the number of slots, not the declared frame_size.  So when we
+  // want "200 ms of buffered audio before playout starts", we must divide
+  // latency_samples by the actual per-slot capacity, not by
+  // nominal_frame_samples (which for AAC is 1024 and yields a target that is
+  // ~3× too small — 72 ms instead of 200 ms, producing underruns every time
+  // the servo takes a moment to converge after an anchor change).
+  uint32_t slot_capacity = timing->nominal_frame_samples;
+  if (slot_capacity > AAC_FRAMES_PER_PACKET) {
+    slot_capacity = AAC_FRAMES_PER_PACKET;
+  }
   uint32_t target_frames =
-      (uint32_t)((latency_samples + timing->nominal_frame_samples - 1) /
-                 timing->nominal_frame_samples);
+      (uint32_t)((latency_samples + slot_capacity - 1) / slot_capacity);
   if (target_frames < MIN_STARTUP_FRAMES) {
     target_frames = MIN_STARTUP_FRAMES;
   }
@@ -323,15 +339,34 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
 
   // Wait for enough buffer before starting
   if (!timing->playout_started && !timing->pending_valid) {
-    if (buffered_frames < (int)timing->target_buffer_frames) {
+    // After a seek/track-skip (post_flush), start playback as soon as we have
+    // a few frames — the sender's pre-buffer burst will refill the ring
+    // quickly, and waiting the full target_buffer_frames here just adds to the
+    // user-perceived seek latency.  Normal startup still uses the full target
+    // so a cold-start stream builds proper jitter margin before playing.
+    int startup_target = timing->post_flush
+                             ? MIN_STARTUP_FRAMES
+                             : (int)timing->target_buffer_frames;
+    if (buffered_frames < startup_target) {
       return 0;
     }
+    
+    // If we just bulk flushed due to late TCP packets, wait a bit before playing
+    // to let the buffer refill and settle, giving a clean 200ms pause instead of stutter
+    if (timing->ready_time_us != 0) {
+      int64_t now_us = esp_timer_get_time();
+      if (now_us - timing->ready_time_us < 200000) {
+        return 0; // Wait 200ms
+      }
+    }
+
     // Wait for anchor before playing.
     // Normal startup: allow a 1-second fallback so a stream with no anchor
     // (e.g. AirPlay 1 without NTP) can still start.
     if (!timing->anchor_valid) {
       int64_t now_us = esp_timer_get_time();
-      if (timing->ready_time_us == 0) {
+      // Only set ready_time_us for startup if it wasn't already set by a bulk flush
+      if (timing->ready_time_us == 0 || (now_us - timing->ready_time_us > 1000000)) {
         timing->ready_time_us = now_us;
       }
       if (now_us - timing->ready_time_us < 1000000) {
@@ -349,7 +384,7 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
     sync_mode = SYNC_MODE_NTP;
   }
 
-  for (int attempt = 0; attempt < 8; attempt++) {
+  for (int attempt = 0; attempt < 500; attempt++) {
     size_t item_size = 0;
     void *item = NULL;
     bool from_pending = false;
@@ -501,28 +536,24 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
           // those so the user never hears audio from the wrong position.
           if (early_us > POST_FLUSH_STALE_THRESHOLD_US) {
             // This frame is from the wrong seek position — still draining the
-            // TCP kernel buffer from before the flush.  Bulk-flush the entire
-            // ring buffer so all remaining stale (and any already-queued new)
-            // frames are cleared in one shot.  Draining one-by-one takes
-            // hundreds of DMA callbacks (8 frames/callback × hundreds of stale
-            // frames) causing seconds of silent lag that compounds each seek.
-            ESP_LOGW(
-                TAG, "post_flush: bulk flush %d stale frames (%lld s early)",
-                audio_buffer_get_frame_count(buffer), early_us / 1000000LL);
+            // TCP kernel buffer from before the flush.  Drop it and continue
+            // to the next frame inside this same DMA callback.  The 500-attempt
+            // loop drains up to ~11.6 s of late/stale audio in microseconds,
+            // so we hit on-time frames in the same tick instead of emitting
+            // silence and waiting 200 ms (which produces a stutter-then-silence
+            // pattern as the decoder keeps queueing late frames behind us).
+            if (timing->consecutive_late_frames == 0) {
+              ESP_LOGW(TAG, "post_flush: dropping stale frames (%lld s early)",
+                       early_us / 1000000LL);
+            }
+            timing->consecutive_late_frames++;
             if (from_pending) {
               timing->pending_valid = false;
               timing->pending_frame_len = 0;
             } else {
               audio_buffer_return(buffer, item);
             }
-            audio_buffer_flush(buffer);
-            timing->playout_started = false;
-            timing->ready_time_us = 0;
-            timing->consecutive_early_frames = 0;
-            timing->consecutive_late_frames = 0;
-            // Keep post_flush=true so new-position frames that refill the
-            // buffer will play immediately rather than waiting out the anchor.
-            return 0;
+            continue;
           }
           // Late after a seek means we are about to play old-position audio
           // behind the sender's timeline.  Drop frames quickly until we catch
@@ -532,7 +563,7 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
               stats->late_frames++;
             }
             if (timing->consecutive_late_frames == 0) {
-              ESP_LOGW(TAG, "post_flush catch-up: dropping %lld ms late audio",
+              ESP_LOGW(TAG, "post_flush catch-up: dropping late frames starting at %lld ms",
                        -early_us / 1000LL);
             }
             timing->consecutive_late_frames++;
@@ -542,6 +573,12 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
             } else {
               audio_buffer_return(buffer, item);
             }
+            // Drop one frame and continue inside the 500-attempt loop.  This
+            // drains the TCP backlog at decoder speed (microseconds per
+            // frame) within a single DMA callback, instead of bulk-flushing
+            // the ring buffer and waiting 200 ms (which lets the decoder
+            // re-queue more late frames behind us, producing a stutter-then-
+            // silence pattern for several seconds).
             continue;
           }
 
@@ -613,40 +650,19 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
           timing->consecutive_early_frames = 0;
           timing->consecutive_late_frames++;
 
-          if (-early_us > BULK_FLUSH_LATE_THRESHOLD_US ||
-              timing->consecutive_late_frames > MAX_CONSECUTIVE_LATE) {
-            // Bulk flush the stale buffer.  Two triggers:
-            //  1. A single frame is massively late (> 2 s): e.g. after resume
-            //     from a long pause where the phone advanced the anchor past
-            //     its pre-buffer window.
-            //  2. Many consecutive individually-late frames (e.g. after a
-            //     track skip where the anchor's network_time has already
-            //     passed): the individual-drop path would drain hundreds of
-            //     frames one-by-one over several seconds; bulk flush instead.
-            ESP_LOGW(TAG,
-                     "Bulk flush: frame %lld ms late, consecutive_late=%d, "
-                     "flushing %d stale frames",
-                     -early_us / 1000LL, timing->consecutive_late_frames,
-                     audio_buffer_get_frame_count(buffer));
-            if (from_pending) {
-              timing->pending_valid = false;
-              timing->pending_frame_len = 0;
-            } else {
-              audio_buffer_return(buffer, item);
-            }
-            audio_buffer_flush(buffer);
-            timing->playout_started = false;
-            timing->ready_time_us = 0;
-            timing->consecutive_late_frames = 0;
-            if (stats) {
-              stats->late_frames++;
-            }
-            return 0;
-          }
-
-          // Too late but within normal range: drop this single frame.
-          // Rate-limit the log — spamming LOGW on every frame adds
-          // UART-blocking latency that makes the drain period even longer.
+          // Late frame — drop and continue inside the 500-attempt loop.
+          // Earlier versions of this code did `audio_buffer_flush + return 0`
+          // on a single very-late frame or after MAX_CONSECUTIVE_LATE
+          // consecutive late frames.  That produced a stutter-then-silence
+          // loop on every WiFi stall: flush → 200 ms wait → producer
+          // re-queues more late frames → flush → ... for several seconds.
+          // Per-frame `continue` instead drains stale frames at CPU speed
+          // (the 500-attempt loop covers ~11.6 s of audio in microseconds)
+          // and stops cleanly when the loop hits an on-time frame, which
+          // then plays in the same DMA tick.  The producer-side
+          // pre-decode skip in audio_stream_buffered.c is responsible for
+          // not letting massive stale backlogs into the ring buffer in the
+          // first place after a seek.
           if (timing->consecutive_late_frames == 1) {
             ESP_LOGW(TAG, "Dropping late frame(s): %lld ms",
                      -early_us / 1000LL);

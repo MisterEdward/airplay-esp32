@@ -6,6 +6,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "audio_buffer.h"
 #include "audio_decoder.h"
@@ -220,8 +221,6 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
     receiver.timing.post_flush = true;
     receiver.timing.post_flush_start_us = 0;
     receiver.arm_gate_on_next_anchor = false;
-    receiver.discard_before_rtp_valid = false;
-    receiver.discard_above_rtp_valid = false;
   }
   receiver.last_anchor_clock_id = clock_id;
 
@@ -253,40 +252,58 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
     if (abs_ahead > flush_threshold) {
       ESP_LOGI(TAG,
                "Seek detected: oldest_rtp=%lu, new anchor rtp=%lu, "
-               "delta=%ld samples (%.1f s) — flushing stale buffer",
+               "delta=%ld samples (%.1f s) — cleaning stale packets",
                (unsigned long)oldest_rtp, (unsigned long)rtp_time,
                (long)rtp_ahead, (float)rtp_ahead / sample_rate);
-      audio_buffer_flush(&receiver.buffer);
-      receiver.timing.playout_started = false;
-      receiver.timing.pending_valid = false;
-      receiver.timing.pending_frame_len = 0;
-      receiver.timing.ready_time_us = 0;
-      receiver.blocks_read_in_sequence = 0;
-      // Arm both RTP gates so the TCP task discards stale frames at decode
-      // time rather than letting them fill the ring buffer and trigger repeated
-      // bulk-flushes in the DMA callback.
-      // discard_before_rtp catches forward-seek stale frames (RTP < anchor).
-      // discard_above_rtp catches backward-seek stale frames (RTP >> anchor).
-      receiver.discard_before_rtp = rtp_time;
-      receiver.discard_before_rtp_valid = true;
-      receiver.discard_above_rtp = rtp_time + gate_window;
-      receiver.discard_above_rtp_valid = true;
+
+      // Arm the pre-decode TCP-stale-skip window for any seek detected at
+      // anchor-arrival time (covers the case where seek_flush wasn't
+      // called — e.g. AirPlay 2 sometimes re-anchors without an explicit
+      // FLUSHBUFFERED).  See seek_drain_until_us in
+      // audio_receiver_internal.h for full rationale.
+      receiver.seek_drain_until_us = esp_timer_get_time() + 3000000LL;
+               
+      int dropped = 0;
+      uint32_t current_oldest = 0;
+      while (audio_buffer_oldest_timestamp(&receiver.buffer, &current_oldest)) {
+        int32_t diff = (int32_t)(current_oldest - rtp_time);
+        // Keep packets that are close to the anchor (new track)
+        if (diff > -flush_threshold && diff < (int32_t)gate_window) {
+          break; // Hit the new packets, stop dropping
+        }
+        
+        void *item = NULL;
+        size_t item_size = 0;
+        if (audio_buffer_take(&receiver.buffer, &item, &item_size, 0)) {
+          audio_buffer_return(&receiver.buffer, item);
+          dropped++;
+        } else {
+          break;
+        }
+      }
+      
+      if (dropped > 0) {
+        ESP_LOGI(TAG, "Dropped %d stale frames from buffer", dropped);
+      }
+      
+      // We don't want to reset playout state if we kept new frames.
+      // But if we dropped everything, it's essentially a full flush.
+      if (audio_buffer_get_frame_count(&receiver.buffer) == 0) {
+        receiver.timing.playout_started = false;
+        receiver.timing.pending_valid = false;
+        receiver.timing.pending_frame_len = 0;
+        receiver.timing.ready_time_us = 0;
+        receiver.blocks_read_in_sequence = 0;
+      }
+      
       receiver.arm_gate_on_next_anchor = false; // already handled
     }
   }
 
   // Forward-seek path: seek_flush empties the buffer before the anchor
-  // arrives, so the oldest_rtp check above never fires. arm_gate_on_next_anchor
-  // was set by seek_flush to ensure we still arm both gates here.
+  // arrives, so the oldest_rtp check above never fires.
   if (receiver.arm_gate_on_next_anchor) {
     receiver.arm_gate_on_next_anchor = false;
-    receiver.discard_before_rtp = rtp_time;
-    receiver.discard_before_rtp_valid = true;
-    receiver.discard_above_rtp = rtp_time + gate_window;
-    receiver.discard_above_rtp_valid = true;
-    ESP_LOGI(TAG,
-             "RTP gates armed on anchor: discard_before=%lu discard_above=%lu",
-             (unsigned long)rtp_time, (unsigned long)(rtp_time + gate_window));
   }
 
   audio_timing_set_anchor(&receiver.timing, &receiver.stream->format, clock_id,
@@ -490,8 +507,6 @@ void audio_receiver_flush(void) {
   audio_buffer_flush(&receiver.buffer);
   audio_timing_reset(&receiver.timing);
 
-  receiver.discard_before_rtp_valid = false;
-  receiver.discard_above_rtp_valid = false;
   receiver.arm_gate_on_next_anchor = false;
   receiver.blocks_read_in_sequence = 1;
 }
@@ -517,6 +532,10 @@ void audio_receiver_seek_flush(void) {
   // the time SETRATEANCHORTIME arrives, so the seek-detection heuristic
   // (which needs oldest_rtp from the buffer) would otherwise miss arming it.
   receiver.arm_gate_on_next_anchor = true;
+  // Arm the pre-decode TCP-stale-skip window.  See seek_drain_until_us
+  // in audio_receiver_internal.h for rationale.  3 s covers normal TCP
+  // drain; expires automatically so it can't kill steady-state playback.
+  receiver.seek_drain_until_us = esp_timer_get_time() + 3000000LL;
 }
 
 void audio_receiver_set_deferred_flush(uint32_t flush_until_ts) {
