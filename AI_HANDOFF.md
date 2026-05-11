@@ -284,3 +284,57 @@ The root cause was twofold:
 *   **Fast-Forward DMA:** Reverted the destructive `audio_buffer_flush` in the `post_flush` catch-up path and instead increased the DMA callback's attempt loop limit (`audio_timing_read`) from `8` to `500`. This allows the pipeline to instantly "fast-forward" through the late TCP backlog in microseconds, dropping only truly late frames and stopping exactly when it hits the new track's burst.
 *   **Buffer Refill Pause:** Added a strict 200ms `ready_time_us` pause lock when `playout_started` is reset. This cleanly pauses the I2S pipeline, preventing audio stuttering while the system fast-forwards through the network latency and allowing the buffer to settle.
 *   **Result:** The 15-second gap is eliminated, track skips feature a clean ~200ms pause, and synchronization is perfect without touching the PTP anchor. The changes are documented further in `AIRPLAY_SEEK_FIX.md`.
+
+---
+
+## 7. AirPlay 2 Seek — Remaining ~3 s silence (OPEN BUG)
+
+**Status:** *Sync is correct after seek (drift settles at −30…−45 ms, no permanent desync, no robotic artifacts). The 15-second gap from §6 is fixed.  What remains is ~3 s of dead air between the seek and audible playback — long enough to be annoying.*
+
+**What works correctly now**
+* Consumer-side late drop in `audio_timing_read` (per-frame `continue` inside the 500-attempt loop) — no stutter-then-silence loops on WiFi stalls.
+* `POST_FLUSH_LATE_CATCHUP_US = TIMING_THRESHOLD_LATE_US (60 ms)` — frames late by > 60 ms are dropped during post_flush instead of locking in a permanent A/V offset that the ±500 ppm servo cannot undo (an earlier 700 ms threshold did exactly that — see commit `3c524ed`).
+* Producer-side RTP-window skip (`audio_stream_buffered.c`) drops cross-track stale packets inside the 3 s `seek_drain_until_us` window.
+* Producer-side **wall-clock** lead-time skip (modelled on shairport-sync's `lead_time >= 0` gate in `ap2_buffered_audio_processor.c:506`) drops packets whose scheduled playback time has already passed by > 60 ms, measured against `anchor_local_time_ns`.
+* `update_timing_targets` divides by per-slot capacity (`min(nominal_frame_samples, AAC_FRAMES_PER_PACKET)`) not nominal frame size — startup target is now ~25 slots (200 ms) instead of the broken 9 slots (72 ms) that caused chronic post-anchor underruns.
+* `MIN_STARTUP_FRAMES` (4) is the post_flush startup target so seek recovery does not wait the full 200 ms jitter buffer.
+
+**What still doesn't work — root cause**
+The producer-side lead-time skip uses `anchor_local_time_ns` (the local CPU time at which the RTSP task processed `SETRATEANCHORTIME`).  The consumer (`compute_early_us` in `audio_timing.c`) uses the PTP-adjusted target:
+```
+target_ns = anchor_network_time_ns − ptp_clock_get_offset_ns() + frame_offset_ns − HW_LATENCY*1000
+```
+When PTP is locked with a non-trivial offset (observed: 200–333 ms between local CPU and PTP master), the two anchors point at *different wall-clock instants*:
+```
+producer_lead = anchor_local − now
+consumer_early = (anchor_local − ptp_offset) − now − HW_LATENCY = producer_lead − ptp_offset − HW
+```
+With `ptp_offset = +333 ms`, a packet that producer sees at `lead_us = +50 ms` (kept) reaches the consumer at `early_us = −283 ms − 46 ms = −329 ms` (dropped by post_flush catch-up).
+
+**Symptom in logs (seek 2 of `vanish-into-you-mayhem` session, 2026-05-11)**
+* `41893 ms` — `SETRATEANCHORTIME` rate=1 (anchor set).
+* `41973 ms` telemetry — `drop=11` (producer skip firing), buffer rapidly fills to ~580 slots from on-time/future portion of burst.
+* `42523 ms` — first consumer log: `post_flush catch-up: dropping late frames starting at 391 ms`.
+* `42983 ms` → `45063 ms` — three consecutive telemetry windows with `ur=100+`, `late=120+`, `drift min/max=−440/−314 ms`, decoder grinding through the PTP-late portion of the burst at ~1× realtime.
+* `45733 ms` — `post_flush done: early=−36 ms, elapsed=3213 ms` → audio resumes.
+
+Total silence: ~3 s.  All telemetry buckets in between show `sil=100+/100+` (100 % silent I²S writes).  Drift_min worsens over time during this window (−440 → −494 → −537 → −604 → −675 ms) — diagnostic for "decoder cannot keep up with wall clock", not "wrong audio in pipeline".
+
+**Two paths to a real fix (≤ 500 ms seek-to-audio)**
+
+1. **PTP-adjust the producer lead-time skip.** Compute `target_us` in `audio_stream_buffered.c` using the same PTP/NTP offset path the consumer uses (`ptp_clock_get_offset_ns()` / `ntp_clock_get_offset_ns()`).  Then the producer drops exactly the same frames the consumer would, but at network speed (microseconds per packet) instead of decoder speed (~23 ms per AAC frame).  Estimated effect: producer skip drops the ~300 ms PTP-late head of the burst; decoder hits on-time data within ~50 ms of seek; consumer resumes inside the 200 ms jitter buffer.  Risk: PTP offset can be unstable during a master change; gate this skip on `ptp_clock_is_locked()` so a transient unlock doesn't drop legitimate audio.
+
+2. **Time-compression catch-up resampler (the user's previous solution).**  Instead of dropping the late portion of the burst, *play it faster* until caught up.  The current `audio_servo` is capped at ±500 ppm = ~0.05 % rate change — recovering 300 ms of drift at that rate takes ~10 minutes (and in practice the servo just sits pinned at +500 ppm forever post-seek, exactly as logs show).  A dedicated "burst catch-up" mode would temporarily allow ±1 000 000 ppm (i.e. up to 2× playback rate) for a bounded window (~300 ms), then hand control back to the steady-state servo.  The artifact during catch-up is "chipmunked" audio for ~300 ms — quite audible but continuous (no silence).  The user reported this approach worked in a previous iteration of the codebase before the recent rewrites.
+    * Implementation sketch: post_flush enters a "compress" sub-state when the first frame is < −100 ms.  `audio_servo` exposes a new `set_compress_target(int32_t target_ppm, int64_t duration_us)` that bypasses the proportional controller for `duration_us`, applies a fixed high-ppm correction, and re-enters normal mode afterwards.  The compress sub-state ends on either (a) drift back inside ±60 ms, or (b) `duration_us` elapsed.
+
+**Comparison vs shairport-sync**
+Shairport's producer-side gate is `lead_time >= 0` (zero tolerance).  They compute `buffer_should_be_time` via `frame_to_local_time(...)` which is `frame_to_ptp_local_time` when PTP is the timing source — i.e. they use PTP-adjusted target on the producer side.  That confirms approach (1) above is the correct direction.  Shairport file: `/tmp/shairport-sync/ap2_buffered_audio_processor.c:506` (`lead_time >= 0`); `/tmp/shairport-sync/rtp.c:1877` (`frame_to_local_time`).  Their player.c also implements a soxr-based resampler that adapts the rate continuously — closer to approach (2) — but with a much wider correction range than our ±500 ppm servo.
+
+**Why I didn't ship the fix in this session**
+Approach (1) is straightforward but requires plumbing `ptp_clock_get_offset_ns()` access into `audio_stream_buffered.c` and gating on `ptp_clock_is_locked()`.  Approach (2) is more invasive (new servo mode, integration with `playback_task`).  Both deserve their own evaluation cycle.  Current state is at a stable, sync-correct, no-glitch local minimum.
+
+**Diagnostic markers when you pick this up**
+* In telemetry after a seek: look for `drift min` worsening over multiple seconds despite `dec=100+` per second — that's the PTP-vs-local mismatch in action, not a decoder bottleneck.
+* `post_flush done: early=−XX ms, elapsed=YYYY ms`: `YYYY` is the dead air length; `XX` is the steady-state offset the servo will then take 10+ minutes to (not) recover from.
+* `ptp lock=1 t=NNN`: if `NNN` is consistently > 100 ms, the producer/consumer anchor mismatch is the dominant contributor to seek silence.
+

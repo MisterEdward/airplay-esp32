@@ -179,6 +179,59 @@ static void buffered_audio_task(void *pvParameters) {
         }
       }
 
+      // Pre-decode wall-clock late skip.
+      //
+      // Mirrors shairport-sync's lead_time gate in
+      // ap2_buffered_audio_processor.c: a packet whose scheduled playback
+      // time has already passed in wall-clock terms cannot reach the
+      // speakers on time no matter how fast we decode it.  Decoding it
+      // anyway burns ~20 ms of CPU per AAC frame for output the consumer
+      // (audio_timing.c) will drop a moment later — and crucially, that
+      // CPU time is what blocks the decoder from reaching genuinely
+      // on-time packets sitting further down the TCP socket.
+      //
+      // After a seek, the iPhone delivers a pre-buffer burst over TCP
+      // covering the new song position.  Several hundred ms of audio in
+      // that burst are "already in the past" relative to wall-clock by
+      // the time we receive them (TCP buffering + RTSP-to-data-channel
+      // latency).  Without this skip, the AAC decoder grinds through the
+      // entire past portion at ~1× real-time, producing 3 s of consumer
+      // underruns ("set_playing -> playing" -> first audible frame).
+      // Skipping decrypt+decode on these packets drains the past portion
+      // at network speed (microseconds per packet), so the decoder
+      // reaches genuinely on-time packets within ~100 ms of the seek.
+      //
+      // Threshold is -60 ms (matches TIMING_THRESHOLD_LATE_US in
+      // audio_timing.c).  Packets within the consumer's tolerable
+      // lateness still get decoded — the consumer has finer state
+      // (pending-frame buffer, post_flush bypass) and is better placed
+      // to decide than we are here.
+      //
+      // Always-on (not gated by seek_drain_until_us) so a sustained
+      // WiFi stall during normal playback also gets producer-side
+      // relief.  Shairport-sync does the same.
+      //
+      // Uses anchor_local_time_ns (set when the RTSP task handled
+      // SETRATEANCHORTIME) rather than PTP-adjusted time.  Difference
+      // is bounded by PTP servo accuracy (low single-digit ms), well
+      // below the 60 ms threshold.
+      if (state->timing.anchor_valid) {
+        int sr = state->stream->format.sample_rate;
+        if (sr <= 0) {
+          sr = 44100;
+        }
+        int32_t diff = (int32_t)(timestamp - state->timing.anchor_rtp_time);
+        int64_t target_us =
+            (int64_t)(state->timing.anchor_local_time_ns / 1000LL) +
+            ((int64_t)diff * 1000000LL) / sr;
+        int64_t lead_us = target_us - esp_timer_get_time();
+        if (lead_us < -60000LL) {
+          state->stats.packets_dropped++;
+          continue;
+        }
+      }
+
+
       uint8_t *decrypted = state->decrypt_buffer;
       size_t decrypt_capacity = state->decrypt_buffer_size;
       if (!decrypted) {
