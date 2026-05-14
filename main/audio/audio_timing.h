@@ -42,6 +42,7 @@ typedef struct {
   bool post_flush;
   int64_t post_flush_start_us; // esp_timer_get_time() when post_flush began
   int post_flush_ontime_count; // consecutive on-time frames during post_flush
+  int64_t post_flush_late_grace_until_us;
   // Deferred flush (AirPlay 2 FLUSHBUFFERED with flushFromSeq present):
   // keep playing until a frame with rtp_timestamp >= flush_until_ts arrives,
   // then bulk-flush and start fresh.  Written by the RTSP task, read by the

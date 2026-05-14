@@ -4,11 +4,10 @@
 #include <string.h>
 
 // ----- Tunables -----
-// Maximum applied correction in parts-per-million.  500 ppm = 0.05% rate
-// change = ~0.86 cents pitch shift, well under the 5–10 cent audibility
-// threshold for the harshest sustained tones (and totally inaudible on music
-// or speech).
-#define MAX_CORRECTION_PPM 500
+// Maximum applied correction in parts-per-million.  2000 ppm = 0.2% rate
+// change = ~3.5 cents pitch shift, normally very hard to notice on music or
+// speech, but strong enough to recover post-seek drift faster.
+#define MAX_CORRECTION_PPM 2000
 
 // Drift below this magnitude is treated as zero — prevents the servo from
 // hunting on residual EMA noise once it has converged.
