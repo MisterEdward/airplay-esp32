@@ -469,13 +469,16 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
         }
         audio_buffer_flush(buffer);
         timing->deferred_flush_pending = false;
+        timing->anchor_valid = false;
         timing->playout_started = false;
         timing->ready_time_us = 0;
         timing->consecutive_early_frames = 0;
         timing->consecutive_late_frames = 0;
-        // post_flush = true so the first frame of the next track plays
-        // immediately rather than waiting out the phone's pre-buffer window.
-        timing->post_flush = true;
+        timing->smoothed_drift_us = 0;
+        timing->smoothed_drift_valid = false;
+        // The old anchor can belong to the pre-flush track.  Invalidate it so
+        // next-track frames do not look seconds early and poison telemetry.
+        timing->post_flush = false;
         timing->post_flush_start_us = 0;
         timing->post_flush_ontime_count = 0;
         return 0;

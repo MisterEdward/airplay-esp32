@@ -1,28 +1,38 @@
 #include "audio_servo.h"
 
+#include "esp_timer.h"
 #include <stdint.h>
 #include <string.h>
 
 // ----- Tunables -----
-// Maximum applied correction in parts-per-million.  2000 ppm = 0.2% rate
+// Maximum steady-state correction in parts-per-million.  2000 ppm = 0.2% rate
 // change = ~3.5 cents pitch shift, normally very hard to notice on music or
 // speech, but strong enough to recover post-seek drift faster.
 #define MAX_CORRECTION_PPM 2000
+
+// Temporary catch-up after seek/scrub.  10000 ppm = 1% = ~17 cents, so it is
+// not a "forever" setting; use only while phase error is obvious.
+#define SEEK_BOOST_MAX_CORRECTION_PPM 10000
+#define SEEK_BOOST_TIME_CONSTANT_SEC  3
+#define SEEK_BOOST_DURATION_US        12000000LL
+#define SEEK_BOOST_MIN_DURATION_US    2500000LL
+#define SEEK_BOOST_EXIT_DRIFT_US      8000
 
 // Drift below this magnitude is treated as zero — prevents the servo from
 // hunting on residual EMA noise once it has converged.
 #define DRIFT_DEADBAND_US 5000
 
 // Proportional gain expressed as time-to-recover.  target_ppm = -drift_us /
-// TIME_CONSTANT_SEC, so 30 ms of drift produces 500 ppm correction at 60 s.
-#define TIME_CONSTANT_SEC 60
+// TIME_CONSTANT_SEC, so 24 ms of drift produces 1000 ppm correction at 24 s.
+#define TIME_CONSTANT_SEC 24
 
 // Per-update smoothing of the applied correction toward the target.  At ~125
 // updates per second (audio_servo_update is called once per ~8 ms playback
-// chunk), 0.005 yields a ~1.6 s time constant on rate changes — slow enough
-// that the listener never perceives a "pitch glide".
+// chunk), 0.005 yields a ~1.6 s time constant on normal rate changes.  Seek
+// boost uses a shorter smoothing window so it can actually reach high ppm.
 #define SMOOTHING_NUMERATOR   1
 #define SMOOTHING_DENOMINATOR 200
+#define BOOST_SMOOTHING_DENOMINATOR 25
 
 // ----- State -----
 static struct {
@@ -38,6 +48,8 @@ static struct {
   // Applied correction is derived from step on demand; store as int32 ppm
   // to avoid float drift when smoothing.
   int32_t applied_ppm;
+  int64_t boost_started_us;
+  int64_t boost_until_us;
 } s_servo;
 
 void audio_servo_init(void) {
@@ -52,17 +64,41 @@ void audio_servo_reset(void) {
   // reset to 1.0 would be more audible than a gradual return.
 }
 
-static inline int32_t clamp_ppm(int32_t v) {
-  if (v > MAX_CORRECTION_PPM) {
-    return MAX_CORRECTION_PPM;
+static inline int32_t clamp_ppm_to(int32_t v, int32_t limit) {
+  if (v > limit) {
+    return limit;
   }
-  if (v < -MAX_CORRECTION_PPM) {
-    return -MAX_CORRECTION_PPM;
+  if (v < -limit) {
+    return -limit;
   }
   return v;
 }
 
+static inline int32_t abs_i32(int32_t v) {
+  return v < 0 ? -v : v;
+}
+
+void audio_servo_start_seek_boost(void) {
+  int64_t now_us = esp_timer_get_time();
+  s_servo.boost_started_us = now_us;
+  s_servo.boost_until_us = now_us + SEEK_BOOST_DURATION_US;
+}
+
 void audio_servo_update(int32_t drift_us, bool playing) {
+  int64_t now_us = esp_timer_get_time();
+  bool boost_active = playing && s_servo.boost_until_us > now_us;
+  bool boost_min_elapsed =
+      now_us - s_servo.boost_started_us >= SEEK_BOOST_MIN_DURATION_US;
+  if (boost_active && boost_min_elapsed &&
+      abs_i32(drift_us) < SEEK_BOOST_EXIT_DRIFT_US) {
+    s_servo.boost_until_us = 0;
+    boost_active = false;
+  }
+  int32_t ppm_limit = boost_active ? SEEK_BOOST_MAX_CORRECTION_PPM
+                                   : MAX_CORRECTION_PPM;
+  int32_t time_constant = boost_active ? SEEK_BOOST_TIME_CONSTANT_SEC
+                                       : TIME_CONSTANT_SEC;
+
   if (!playing) {
     s_servo.target_ppm = 0;
   } else if (drift_us > -DRIFT_DEADBAND_US && drift_us < DRIFT_DEADBAND_US) {
@@ -70,20 +106,28 @@ void audio_servo_update(int32_t drift_us, bool playing) {
   } else {
     // Positive drift -> we are early -> slow down (negative correction).
     // Negative drift -> we are late  -> speed up (positive correction).
-    int32_t target = -drift_us / TIME_CONSTANT_SEC;
-    s_servo.target_ppm = clamp_ppm(target);
+    int32_t target = -drift_us / time_constant;
+    s_servo.target_ppm = clamp_ppm_to(target, ppm_limit);
   }
 
   // Smooth applied correction toward target.  Integer math keeps state
   // deterministic and bit-exact across boots.
   int32_t delta = s_servo.target_ppm - s_servo.applied_ppm;
-  int32_t step = (delta * SMOOTHING_NUMERATOR) / SMOOTHING_DENOMINATOR;
+  int32_t smoothing_denominator = boost_active ? BOOST_SMOOTHING_DENOMINATOR
+                                               : SMOOTHING_DENOMINATOR;
+  int32_t step = (delta * SMOOTHING_NUMERATOR) / smoothing_denominator;
   // Ensure progress: never round to zero when delta is non-zero, otherwise
   // the integer divide stalls forever near the target.
   if (step == 0 && delta != 0) {
     step = (delta > 0) ? 1 : -1;
   }
-  s_servo.applied_ppm = clamp_ppm(s_servo.applied_ppm + step);
+  int32_t applied_limit = ppm_limit;
+  int32_t applied_abs = abs_i32(s_servo.applied_ppm);
+  if (applied_abs > applied_limit) {
+    applied_limit = applied_abs;
+  }
+  s_servo.applied_ppm = clamp_ppm_to(s_servo.applied_ppm + step,
+                                     applied_limit);
 
   // Convert to step (input samples per output sample).  step = 1 + ppm/1e6.
   s_servo.step = 1.0f + (float)s_servo.applied_ppm / 1000000.0f;

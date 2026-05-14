@@ -262,7 +262,8 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
       // FLUSHBUFFERED).  See seek_drain_until_us in
       // audio_receiver_internal.h for full rationale.
       receiver.seek_drain_until_us = esp_timer_get_time() + 3000000LL;
-               
+      audio_servo_start_seek_boost();
+
       int dropped = 0;
       uint32_t current_oldest = 0;
       while (audio_buffer_oldest_timestamp(&receiver.buffer, &current_oldest)) {
@@ -524,9 +525,10 @@ void audio_receiver_seek_flush(void) {
   // as audible static/ramp while new-position frames are still in flight.
   audio_output_flush();
   // Reset the servo so it starts from 0 ppm instead of ramping from the
-  // pre-seek correction (e.g. -250 ppm → +500 ppm), which is audible as a
-  // pitch "swoop" during the first ~1.6 s after a seek.
+  // pre-seek correction (e.g. -250 ppm -> boosted positive ppm), which is
+  // audible as a pitch "swoop" during the first ~1.6 s after a seek.
   audio_servo_init();
+  audio_servo_start_seek_boost();
   // Request that the RTP gate be armed as soon as the next anchor arrives.
   // This covers the forward-seek case where the buffer is already empty by
   // the time SETRATEANCHORTIME arrives, so the seek-detection heuristic

@@ -105,7 +105,7 @@ RTSP control (TCP/7000)        +— event channel (TCP, per session)
         |
   audio_resample (only if source rate != OUTPUT_RATE; 44.1 kHz build skips it)
         |
-  audio_servo (linear-interp ± ≤500 ppm rate trim, fed by smoothed drift EMA)
+  audio_servo (linear-interp rate trim, fed by smoothed drift EMA)
         |
   audio_alert mix (chime / alarm overlay)
         |
@@ -144,9 +144,11 @@ historically map to the realtime/UDP path (see `AI_HANDOFF.md` §5).
   256 frames @ 44.1 kHz). Subtracted from target time so frames hit the
   speaker, not the DMA register, on schedule.
 * **Drift servo** (`audio_servo.c`) is a linear-interpolation resampler
-  bounded to ±500 ppm (≈ 0.86 cents — inaudible). It does *not* change the
-  I2S clock; it stretches/squeezes the PCM stream feeding I2S. Smoothing
-  time constant ≈ 1.6 s so listeners never perceive a "pitch glide".
+  bounded to ±2000 ppm in steady state (≈ 3.46 cents, normally inaudible on
+  music/speech). It has a short ±10000 ppm post-seek boost to pull phase back
+  quickly after scrub. It does *not* change the I2S clock; it stretches/squeezes
+  the PCM stream feeding I2S. Smoothing time constant ≈ 1.6 s so listeners
+  do not perceive a pitch glide in normal playback.
 
 ### Thresholds (audio_timing.c) — these are tuned, do not casually retune
 
@@ -322,8 +324,9 @@ buf103 rx=N dec=N drop=N gap_evt=N gap_pkt=N maxgap=N nack=N/N retx=N
 * `late` = frames dropped because they were too late.
 * `drift min/max` = `early_us` per frame, in ms. Negative = late. Healthy:
   single-digit ms range, slowly trending toward zero.
-* `servo` = applied correction ppm (range ±500). Saturating at 500 for
-  several seconds means drift exceeds what the servo can fix.
+* `servo` = applied correction ppm (range ±2000 steady, briefly ±10000 after
+  seek). Saturating for several seconds means drift exceeds what the servo can
+  fix quickly.
 * `i2s sil` = silence writes (consumer returned 0 samples that tick).
   Spikes here indicate timing-gate silencing or buffer empty.
 * `ptp lock=1 t=NNms` = PTP locked, offset NN ms.

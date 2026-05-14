@@ -114,13 +114,12 @@ P-controller pur, fără I sau D. Argumentare:
 Formula:
 
 ```c
-target_ppm = -drift_us / TIME_CONSTANT_SEC;   // 60s timp constant
-target_ppm = clamp(target_ppm, ±MAX_CORRECTION_PPM); // ±500ppm
+target_ppm = -drift_us / TIME_CONSTANT_SEC;   // 24s timp constant
+target_ppm = clamp(target_ppm, ±MAX_CORRECTION_PPM); // ±2000ppm
 ```
 
-La drift = -30ms, TIME_CONSTANT = 60s: `target_ppm = +500` (clamp). Recuperează
-30ms drift în 30s × 500ppm = 15ms... hmm, asta e jumătate. Mai precis:
-recovery_time = drift / correction = 30ms / 0.0005 = **60 secunde**. Adică
+La drift = -24ms, TIME_CONSTANT = 24s: `target_ppm = +1000`. Mai precis:
+recovery_time = drift / correction = 24ms / 0.001 = **24 secunde**. Adică
 aceeași valoare ca TIME_CONSTANT_SEC. Asta nu e coincidență — TIME_CONSTANT
 chiar reprezintă "câte secunde durează să recuperezi 1 secundă de drift la
 1 ppm".
@@ -138,7 +137,7 @@ applied_ppm += delta / 200;  // ~1.6s timp constant la cadență de 125 Hz
 ```
 
 Asta e **smoothing-ul critic** care face servo-ul inaudibil. Schimbarea bruscă
-de rate — chiar și în cadrul ±500ppm — produce un "wow" audibil. Smoothing-ul
+de rate — chiar și în cadrul ±2000ppm — produce un "wow" audibil. Smoothing-ul
 distribuie tranziția pe ~1.6s, ceea ce e percepat ca o non-tranziție.
 
 Min-step protection: `delta != 0` dar `delta/200 == 0` din cauza diviziei
@@ -169,7 +168,7 @@ Bootstrap (primul input): `prev = curr = first_sample`, `phase = 1.0`. Asta
 forțează consumul unui al doilea input înainte de prima ieșire — astfel
 prev ≠ curr și interpolarea e validă de la primul output.
 
-**De ce interpolare liniară și nu polyphase**: pentru rate ≤ 500 ppm,
+**De ce interpolare liniară și nu polyphase**: pentru rate mici de servo,
 distorsiunea introdusă de aliasing este sub -100 dB față de semnal. Polyphase
 (care există deja în codebase pentru 44100→48000) ar costa mai mult CPU și
 mai multă memorie pentru zero îmbunătățire audibilă.
@@ -194,17 +193,17 @@ fierbinte. Doubla nu avem (e softfloat pe ESP32 — lent).
 
 ## Tunables — argumentarea valorilor
 
-### `MAX_CORRECTION_PPM = 500`
+### `MAX_CORRECTION_PPM = 2000`
 
-500 ppm = 0.05% rate change = **0.86 cents pitch shift**. Pragul de detectabilitate
+2000 ppm = 0.2% rate change = **3.46 cents pitch shift**. Pragul de detectabilitate
 pentru un ascultător antrenat pe tonuri pure susținute e ~5 cents
 (Moore et al., "An Introduction to the Psychology of Hearing", cap. 6).
 Pentru muzică sau voce, pragul e mult mai înalt (>20 cents).
 
-Deci la 500 ppm suntem **un ordin de mărime sub limita audibilă**. Dacă cineva
-vrea recuperare mai rapidă, putem mări la 1000-2000 ppm și încă vom rămâne
-sub pragul muzical, dar sub-cents continuu deja garantează inaudibilitatea
-pentru orice context.
+Deci 2000 ppm rămâne o limită steady-state conservatoare. După seek/scrub
+există un boost temporar la 10000 ppm cu gain și smoothing mai rapide; acesta poate fi
+audibil dacă ar sta mult timp, deci expiră singur și se oprește când drift-ul
+revine sub ~8 ms, dar nu mai devreme de ~2.5 s după seek.
 
 ### `DRIFT_DEADBAND_US = 5000` (5 ms)
 
@@ -216,17 +215,17 @@ absorption (corecție pozitivă tranzitorie ar grăbi consumul de buffer).
 5 ms e larg ca să acopere zgomotul EMA dar mic ca să producă A/V skew
 perceptibil (5 ms e sub pragul de detectare lipsync de ~25-40 ms).
 
-### `TIME_CONSTANT_SEC = 60`
+### `TIME_CONSTANT_SEC = 24`
 
-Stabilește câtă agresivitate are P-controller-ul. La 60s, drift de -30 ms
-produce target +500 ppm (clamp), ceea ce înseamnă convergență teoretică în 60s
-(de fapt mai puțin, dar pe direcție pozitivă). Mai mic (30s) = mai agresiv,
-risc de overshoot și saturare permanentă la clamp.
+Stabilește câtă agresivitate are P-controller-ul. La 24s, drift de -24 ms
+produce target +1000 ppm, ceea ce înseamnă convergență teoretică în 24s.
+Mai mic = mai agresiv, risc de overshoot și saturare permanentă la clamp.
 
 Mai mare (120s) = convergență prea lentă față de WiFi jitter — drift se
 acumulează mai repede decât se recuperează.
 
-60s e compromis: rapid pentru ureche umană, lent pentru pericolul de oscilație.
+24s e compromisul curent: mai lipit de zero după seek, încă lent destul pentru
+a nu vâna jitter-ul WiFi.
 
 ### `SMOOTHING_DENOMINATOR = 200`
 

@@ -16,10 +16,11 @@
  * (output_rate × (1 + correction)) input samples per second and emits
  * output_rate samples per second to I2S.
  *
- * Correction is bounded to ±500 ppm (0.05% — well below the audibility
- * threshold of ~600 ppm pitch shift) and a P-controller targets the smoothed
- * drift over a 60-second time constant.  Small drift is ignored via a 5 ms
- * deadband to avoid hunting on jitter.
+ * Correction is bounded to ±2000 ppm in steady state and a P-controller
+ * targets the smoothed drift over a 24-second time constant.  After seek/scrub
+ * a short catch-up mode allows a larger correction so phase error converges
+ * quickly.  Small drift is ignored via a 5 ms deadband to avoid hunting on
+ * jitter.
  *
  * The resampler is always in the path; at zero correction it is a unity
  * delay of one input frame (~22 µs), which is inaudible.
@@ -33,6 +34,12 @@ void audio_servo_init(void);
  * lets the smoother walk the rate back to 1.0 over the next ~1 s.
  */
 void audio_servo_reset(void);
+
+/**
+ * Temporarily allow stronger rate correction after seek/scrub.  The boost
+ * self-expires and also exits once drift is close enough for normal servo.
+ */
+void audio_servo_start_seek_boost(void);
 
 /**
  * Update the controller with the current smoothed drift signal.  Called by
