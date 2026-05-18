@@ -62,6 +62,11 @@ typedef struct {
   // because it represents an ongoing physical quantity, not a window stat.
   int32_t smoothed_drift_us;
   bool smoothed_drift_valid;
+  // One-shot flag: set after anchor_local_time_ns has been adjusted for
+  // sender pre-buffer compensation (Task 1 / round-3 fix).  Cleared every
+  // time a new anchor is set so the correction fires at most once per seek.
+  // Never set when ptp_clock_is_locked() is true.
+  bool local_anchor_adjusted;
 } audio_timing_t;
 
 void audio_timing_init(audio_timing_t *timing, size_t pending_capacity);

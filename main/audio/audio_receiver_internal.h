@@ -96,6 +96,14 @@ typedef struct {
   // delivered at multi-x real-time over WiFi) and short enough that a
   // run-on into normal-play packets is harmless.
   int64_t seek_drain_until_us;
+
+  // SETPEERS dedup (round-3 fix): 32-bit FNV-1a hash of the most-recently
+  // accepted SETPEERS bplist body.  When a new SETPEERS arrives with the
+  // same hash, it is silently acked without disturbing the PTP layer.
+  // iPhone Apple Music spams 3-4 SETPEERS in quick succession during a seek;
+  // without dedup each one is logged as "PTP peers changed" and delays PTP
+  // convergence diagnostics.  Zero means "no previous peer list stored".
+  uint32_t last_setpeers_hash;
 } audio_receiver_state_t;
 
 bool audio_stream_process_frame(audio_receiver_state_t *state,

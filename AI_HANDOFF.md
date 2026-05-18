@@ -339,3 +339,44 @@ Approach (2) is still unimplemented.  If the hardware test still shows multi-sec
 * In telemetry after a seek: look for `drift min` worsening over multiple seconds despite `dec=100+` per second — that's the PTP-vs-local mismatch in action, not a decoder bottleneck.
 * `post_flush done: early=−XX ms, elapsed=YYYY ms`: `YYYY` is the dead air length; `XX` is the steady-state offset the servo will then take 10+ minutes to (not) recover from.
 * `ptp lock=1 t=NNN`: if `NNN` is consistently > 100 ms, the producer/consumer anchor mismatch is the dominant contributor to seek silence.
+
+---
+
+## 8. Round-2 Realtime-UDP Tuning (2026-05-18)
+
+**Symptoms addressed (from round-1 telemetry):**
+`i2s_channel_write` blocking 50–90 ms on the realtime UDP path; soft-boost exiting on 30 s timeout while drift was still at −113 ms; "Dropping late frame: 150–200 ms" every 1–3 s.
+
+**Four levers pulled:**
+
+1. **I2S DMA depth doubled** (`audio_output.c`: `dma_desc_num` 8 → 16; 46 ms → 93 ms cushion).  The old 46 ms DMA buffer was smaller than the observed 50–90 ms scheduling jitter spikes, causing the playback task to stall and emit audible silence.  `HARDWARE_OUTPUT_LATENCY_US` in `audio_timing.c` updated to 93 000 µs in lockstep; failing to do so would shift post-seek lipsync by 47 ms.
+
+2. **Soft-boost servo ceiling raised** (`audio_servo.c`: `SOFT_BOOST_MAX_CORRECTION_PPM` 5000 → 7000 ppm).  At 5000 ppm the boost exactly matched the ~5 ms/s loss rate from WiFi packet loss and never recovered existing drift; 7000 ppm gives a 2 ms/s net catch-up.
+
+3. **Soft-boost timeout extended** (`SOFT_BOOST_TIMEOUT_US` 30 s → 300 s).  Round-1 logs showed boost exiting on the timeout while still correcting; the condition fought (steady WiFi loss) is not transient.  Convergence-exit (±10 ms for 1 s) is the correct exit; timeout is now just a backstop.
+
+4. **Realtime late threshold widened** (`audio_timing.c`: `TIMING_THRESHOLD_LATE_REALTIME_US` 150 ms → 200 ms) to absorb the residual jitter after the DMA fix.
+
+**BT re-init fix (`a2dp_sink.c`):** `esp_bt_gap_set_device_name` moved from before `bluedroid_enable` into `bt_stack_evt_handler` (after `esp_bt_gap_register_callback`); pre-registration calls can be silently dropped by Bluedroid on re-init.  100 ms delay added before `set_scan_mode` to let the BR/EDR scheduler settle after controller re-init.  Return values of `set_pin` and `set_scan_mode` are now logged at WARN on failure.
+
+**What remains structural:** residual ~5% UDP packet loss at −56 dBm on 2.4 GHz is a radio/antenna issue, not firmware.  Moving to 5 GHz or a better antenna placement will eliminate the remaining baseline drift that the servo is compensating for.
+
+---
+
+## 9. Round-3 PTP-Not-Locked Post-Seek Silence (2026-05-18)
+
+**Symptom:** On the AAC/TCP buffered path (type=103), seeks produce 4–5 s of silence when `ptp lock=0`. Working seeks (ptp lock=1) showed −47 ms drift; broken seeks showed +4744 to +4813 ms drift and `servo=0ppm`, then `ur=101` for several seconds before audio resumes.
+
+**Root cause:** When PTP is not locked, `compute_early_us` falls back to `anchor_local_time_ns` (the CPU instant we received SETRATEANCHORTIME). The sender pre-buffers ~3–5 s of audio ahead of the anchor for multi-room sync. Those forward-buffered frames read as "5 s in the future", get held as pending forever, and the user hears silence. The `anchor_network_time_ns` path used when PTP is locked already accounts for the pre-buffer correctly via `ptp_clock_get_offset_ns()`.
+
+**Contributing factor:** iPhone Apple Music sends 3–4 SETPEERS packets in rapid succession during a seek (body_len 215, 215, 128, 215…), each triggering "PTP peers changed, clock will re-lock" log churn. While the handler does not call `ptp_clock_clear()`, the repeated logging was masking the root cause in telemetry. If any future code were added to handle SETPEERS, the spam would multiply the disruption.
+
+**Three fixes applied:**
+
+1. **`anchor_local_time_ns` pre-buffer compensation** (`audio_timing.c`, inside `post_flush` path): when PTP is not locked and the oldest post-seek frame is >500 ms early, shift `anchor_local_time_ns` forward by `(early_us − 200 ms)` — exactly once per anchor (`local_anchor_adjusted` flag, cleared in `audio_timing_set_anchor`). The 200 ms head-start matches the normal jitter buffer depth. `anchor_network_time_ns` is never touched. This fix fires only inside `post_flush` and only when `!ptp_clock_is_locked()` — it is completely inert when PTP is locked, so multi-room sync is unaffected (see CLAUDE.md §12).
+
+2. **SETPEERS dedup** (`audio_receiver.c::audio_receiver_setpeers_is_new`, called from `rtsp_handlers.c::handle_setpeers`): 32-bit FNV-1a hash of the raw bplist body; identical body → silent ack, no log disturbance. `last_setpeers_hash` stored on `audio_receiver_state_t`.
+
+3. **Duplicate FLUSHBUFFERED idempotency** (`audio_receiver.c::audio_receiver_set_deferred_flush`): if a deferred flush is already pending, only replace `flush_until_ts` when the new value is *later* (signed 32-bit comparison). Earlier/equal duplicate is silently ignored with a log line. This prevents the second FLUSHBUFFERED from triggering the boundary prematurely when its untilTS is a subset of the first's.
+
+**PTP-locked path is untouched.** All three fixes are conditional on non-locked state or triggered by duplicate inputs; normal PTP-locked multi-room sessions see no code-path change.

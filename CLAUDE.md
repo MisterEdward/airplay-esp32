@@ -140,9 +140,12 @@ historically map to the realtime/UDP path (see `AI_HANDOFF.md` §5).
     `ptp_clock_get_offset_ns()`.
   * **NTP** — AirPlay 1. Same shape, with `ntp_clock_get_offset_ns()`.
   * **NONE** — fallback to `anchor_local_time_ns` (no multi-room sync).
-* `HARDWARE_OUTPUT_LATENCY_US = 46 ms` accounts for I2S DMA depth (8 desc ×
+* `HARDWARE_OUTPUT_LATENCY_US = 93 ms` accounts for I2S DMA depth (16 desc ×
   256 frames @ 44.1 kHz). Subtracted from target time so frames hit the
-  speaker, not the DMA register, on schedule.
+  speaker, not the DMA register, on schedule.  (Round 1 was 8 desc / 46 ms;
+  doubled in round 2 to absorb 50–90 ms `i2s_channel_write` scheduling jitter
+  observed on the realtime UDP path.  If you change `dma_desc_num` in
+  `audio_output.c`, update this constant in lockstep.)
 * **Drift servo** (`audio_servo.c`) is a linear-interpolation resampler
   bounded to ±2000 ppm in steady state (≈ 3.46 cents, normally inaudible on
   music/speech). It has a short ±10000 ppm post-seek boost to pull phase back
@@ -155,7 +158,7 @@ historically map to the realtime/UDP path (see `AI_HANDOFF.md` §5).
 | Macro                              | Value      | Why                                            |
 |------------------------------------|------------|------------------------------------------------|
 | `DEFAULT_BUFFER_LATENCY_US`        | 200 ms     | startup jitter buffer                          |
-| `HARDWARE_OUTPUT_LATENCY_US`       | 46 ms      | I2S DMA depth                                  |
+| `HARDWARE_OUTPUT_LATENCY_US`       | 93 ms      | I2S DMA depth (16×256 @ 44.1 kHz)             |
 | `TIMING_THRESHOLD_EARLY_US`        | 40 ms      | hold frame as pending; avoids audible A/V drift|
 | `TIMING_THRESHOLD_LATE_US`         | 60 ms      | absorbs WiFi-induced i2s_channel_write stalls  |
 | `BULK_FLUSH_LATE_THRESHOLD_US`     | 2 s        | flush whole buf on single huge-late frame      |

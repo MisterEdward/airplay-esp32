@@ -48,6 +48,14 @@ static volatile bool playback_running = false;
 static TaskHandle_t playback_task_handle = NULL;
 static volatile int source_rate = 44100;
 static volatile bool resample_reinit_needed = false;
+// i2s_channel_enabled tracks whether the I2S TX channel is in the RUNNING
+// state.  It is set true after audio_output_init / i2s_channel_enable and
+// cleared whenever the channel is explicitly disabled.  playback_task checks
+// this before calling i2s_channel_write to avoid the
+// "E i2s_common: The channel is not enabled" error that fires when a
+// BT→AirPlay handoff races a disable→enable cycle inside flush handling
+// or audio_output_set_sample_rate.
+static volatile bool i2s_channel_enabled = false;
 
 // I2S write cadence telemetry (drained by audio_telemetry).
 static portMUX_TYPE write_stats_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -136,8 +144,10 @@ static void playback_task(void *arg) {
       flush_requested = false;
       audio_resample_reset();
       audio_servo_reset();
+      i2s_channel_enabled = false;
       i2s_channel_disable(tx_handle);
       i2s_channel_enable(tx_handle);
+      i2s_channel_enabled = true;
     }
     // Drift servo: pull the smoothed drift signal and update the controller
     // before consuming this chunk.  When idle (no anchor / paused) the
@@ -166,17 +176,25 @@ static void playback_task(void *arg) {
         apply_volume(play_buf, play_samples * 2);
         audio_alert_mix(play_buf, play_samples, OUTPUT_RATE);
         led_audio_feed(play_buf, play_samples);
-        i2s_channel_write(tx_handle, play_buf, play_samples * 4, &written,
-                          portMAX_DELAY);
-        record_i2s_write(false);
+        // Guard against the BT→AirPlay handoff race: if the channel was
+        // temporarily disabled (flush or sample-rate reconfiguration) skip
+        // this write rather than letting the I2S driver log an error.
+        // The next iteration will find the channel re-enabled.
+        if (i2s_channel_enabled) {
+          i2s_channel_write(tx_handle, play_buf, play_samples * 4, &written,
+                            portMAX_DELAY);
+          record_i2s_write(false);
+        }
       }
       taskYIELD();
     } else {
       audio_alert_mix(silence, FRAME_SAMPLES, OUTPUT_RATE);
       led_audio_feed(silence, FRAME_SAMPLES);
-      i2s_channel_write(tx_handle, silence, (size_t)FRAME_SAMPLES * 4, &written,
-                        pdMS_TO_TICKS(10));
-      record_i2s_write(true);
+      if (i2s_channel_enabled) {
+        i2s_channel_write(tx_handle, silence, (size_t)FRAME_SAMPLES * 4, &written,
+                          pdMS_TO_TICKS(10));
+        record_i2s_write(true);
+      }
       memset(silence, 0, (size_t)FRAME_SAMPLES * 2 * sizeof(int16_t));
       vTaskDelay(1);
     }
@@ -193,7 +211,14 @@ static void playback_task(void *arg) {
 esp_err_t audio_output_init(void) {
   i2s_chan_config_t chan_cfg =
       I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-  chan_cfg.dma_desc_num = 8;
+  // 16 descriptors × 256 frames @ 44.1 kHz = ~93 ms DMA cushion.
+  // Round 1 used 8×256 = ~46 ms, but telemetry showed i2s_channel_write
+  // blocking 50-90 ms on the realtime UDP path during WiFi scheduling jitter
+  // spikes, exceeding the old cushion and causing audible stutter.  Doubling
+  // the descriptor count absorbs those spikes without a frame drop.
+  // NOTE: HARDWARE_OUTPUT_LATENCY_US in audio_timing.c must match (93000 µs).
+  // Cost: +8 KB internal DRAM (was 8 KB, now 16 KB total for DMA descriptors).
+  chan_cfg.dma_desc_num = 16;
   chan_cfg.dma_frame_num = 256;
 
   ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, &tx_handle, NULL), TAG,
@@ -227,6 +252,7 @@ esp_err_t audio_output_init(void) {
                       "std mode init failed");
   ESP_RETURN_ON_ERROR(i2s_channel_enable(tx_handle), TAG,
                       "channel enable failed");
+  i2s_channel_enabled = true;
 
   audio_resample_init(44100, OUTPUT_RATE, 2);
 
@@ -267,12 +293,16 @@ esp_err_t audio_output_write(const void *data, size_t bytes, TickType_t wait) {
 void audio_output_set_sample_rate(uint32_t rate) {
   // Only safe to call when no writer task is actively using I2S
   // (AirPlay playback task must be stopped, BT calls this before
-  // the I2S writer task starts consuming data)
+  // the I2S writer task starts consuming data).
+  // Flag cleared and restored so any residual playback_task iteration
+  // skips the write rather than hitting the "channel not enabled" error.
   ESP_LOGI(TAG, "Setting sample rate to %" PRIu32 " Hz", rate);
+  i2s_channel_enabled = false;
   i2s_channel_disable(tx_handle);
   i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(rate);
   i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg);
   i2s_channel_enable(tx_handle);
+  i2s_channel_enabled = true;
 }
 
 void audio_output_flush(void) {

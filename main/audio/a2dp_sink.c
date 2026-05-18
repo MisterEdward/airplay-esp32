@@ -118,6 +118,12 @@ static SemaphoreHandle_t s_a2dp_deinit_sem = NULL;
 
 static uint32_t s_sample_rate = 44100;
 
+// Device name cached at init so bt_stack_evt_handler (which runs on the BT
+// app task, not the caller's task) can call esp_bt_gap_set_device_name after
+// the GAP callback is registered, rather than before stack-up (where the call
+// can be silently dropped by Bluedroid on a re-init path).
+static char s_device_name[64] = {0};
+
 /* ========================================================================== */
 /* BT App Task — context-switch from BT stack to app task                     */
 /* ========================================================================== */
@@ -694,8 +700,13 @@ static void bt_stack_evt_handler(uint16_t event, void *param) {
 
   ESP_LOGI(TAG, "BT stack up, initializing profiles");
 
-  // GAP
+  // GAP — register callback first, then configure.  Device name is set here
+  // (not before bluedroid_enable) because GAP API calls issued before the
+  // callback is registered can be silently dropped by Bluedroid if the stack
+  // isn't fully ready, causing the device to appear with a stale name after
+  // an AirPlay→BT handoff re-init.  s_device_name was cached at init time.
   esp_bt_gap_register_callback(bt_gap_cb);
+  esp_bt_gap_set_device_name(s_device_name);
 
 #ifdef CONFIG_BT_SSP_ENABLED
   // Secure Simple Pairing — numeric comparison for BT 2.1+ devices
@@ -713,8 +724,14 @@ static void bt_stack_evt_handler(uint16_t event, void *param) {
     pin_len = ESP_BT_PIN_CODE_LEN;
   }
   memcpy(pin_code, pin_str, pin_len);
-  esp_bt_gap_set_pin(pin_type, pin_len, pin_code);
-  ESP_LOGI(TAG, "BT PIN set (%d digits)", pin_len);
+  {
+    esp_err_t pin_err = esp_bt_gap_set_pin(pin_type, pin_len, pin_code);
+    if (pin_err != ESP_OK) {
+      ESP_LOGW(TAG, "BT set_pin failed: %s", esp_err_to_name(pin_err));
+    } else {
+      ESP_LOGI(TAG, "BT PIN set (%d digits)", pin_len);
+    }
+  }
 
   // AVRC Controller (to get metadata from source)
   esp_avrc_ct_register_callback(bt_avrc_ct_cb);
@@ -732,11 +749,25 @@ static void bt_stack_evt_handler(uint16_t event, void *param) {
   esp_a2d_sink_register_data_callback(bt_a2dp_data_cb);
   esp_a2d_sink_init();
 
-  // Apply saved discoverable state
-  if (s_bt_discoverable) {
-    esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
-  } else {
-    esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+  // Apply saved discoverable state.  A 100 ms delay is inserted before the
+  // set_scan_mode call because after a full controller deinit + re-init (the
+  // AirPlay→BT handoff path), the BR/EDR inquiry/page scheduler can take a
+  // few tens of ms to be ready to honour scan-mode changes.  The boot path
+  // does not need this (stack is fresh), but the re-init path can silently
+  // drop the call without it.
+  vTaskDelay(pdMS_TO_TICKS(100));
+  ESP_LOGI(TAG, "BT scan mode: %s",
+           s_bt_discoverable ? "discoverable" : "hidden");
+  {
+    esp_err_t scan_err =
+        s_bt_discoverable
+            ? esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE,
+                                       ESP_BT_GENERAL_DISCOVERABLE)
+            : esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE,
+                                       ESP_BT_NON_DISCOVERABLE);
+    if (scan_err != ESP_OK) {
+      ESP_LOGW(TAG, "BT set_scan_mode failed: %s", esp_err_to_name(scan_err));
+    }
   }
 
   // Restore saved BT volume (falls back to 64 / -15 dB if none stored)
@@ -761,11 +792,21 @@ static void bt_stack_evt_handler(uint16_t event, void *param) {
 esp_err_t bt_a2dp_sink_init(const char *device_name,
                             bt_a2dp_state_cb_t state_cb) {
   s_state_cb = state_cb;
+  // Cache device name for use in bt_stack_evt_handler (see s_device_name).
+  snprintf(s_device_name, sizeof(s_device_name), "%s", device_name ? device_name : "");
 
   if (s_bt_running) {
     bt_a2dp_sink_set_discoverable(s_bt_discoverable);
     return ESP_OK;
   }
+
+  // On the re-init path (stop→start after AirPlay session), s_bt_discoverable
+  // may be false because bt_a2dp_sink_stop called set_discoverable(false) to
+  // hide BT during AirPlay streaming.  Reset it here so bt_stack_evt_handler
+  // (the async init completion callback) makes BT discoverable on start.
+  // This mirrors the boot path where s_bt_discoverable starts as true.
+  s_bt_discoverable = true;
+  ESP_LOGI(TAG, "BT discoverable enabled");
 
   ESP_LOGI(TAG, "Initializing Bluetooth A2DP Sink: %s", device_name);
 
@@ -839,8 +880,9 @@ esp_err_t bt_a2dp_sink_init(const char *device_name,
     return err;
   }
 
-  // Set device name
-  esp_bt_gap_set_device_name(device_name);
+  // Device name is set inside bt_stack_evt_handler (after
+  // esp_bt_gap_register_callback), not here.  Calling it before the callback
+  // is registered can be silently dropped by Bluedroid on a re-init path.
 
   // Dispatch stack-up event to app task
   bt_app_work_dispatch(bt_stack_evt_handler, BT_APP_EVT_STACK_UP, NULL, 0);

@@ -266,3 +266,23 @@ void audio_receiver_drain_drift(int32_t *min_us, int32_t *max_us,
  * Updated on every frame in audio_timing_read; non-destructive read.
  */
 int32_t audio_receiver_get_smoothed_drift_us(void);
+
+/**
+ * SETPEERS dedup helper (round-3 fix).
+ *
+ * Computes a 32-bit FNV-1a hash of the raw SETPEERS bplist body and compares
+ * it to the most-recently stored hash.  Returns true when the peer list has
+ * genuinely changed (caller should proceed with PTP re-lock logging), false
+ * when the body is identical to the previous call (caller should skip the
+ * disturbance and just ack).
+ *
+ * iPhone Apple Music sends 3-4 identical SETPEERS in rapid succession during
+ * a seek; each one would otherwise log "PTP peers changed" and reset the PTP
+ * convergence timer for no reason.  Dedup eliminates the noise without hiding
+ * real peer-list changes.
+ *
+ * @param body     Raw RTSP body bytes (may be NULL)
+ * @param body_len Length of body
+ * @return true if peer list is new or body is NULL/empty, false if duplicate
+ */
+bool audio_receiver_setpeers_is_new(const uint8_t *body, size_t body_len);

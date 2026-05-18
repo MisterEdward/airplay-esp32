@@ -37,3 +37,32 @@ CONFIG_BTN_VOLUME_UP_GPIO=-1
 CONFIG_BTN_VOLUME_DOWN_GPIO=-1
 CONFIG_BTN_NEXT_GPIO=-1
 CONFIG_BTN_PREV_GPIO=-1
+
+# --- WiFi / decode tuning override for AirPlay-primary use --------------------
+# sdkconfig.defaults.bt assumed "AirPlay is stopped while BT streams" and
+# trimmed WiFi to give BT headroom.  This device does the OPPOSITE: BT is
+# stopped while AirPlay streams (see main.c on_airplay_client_event).  The
+# trimmed config strangles the realtime ALAC/UDP path (type=96, ~125 pps,
+# 200 ms jitter buffer): undersized RX buffers + flash-resident RX ISR cause
+# 10-25 packets/s loss with audible drops every ~100 ms.
+#
+# Restore full WiFi sizing.  BT is OK with these too because the BT path
+# only matters while AirPlay is idle (no UDP RX pressure).
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_RX_BA_WIN=16
+CONFIG_ESP_WIFI_IRAM_OPT=y
+CONFIG_ESP_WIFI_RX_IRAM_OPT=y
+
+# Restore perf optimization for ALAC decode under the realtime budget.
+# sdkconfig.defaults.bt switched to SIZE for IRAM pressure with BT enabled;
+# with the WiFi IRAM_OPT toggles above and no flash-placement of heap/ringbuf
+# below, PERF fits and decodes ~15% faster.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Undo the flash-placement nudges from .bt — they helped IRAM headroom when
+# BT was the bottleneck.  With BT-on-demand they cost too much on the UDP path.
+CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=n
+CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=n
+CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=n

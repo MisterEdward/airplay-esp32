@@ -11,7 +11,14 @@
 #include "ptp_clock.h"
 
 #define DEFAULT_BUFFER_LATENCY_US     200000 // 200ms startup jitter buffer
-#define HARDWARE_OUTPUT_LATENCY_US    46000  // ~46ms I2S DMA latency
+// I2S DMA latency compensation: frames are scheduled this many µs earlier so
+// they hit the speaker at the correct wall-clock moment, not when they enter
+// the DMA register.  Must equal dma_desc_num × dma_frame_num / OUTPUT_RATE:
+//   Round 1: 8  × 256 / 44100 ≈ 46 ms (audio_output.c dma_desc_num=8)
+//   Round 2: 16 × 256 / 44100 ≈ 93 ms (audio_output.c dma_desc_num=16)
+// If you change dma_desc_num in audio_output.c, update this in lockstep or
+// post-seek lipsync drifts by exactly the delta.
+#define HARDWARE_OUTPUT_LATENCY_US    93000
 #define MIN_STARTUP_FRAMES            4
 #define DRIFT_ADJUST_THRESHOLD_FRAMES 2
 #define TIMING_THRESHOLD_US           40000 // 40ms early threshold (legacy)
@@ -29,6 +36,21 @@
 // the typical stall while keeping steady-state drift bounded enough to stay
 // imperceptible against video.
 #define TIMING_THRESHOLD_LATE_US  60000
+// Wider late threshold for the realtime UDP path (type=96, ~200 ms jitter
+// buffer).  NACK retransmits on WiFi routinely return frames 60-100 ms late,
+// and with a 200 ms jitter budget those frames are still within the sender's
+// intended playback window.  Dropping them produces audible stutter while
+// playing them slightly behind the anchor is inaudible on the realtime path
+// where the sender does not enforce A/V lipsync at sample accuracy.
+// The buffered AAC/TCP path keeps the tight 60 ms gate because TCP retransmits
+// arrive in sequence with predictable timing and a ~600 ms+ jitter budget.
+//
+// Round 1: 150 ms.  Telemetry showed drift spikes to -180/-200 ms when an
+// i2s_channel_write blocked 90 ms on top of a steady -100 ms baseline.
+// Round 2: raised to 200 ms.  With the DMA depth doubled to 16×256 (Task 1),
+// worst-case scheduling jitter should halve to ~45 ms, so 200 ms gives
+// comfortable headroom above the expected -100 ms baseline + 45 ms spike.
+#define TIMING_THRESHOLD_LATE_REALTIME_US 200000
 // If a frame is late by more than this, flush the whole buffer at once
 // instead of draining one frame per DMA callback (which would cause seconds
 // of silence while thousands of stale frames are individually dropped).
@@ -228,6 +250,7 @@ void audio_timing_reset(audio_timing_t *timing) {
   timing->drift_samples = 0;
   timing->smoothed_drift_us = 0;
   timing->smoothed_drift_valid = false;
+  timing->local_anchor_adjusted = false;
 }
 
 int32_t audio_timing_get_smoothed_drift_us(const audio_timing_t *timing) {
@@ -308,6 +331,10 @@ void audio_timing_set_anchor(audio_timing_t *timing,
   // track skip does not accumulate into the new anchor's counts.
   timing->consecutive_early_frames = 0;
   timing->consecutive_late_frames = 0;
+  // Clear the per-anchor local-time adjustment flag so the pre-buffer
+  // compensation (Task 1 / round-3) fires exactly once on the first huge-early
+  // frame after this anchor, not repeatedly.
+  timing->local_anchor_adjusted = false;
 }
 
 void audio_timing_set_playing(audio_timing_t *timing, bool playing) {
@@ -538,6 +565,46 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
           }
           int64_t flush_elapsed =
               esp_timer_get_time() - timing->post_flush_start_us;
+
+          // --- Round-3 fix: pre-buffer compensation when PTP is not locked ---
+          // When PTP is NOT locked the consumer falls back to anchor_local_time_ns
+          // as the reference.  But anchor_local_time_ns is the CPU instant we
+          // received SETRATEANCHORTIME — it does NOT include the sender's
+          // pre-buffer (3-5 s of audio queued ahead of the anchor for multi-room
+          // sync).  Forward-buffered frames appear "5 s in the future", the
+          // consumer holds them pending, and the user hears 4-5 s of silence.
+          //
+          // Guard: only when (1) PTP is not locked — PTP-locked path already
+          // uses anchor_network_time_ns - ptp_offset which is correct, so we
+          // must NEVER shift anchor_local_time_ns there (would break multi-room
+          // sync, see CLAUDE.md §12).  (2) inside post_flush — only fires after
+          // a seek, not on regular packet flow.  (3) first frame only per anchor
+          // (local_anchor_adjusted flag) — prevents cumulative drift.
+          // (4) drift > +500 ms — far outside any legitimate jitter budget.
+          //
+          // Action: slide anchor_local_time_ns forward by (early_us - 200 ms)
+          // so the oldest buffered frame's new computed target is ~now + 200 ms,
+          // matching the normal jitter buffer depth.  The 200 ms head-start lets
+          // DMA fill cleanly before the first frame is due.  anchor_network_time_ns
+          // is left untouched — it is sacred for multi-room sync.
+          if (!timing->local_anchor_adjusted &&
+              !ptp_clock_is_locked() &&
+              early_us > 500000LL) {
+            int64_t adjust_ns = (early_us - 200000LL) * 1000LL;
+            int64_t adjust_ms = (early_us - 200000LL) / 1000LL;
+            timing->anchor_local_time_ns += adjust_ns;
+            timing->local_anchor_adjusted = true;
+            ESP_LOGI(TAG,
+                     "Re-anchored local time by %lld ms "
+                     "(PTP not locked, pre-buffer compensation)",
+                     adjust_ms);
+            // Recompute early_us with the adjusted anchor so the frame
+            // evaluation below sees the corrected value immediately.
+            compute_early_us(timing, format, hdr->rtp_timestamp, sync_mode,
+                             &early_us);
+          }
+          // --- end pre-buffer compensation ---
+
           // Exception: frames that are MORE than POST_FLUSH_STALE_THRESHOLD_US
           // early are old-position data still draining from the TCP kernel
           // buffer (e.g. frames from 2:30 after a seek back to 0:00).  Discard
@@ -657,7 +724,14 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
             return samples;
           }
         } else {
-          int64_t late_threshold_us = TIMING_THRESHOLD_LATE_US;
+          // Realtime UDP streams (output_latency_us <= 300 ms) need a wider
+          // late window because NACK retransmits arrive 60-100 ms late
+          // after WiFi interference; dropping them produces audible stutter.
+          // Buffered TCP streams keep the tight 60 ms gate.
+          int64_t late_threshold_us =
+              (timing->output_latency_us <= 300000)
+                  ? TIMING_THRESHOLD_LATE_REALTIME_US
+                  : TIMING_THRESHOLD_LATE_US;
           int64_t now_us = esp_timer_get_time();
           if (timing->post_flush_late_grace_until_us > now_us) {
             late_threshold_us = POST_FLUSH_GRACE_LATE_US;

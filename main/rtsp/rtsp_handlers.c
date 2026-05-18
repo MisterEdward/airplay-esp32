@@ -1731,7 +1731,24 @@ static void handle_setpeers(int socket, rtsp_conn_t *conn,
   const uint8_t *body = req->body;
   size_t body_len = req->body_len;
 
-  ESP_LOGI(TAG, "%s: body_len=%zu", req->method, body_len);
+  // Dedup: iPhone Apple Music sends 3-4 SETPEERS in rapid succession during a
+  // seek (body_len 215, 215, 128, 215, …) with identical bplist bodies.  Each
+  // duplicate used to log "PTP peers changed, clock will re-lock" and would
+  // have reset any PTP-aware state, preventing the clock from converging in
+  // the narrow window between the seek and the new anchor.  FNV-1a hash of the
+  // body bytes lets us suppress duplicates without parsing the bplist.
+  // Zero body or first call → treated as new peer list (proceed normally).
+  bool is_new = audio_receiver_setpeers_is_new(body, body_len);
+
+  ESP_LOGI(TAG, "%s: body_len=%zu%s", req->method, body_len,
+           is_new ? "" : " (duplicate, skipping re-lock)");
+
+  if (!is_new) {
+    // Identical peer list — ack and leave PTP alone so it has time to lock.
+    rtsp_send_ok(socket, conn, req->cseq);
+    return;
+  }
+
   if (body && body_len >= 8 && memcmp(body, "bplist00", 8) == 0) {
     ESP_LOGI(TAG, "SETPEERS: got bplist");
   }

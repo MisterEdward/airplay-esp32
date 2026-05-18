@@ -544,6 +544,41 @@ void audio_receiver_set_deferred_flush(uint32_t flush_until_ts) {
   if (!receiver.stream) {
     return;
   }
+
+  // Idempotency guard for duplicate FLUSHBUFFERED (round-3 fix).
+  //
+  // iPhone Apple Music sometimes sends two or three FLUSHBUFFERED deferred
+  // packets in quick succession for the same seek.  The flush_until_ts values
+  // in the second and third packets are often EARLIER (smaller) than the first
+  // — they represent the overlap region rather than the final boundary.
+  // Blindly overwriting flush_until_ts with an earlier value would trigger
+  // the deferred flush prematurely, cutting off the last few seconds of the
+  // current track and producing a brief silence glitch at the transition.
+  //
+  // Rule: if a deferred flush is already pending, only replace it when the new
+  // flush_until_ts is LATER (signed 32-bit comparison handles RTP wrap).
+  // If it is equal or earlier, silently ignore the duplicate.  The existing
+  // boundary is conservative (fires later) which is always safe — we play a
+  // little more of the old track, then the deferred flush fires, and the new
+  // track starts cleanly.
+  //
+  // Exception: if the caller is re-arming after an immediate seek_flush
+  // (deferred_flush_pending is false), the check doesn't apply — just arm.
+  if (receiver.timing.deferred_flush_pending) {
+    int32_t delta =
+        (int32_t)(flush_until_ts - receiver.timing.flush_until_ts);
+    if (delta <= 0) {
+      ESP_LOGI(TAG,
+               "Deferred flush duplicate ignored: new_ts=%" PRIu32
+               " <= existing_ts=%" PRIu32,
+               flush_until_ts, receiver.timing.flush_until_ts);
+      return;
+    }
+    ESP_LOGI(TAG,
+             "Deferred flush extended: %" PRIu32 " -> %" PRIu32,
+             receiver.timing.flush_until_ts, flush_until_ts);
+  }
+
   // Write flush_until_ts before arming the flag so audio_timing_read never
   // sees deferred_flush_pending=true with a stale timestamp.
   receiver.timing.flush_until_ts = flush_until_ts;
@@ -580,6 +615,28 @@ void audio_receiver_drain_drift(int32_t *min_us, int32_t *max_us,
 
 int32_t audio_receiver_get_smoothed_drift_us(void) {
   return audio_timing_get_smoothed_drift_us(&receiver.timing);
+}
+
+bool audio_receiver_setpeers_is_new(const uint8_t *body, size_t body_len) {
+  // Treat missing / empty body as "new" so the caller logs and proceeds.
+  if (!body || body_len == 0) {
+    return true;
+  }
+
+  // FNV-1a 32-bit hash over the raw body bytes.
+  // Chosen for simplicity — not cryptographic, just collision-resistant
+  // enough to distinguish different peer list payloads.
+  uint32_t hash = 2166136261u; // FNV offset basis
+  for (size_t i = 0; i < body_len; i++) {
+    hash ^= (uint32_t)body[i];
+    hash *= 16777619u; // FNV prime
+  }
+
+  if (hash == receiver.last_setpeers_hash) {
+    return false; // Duplicate — suppress re-lock disturbance
+  }
+  receiver.last_setpeers_hash = hash;
+  return true; // New peer list
 }
 
 void audio_receiver_drain_buffer_depth(uint32_t *samples, uint32_t *min_out,
