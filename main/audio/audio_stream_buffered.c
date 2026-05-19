@@ -61,25 +61,33 @@ static bool buffered_packet_target_us(const audio_receiver_state_t *state,
 // Read exact number of bytes, but keep waiting on timeout if paused
 // Returns: positive = bytes read, 0 = connection closed, -1 = error
 //
-// SO_RCVTIMEO on the socket is 3 s (see buffered_audio_task).  During an
+// SO_RCVTIMEO on the socket is 8 s (see buffered_audio_task).  During an
 // active play stream that timeout means "sender stopped feeding data while
 // the client is still RTSP-connected" — typically a TCP stall from WiFi
 // packet loss on a marginal RSSI, or the sender app momentarily backgrounded.
 // We return -1 here and let the outer loop close the socket so the sender
 // can re-establish on its next attempt.  Apple AirPlay senders do re-open
 // the buffered audio socket on disconnect, so a single hiccup recovers
-// automatically when conditions improve.  A 5 s timeout was tried and felt
-// too sluggish — songs paused noticeably during transient WiFi spikes.  3 s
-// catches real stalls without false-tripping on a single bad burst.
+// automatically when conditions improve.
+//
+// Tuning history: 30 s was the original — far too long, user reported audio
+// dropouts of 30+ s before recovery.  3 s was tried — caused false trips on
+// legitimate between-track pauses where the sender briefly stops sending
+// before issuing TEARDOWN, generating warnings while playback was actually
+// fine.  8 s is the sweet spot: long enough for a typical track-end pause
+// (1-3 s) plus jitter margin, short enough that a real stall surfaces well
+// before the deepest pre-buffer (~7 s) drains and the user hears silence.
 static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
                           int sock, uint8_t *buf, size_t len) {
   size_t total = 0;
-  int64_t wait_start_us = 0;
   while (total < len && stream->running) {
+    // Capture the recv start time so the stall log below reports how long
+    // we actually waited inside this recv call (SO_RCVTIMEO duration) rather
+    // than a meaningless ~0 ms.
+    int64_t recv_start_us = esp_timer_get_time();
     ssize_t n = recv(sock, buf + total, len - total, 0);
     if (n > 0) {
       total += (size_t)n;
-      wait_start_us = 0;
     } else if (n == 0) {
       // Connection closed by peer
       ESP_LOGI(TAG, "Buffered audio connection closed by peer");
@@ -93,12 +101,9 @@ static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
           vTaskDelay(pdMS_TO_TICKS(100));
           continue;
         }
-        // Playing but timed out - sender went quiet.  Log with duration so
-        // the cause (transient stall vs. dropped session) is visible.
-        if (wait_start_us == 0) {
-          wait_start_us = esp_timer_get_time();
-        }
-        int64_t waited_ms = (esp_timer_get_time() - wait_start_us) / 1000LL;
+        // Playing but timed out - sender went quiet.  Log with the actual
+        // recv-call duration (matches SO_RCVTIMEO) so the cause is visible.
+        int64_t waited_ms = (esp_timer_get_time() - recv_start_us) / 1000LL;
         ESP_LOGW(TAG,
                  "Buffered audio stalled: no data for %lld ms while playing "
                  "(closing socket so sender can reconnect)",
@@ -132,10 +137,9 @@ static void buffered_audio_task(void *pvParameters) {
 
     state->buffered_client_socket = client_sock;
 
-    // 3 s recv timeout — long enough to ride out brief WiFi RX gaps but
-    // short enough that a real sender stall surfaces quickly.  See
-    // read_exact() comment for the trade-off rationale.
-    struct timeval tv = {.tv_sec = 3, .tv_usec = 0};
+    // 8 s recv timeout. Shorter values false-trip during normal track
+    // changes where the sender pauses audio before RTSP catches up.
+    struct timeval tv = {.tv_sec = 8, .tv_usec = 0};
     setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     uint8_t *packet = state->buffered_recv_buffer;
