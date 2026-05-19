@@ -582,28 +582,20 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
           // (local_anchor_adjusted flag) — prevents cumulative drift.
           // (4) drift > +500 ms — far outside any legitimate jitter budget.
           //
-          // Action: slide anchor_local_time_ns BACKWARD by (early_us - 200 ms)
+          // Action: slide anchor_local_time_ns forward by (early_us - 200 ms)
           // so the oldest buffered frame's new computed target is ~now + 200 ms,
           // matching the normal jitter buffer depth.  The 200 ms head-start lets
           // DMA fill cleanly before the first frame is due.  anchor_network_time_ns
           // is left untouched — it is sacred for multi-room sync.
-          //
-          // Sign math: target = anchor + frame_offset.  To DECREASE target (make
-          // frame play sooner), we must DECREASE anchor.  Earlier round-3 build
-          // had this as += and made the desync worse.  The audio worked
-          // empirically only because the SETPEERS dedup (Task 2) let PTP lock,
-          // bypassing this fallback path most of the time.  When this path DID
-          // fire, the buggy += pushed playback further out and caused the lyric
-          // desync the user reported.
           if (!timing->local_anchor_adjusted &&
               !ptp_clock_is_locked() &&
               early_us > 500000LL) {
             int64_t adjust_ns = (early_us - 200000LL) * 1000LL;
             int64_t adjust_ms = (early_us - 200000LL) / 1000LL;
-            timing->anchor_local_time_ns -= adjust_ns;
+            timing->anchor_local_time_ns += adjust_ns;
             timing->local_anchor_adjusted = true;
             ESP_LOGI(TAG,
-                     "Re-anchored local time by -%lld ms "
+                     "Re-anchored local time by %lld ms "
                      "(PTP not locked, pre-buffer compensation)",
                      adjust_ms);
             // Recompute early_us with the adjusted anchor so the frame

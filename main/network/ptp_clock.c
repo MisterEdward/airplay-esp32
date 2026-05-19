@@ -34,30 +34,12 @@ static const char *TAG = "ptp_clock";
 #define PTP_TIMESTAMP_SIZE   10
 
 // Synchronization parameters
-//
-// LOCK_THRESHOLD_NS was originally 40 ms but on ESP32 + 2.4 GHz WiFi with
-// 100+ ms i2s jitter and 50-90 ms RX scheduling spikes, sync arrival
-// variance regularly exceeded 40 ms — PTP could never lock with an iPhone
-// or Mac sender, forcing the audio-timing fallback to anchor_local_time
-// which then needed pre-buffer compensation (see audio_timing.c).
-// The downstream audio-timing servo absorbs 5-20 ms residual offset
-// easily; we don't need sub-ms PTP for an AirPlay receiver.  An 80 ms
-// lock window means PTP locks in ~95 % of real-world sessions instead of
-// ~5 %, which is a much bigger win than the loss of 40 ms of clock
-// accuracy.  Unlock band stays at 4x (320 ms) for hysteresis.
-//
-// MIN_SAMPLES_FOR_LOCK 8 -> 6 trims the time-to-first-lock from ~2 s
-// to ~1.5 s at the protocol's typical 4 Hz SYNC rate, so post-seek
-// recovery uses PTP timing instead of the local-anchor fallback.
-#define LOCK_THRESHOLD_NS    80000000LL // 80ms - tolerant of WiFi jitter
-#define MIN_SAMPLES_FOR_LOCK 6
+#define LOCK_THRESHOLD_NS    40000000LL // 40ms - tight threshold for lock
+#define MIN_SAMPLES_FOR_LOCK 8
 #define LOCK_STABLE_TIME_MS  1000 // 1s of stable readings to declare lock
 #define LOCK_TIMEOUT_MS      5000
 #define SAMPLE_BUFFER_SIZE   16         // Ring buffer for median filtering
-// OUTLIER_THRESHOLD bumped to 100 ms in lockstep with the wider lock
-// window — outliers above this are dropped before they pollute the
-// median, but everything else feeds the filter.
-#define OUTLIER_THRESHOLD_NS 100000000LL // 100ms - reject samples beyond this
+#define OUTLIER_THRESHOLD_NS 50000000LL // 50ms - reject samples beyond this
 
 // PTP state
 static struct {
