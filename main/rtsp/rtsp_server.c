@@ -369,8 +369,21 @@ cleanup:
     rtsp_events_emit(RTSP_EVENT_DISCONNECTED, NULL);
   }
 #else
+  // When this slot is being REPLACED by a freshly-connecting AirPlay client
+  // (slot->is_old == true), suppress DISCONNECTED — emitting it triggers a
+  // useless BT init/deinit cycle inside main.c::on_airplay_client_event
+  // because the new client's CLIENT_CONNECTED event fires first and the
+  // subsequent DISCONNECTED then re-enables BT just before the new session
+  // pulls it down again.  That cycle has been observed to occasionally
+  // crash the BT controller (the user reported "uneori la connect, µc
+  // isi da restart").  Genuine disconnects (slot->is_old == false) still
+  // emit normally so BT can come back up when the user truly leaves AirPlay.
   dacp_clear_session();
-  rtsp_events_emit(RTSP_EVENT_DISCONNECTED, NULL);
+  if (!slot->is_old) {
+    rtsp_events_emit(RTSP_EVENT_DISCONNECTED, NULL);
+  } else {
+    ESP_LOGI(TAG, "Slot replaced by new client — suppressing DISCONNECTED");
+  }
 #endif
 
   // When being replaced by a new client (is_old), skip global state changes —

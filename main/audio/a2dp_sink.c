@@ -51,7 +51,14 @@ static const char *TAG = "bt_a2dp";
 
 #define BT_TASK_STACK 4096
 #define BT_TASK_PRIO  (configMAX_PRIORITIES - 3)
-#define BT_TASK_QLEN  10
+// 32 (was 10): Windows AVRCP source (e.g. keyboard volume wheel rotated
+// fast) emits SET_ABSOLUTE_VOLUME commands in tight bursts.  Each command
+// becomes a queued msg with a malloc'd param copy.  With a 10-slot queue,
+// xQueueSend's 10 ms timeout in bt_app_send_msg starts dropping events
+// (and leaking the alloc on caller side — harmless but wasteful) after
+// only ~70 ms of sustained input.  32 absorbs ~250 ms of burst before any
+// drop, which covers normal "spin the volume wheel" UX.
+#define BT_TASK_QLEN  32
 
 #define I2S_TASK_STACK 2560
 #define I2S_TASK_PRIO  7
@@ -612,12 +619,24 @@ static void bt_avrc_tg_evt_handler(uint16_t event, void *param) {
 
   case ESP_AVRC_TG_SET_ABSOLUTE_VOLUME_CMD_EVT: {
     uint8_t volume = tg->set_abs_vol.volume; // 0-127
+
+    // Dedupe: AVRCP sources (notably Windows on a keyboard volume wheel)
+    // send a SET_ABSOLUTE_VOLUME command for every wheel tick, and most of
+    // those ticks land on the same 0-127 value because Windows rounds its
+    // internal percent → AVRCP 7-bit conversion the same way for adjacent
+    // ticks.  Without this check we'd do a redundant I2C write per tick,
+    // hammering the codec bus.  Combined with the dac.c mutex this rate
+    // limits the actual I2C traffic to one transaction per real volume
+    // change rather than per UI event.
+    if (volume == s_avrc_volume) {
+      break;
+    }
     s_avrc_volume = volume;
     ESP_LOGD(TAG, "Set absolute volume: %d/127", volume);
 
-    // Map 0-127 → -30..0 dB and apply to DAC
-    // dac_set_volume does I2C — safe here because bt_app_task dispatches
-    // sequentially, but keep it lightweight
+    // Map 0-127 → -30..0 dB and apply to DAC.  The dac dispatch layer
+    // serializes this call against other DAC users (audio_alert, RTSP
+    // volume, etc.) via its internal mutex.
     float volume_db = ((float)volume / 127.0f) * 30.0f - 30.0f;
     dac_set_volume(volume_db);
     break;
@@ -845,39 +864,62 @@ esp_err_t bt_a2dp_sink_init(const char *device_name,
     return ESP_ERR_NO_MEM;
   }
 
-  // Initialize BT controller
-  esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-  esp_err_t err = esp_bt_controller_init(&bt_cfg);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "BT controller init failed: %s", esp_err_to_name(err));
-    bt_a2dp_sink_stop();
-    return err;
+  // Controller + Bluedroid lifecycle — KEEP INITIALIZED across sessions.
+  //
+  // The naive pattern (full deinit on stop, full init on start) triggers a
+  // known ESP-IDF Classic BT bug after a long heavy-WiFi (AirPlay) session:
+  // BR/EDR re-init reports success at every level (controller_init OK,
+  // bluedroid_init OK, scan_mode set OK, no warnings logged) yet the device
+  // is silently invisible to BR/EDR scanners — the radio doesn't actually
+  // respond to inquiries.  Repro: boot, pair OK; run AirPlay for a few
+  // minutes; tear down; try BT scan from phone/Mac → no device.
+  //
+  // Workaround: keep the controller AND bluedroid initialized for the
+  // lifetime of the firmware.  Only toggle their enabled/disabled state at
+  // session boundaries.  RAM cost is small (~25 KB stays permanently
+  // allocated) and the cycle is reliable across hundreds of AirPlay/BT
+  // handoffs.  bt_a2dp_sink_stop() correspondingly skips the *_deinit()
+  // calls.
+  esp_err_t err;
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE) {
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    err = esp_bt_controller_init(&bt_cfg);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "BT controller init failed: %s", esp_err_to_name(err));
+      bt_a2dp_sink_stop();
+      return err;
+    }
   }
 
-  err = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "BT controller enable failed: %s", esp_err_to_name(err));
-    bt_a2dp_sink_stop();
-    return err;
+  if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_ENABLED) {
+    err = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "BT controller enable failed: %s", esp_err_to_name(err));
+      bt_a2dp_sink_stop();
+      return err;
+    }
   }
 
-  // Initialize Bluedroid
-  esp_bluedroid_config_t bluedroid_cfg = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
+  if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED) {
+    esp_bluedroid_config_t bluedroid_cfg = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
 #ifndef CONFIG_BT_SSP_ENABLED
-  bluedroid_cfg.ssp_en = false; // Disable SSP to force legacy PIN pairing
+    bluedroid_cfg.ssp_en = false; // Disable SSP to force legacy PIN pairing
 #endif
-  err = esp_bluedroid_init_with_cfg(&bluedroid_cfg);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Bluedroid init failed: %s", esp_err_to_name(err));
-    bt_a2dp_sink_stop();
-    return err;
+    err = esp_bluedroid_init_with_cfg(&bluedroid_cfg);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Bluedroid init failed: %s", esp_err_to_name(err));
+      bt_a2dp_sink_stop();
+      return err;
+    }
   }
 
-  err = esp_bluedroid_enable();
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(err));
-    bt_a2dp_sink_stop();
-    return err;
+  if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
+    err = esp_bluedroid_enable();
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(err));
+      bt_a2dp_sink_stop();
+      return err;
+    }
   }
 
   // Device name is set inside bt_stack_evt_handler (after
@@ -892,10 +934,12 @@ esp_err_t bt_a2dp_sink_init(const char *device_name,
 }
 
 esp_err_t bt_a2dp_sink_stop(void) {
-  if (!s_bt_running &&
-      esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE &&
-      esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED &&
-      s_bt_task_queue == NULL && s_a2dp_deinit_sem == NULL) {
+  // Stop is a no-op when we're already in the post-stop state.  Note that
+  // controller/bluedroid status are NOT checked here anymore (they stay
+  // INITIALIZED across stop/start cycles by design — see comments in
+  // bt_a2dp_sink_init).  The per-session resources (task queue, semaphore)
+  // are the only authoritative signal that we're currently running.
+  if (!s_bt_running && s_bt_task_queue == NULL && s_a2dp_deinit_sem == NULL) {
     return ESP_OK;
   }
 
@@ -933,17 +977,12 @@ esp_err_t bt_a2dp_sink_stop(void) {
     if (err != ESP_OK) {
       ESP_LOGW(TAG, "Bluedroid disable failed: %s", esp_err_to_name(err));
     }
-    bt_stack_status = esp_bluedroid_get_status();
   }
 
-  if (bt_stack_status == ESP_BLUEDROID_STATUS_INITIALIZED) {
-    esp_err_t err = esp_bluedroid_deinit();
-    if (err != ESP_OK) {
-      ESP_LOGW(TAG, "Bluedroid deinit failed: %s", esp_err_to_name(err));
-    }
-  } else if (bt_stack_status == ESP_BLUEDROID_STATUS_ENABLED) {
-    ESP_LOGW(TAG, "Bluedroid still enabled, skipping deinit");
-  }
+  // SKIP esp_bluedroid_deinit() — see the matching comment in
+  // bt_a2dp_sink_init.  We keep bluedroid initialized for the firmware
+  // lifetime to dodge the BR/EDR-becomes-invisible bug that fires after
+  // a deinit + reinit cycle following a long AirPlay session.
 
   esp_bt_controller_status_t ctrl_status = esp_bt_controller_get_status();
   if (ctrl_status == ESP_BT_CONTROLLER_STATUS_ENABLED) {
@@ -951,16 +990,14 @@ esp_err_t bt_a2dp_sink_stop(void) {
     if (err != ESP_OK) {
       ESP_LOGW(TAG, "BT controller disable failed: %s", esp_err_to_name(err));
     }
-    ctrl_status = esp_bt_controller_get_status();
   }
-  if (ctrl_status == ESP_BT_CONTROLLER_STATUS_INITED) {
-    esp_err_t err = esp_bt_controller_deinit();
-    if (err != ESP_OK) {
-      ESP_LOGW(TAG, "BT controller deinit failed: %s", esp_err_to_name(err));
-    }
-  } else if (ctrl_status == ESP_BT_CONTROLLER_STATUS_ENABLED) {
-    ESP_LOGW(TAG, "BT controller still enabled, skipping deinit");
-  }
+
+  // SKIP esp_bt_controller_deinit() — same reason as bluedroid above.
+
+  // Brief settle delay: bluedroid prints "BTA_DISABLE_DELAY set to 200 ms"
+  // on disable; let that internal cleanup complete before we return so a
+  // back-to-back stop→start sequence cannot race the pending shutdown.
+  vTaskDelay(pdMS_TO_TICKS(250));
 
   if (s_a2dp_deinit_sem) {
     vSemaphoreDelete(s_a2dp_deinit_sem);

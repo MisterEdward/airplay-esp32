@@ -114,6 +114,14 @@ static void apply_volume(int16_t *buf, size_t n) {
 #endif
 }
 
+// Anti-click crossfade length at the PCM↔silence boundary.  ~1.5 ms at
+// 44.1 kHz, short enough to be inaudible as latency but long enough to fully
+// suppress the sample-step click that occurs when a non-zero PCM value
+// transitions to pure silence (or vice versa) inside a single I2S write.
+// Without this ramp, every underrun (buffer briefly empty mid-track or
+// post-seek) produces an audible "pop" at both ends of the silence gap.
+#define ANTICLICK_FADE_SAMPLES 64
+
 static void playback_task(void *arg) {
   int16_t *pcm = malloc((size_t)(FRAME_SAMPLES + 1) * 2 * sizeof(int16_t));
   int16_t *silence = calloc((size_t)FRAME_SAMPLES * 2, sizeof(int16_t));
@@ -131,6 +139,13 @@ static void playback_task(void *arg) {
     vTaskDelete(NULL);
     return;
   }
+
+  // Anti-click state: last emitted sample (used to ramp down into silence)
+  // and whether the previous write was audible PCM (so we only ramp the
+  // first silence write after PCM, not every silence iteration).
+  int16_t last_sample_l = 0;
+  int16_t last_sample_r = 0;
+  bool was_audible = false;
 
   audio_servo_init();
 
@@ -174,6 +189,27 @@ static void playback_task(void *arg) {
 
       if (play_samples > 0) {
         apply_volume(play_buf, play_samples * 2);
+
+        // Anti-click fade-in when emerging from silence (post-seek, post-
+        // underrun, end of pause).  Ramp the first ANTICLICK_FADE_SAMPLES from
+        // 0 → 1 so the first audible sample doesn't step instantly from the
+        // DAC's idle 0 to a potentially-large PCM value (which is heard as a
+        // click).  Done before alert mix so chimes start at full level even
+        // when the underlying stream is fading in.
+        if (!was_audible) {
+          size_t fade_n = play_samples < ANTICLICK_FADE_SAMPLES
+                              ? play_samples
+                              : ANTICLICK_FADE_SAMPLES;
+          for (size_t i = 0; i < fade_n; i++) {
+            int32_t gain =
+                (int32_t)i * 32768 / (int32_t)ANTICLICK_FADE_SAMPLES;
+            play_buf[i * 2] =
+                (int16_t)(((int32_t)play_buf[i * 2] * gain) >> 15);
+            play_buf[i * 2 + 1] =
+                (int16_t)(((int32_t)play_buf[i * 2 + 1] * gain) >> 15);
+          }
+        }
+
         audio_alert_mix(play_buf, play_samples, OUTPUT_RATE);
         led_audio_feed(play_buf, play_samples);
         // Guard against the BT→AirPlay handoff race: if the channel was
@@ -185,9 +221,33 @@ static void playback_task(void *arg) {
                             portMAX_DELAY);
           record_i2s_write(false);
         }
+
+        // Remember the last sample so the next silence write can ramp down
+        // from it to 0 instead of stepping abruptly.
+        last_sample_l = play_buf[(play_samples - 1) * 2];
+        last_sample_r = play_buf[(play_samples - 1) * 2 + 1];
+        was_audible = true;
       }
       taskYIELD();
     } else {
+      // Silence path.  If we just transitioned from PCM, write a linear
+      // ramp from the last emitted sample down to 0 in the first
+      // ANTICLICK_FADE_SAMPLES so the speaker cone doesn't step instantly
+      // (which would be heard as a click).  Subsequent silence iterations
+      // skip the ramp (was_audible is false), so sustained silence stays
+      // pure zero.
+      if (was_audible) {
+        for (size_t i = 0; i < ANTICLICK_FADE_SAMPLES; i++) {
+          int32_t gain = (int32_t)(ANTICLICK_FADE_SAMPLES - i) * 32768 /
+                         (int32_t)ANTICLICK_FADE_SAMPLES;
+          silence[i * 2] =
+              (int16_t)(((int32_t)last_sample_l * gain) >> 15);
+          silence[i * 2 + 1] =
+              (int16_t)(((int32_t)last_sample_r * gain) >> 15);
+        }
+        was_audible = false;
+      }
+
       audio_alert_mix(silence, FRAME_SAMPLES, OUTPUT_RATE);
       led_audio_feed(silence, FRAME_SAMPLES);
       if (i2s_channel_enabled) {

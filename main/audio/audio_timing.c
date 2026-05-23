@@ -84,13 +84,26 @@
 // frame amidst jitter.
 #define POST_FLUSH_ONTIME_EXIT_COUNT 10
 // During seek/track-skip recovery, drop frames that are more than this far
-// behind the sender timeline.  Must match TIMING_THRESHOLD_LATE_US so the
-// 500-attempt fast-forward loop drops ALL late frames (the "past portion" of
-// the phone's pre-buffer burst) and only plays once it reaches genuinely
-// on-time data.  A wider threshold (e.g. 700 ms) causes permanent desync:
-// the steady-state servo cannot recover hundreds of ms of offset quickly, so
-// playback stays permanently behind the sender's timeline.
-#define POST_FLUSH_LATE_CATCHUP_US 60000LL
+// behind the sender timeline.  Frames within this window play through and
+// the seek-boost servo (±10000 ppm = 1% catch-up) pulls phase back over
+// ~5-10 seconds — inaudible against music or speech.
+//
+// Tuning history:
+//   60 ms (round 1): matched TIMING_THRESHOLD_LATE_US for the buffered/TCP
+//   path.  Drained the buffer aggressively post-seek — every catch-up drop
+//   removed a frame that would otherwise have played, leaving the ring buf
+//   empty for ~1 s (telemetry showed ur=8 then ur=51 in successive seconds
+//   immediately after seek).  The user heard that as a pop-pop-pop seek
+//   artefact.
+//
+//   150 ms (round 2): leaves the buffer intact through post-flush, so the
+//   transition from old anchor → new anchor is a smooth pitch correction
+//   instead of a buffer-empty silence.  Frames 60-150 ms late are still
+//   musically usable — playing them slightly behind and letting the seek
+//   boost pull back is dramatically smoother than dropping them.  150 ms
+//   stays well below the 1.5 s POST_FLUSH_LATE_GRACE so steady-state
+//   tolerance after exit is unchanged.
+#define POST_FLUSH_LATE_CATCHUP_US 150000LL
 // After post_flush exits, keep a short late-frame grace window.  The first
 // second after a seek is buffer-starved; dropping 60–90 ms late frames there
 // sounds worse than playing them and letting the servo pull back gently.
@@ -582,20 +595,36 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
           // (local_anchor_adjusted flag) — prevents cumulative drift.
           // (4) drift > +500 ms — far outside any legitimate jitter budget.
           //
-          // Action: slide anchor_local_time_ns forward by (early_us - 200 ms)
+          // Action: slide anchor_local_time_ns BACKWARD by (early_us - 200 ms)
           // so the oldest buffered frame's new computed target is ~now + 200 ms,
           // matching the normal jitter buffer depth.  The 200 ms head-start lets
           // DMA fill cleanly before the first frame is due.  anchor_network_time_ns
           // is left untouched — it is sacred for multi-room sync.
+          //
+          // Sign derivation:
+          //   target_ns = anchor_local_time_ns + frame_offset_ns
+          //   early_us  = (target_ns - now_ns) / 1000
+          //   We want new early_us = +200 ms.
+          //   delta_target = new_target - old_target = -(early_us - 200 ms)
+          //   delta_anchor = delta_target  (frame_offset is fixed)
+          //   ⇒ anchor_local_time_ns -= (early_us - 200 ms)
+          //
+          // The previous code used += which actively WORSENS drift on every
+          // fire — telemetry on the Mac-tray UDP path shows drift growing
+          // monotonically through repeated re-anchor events.  Commit b23126a
+          // ("fix(timing): correct anchor recalibration sign + relax PTP lock
+          // criteria") flipped the sign correctly, but was reverted in 916ee62
+          // — likely because of the *PTP lock criteria* portion of that same
+          // commit, not the sign change.  Reapplying only the sign fix here.
           if (!timing->local_anchor_adjusted &&
               !ptp_clock_is_locked() &&
               early_us > 500000LL) {
             int64_t adjust_ns = (early_us - 200000LL) * 1000LL;
             int64_t adjust_ms = (early_us - 200000LL) / 1000LL;
-            timing->anchor_local_time_ns += adjust_ns;
+            timing->anchor_local_time_ns -= adjust_ns;
             timing->local_anchor_adjusted = true;
             ESP_LOGI(TAG,
-                     "Re-anchored local time by %lld ms "
+                     "Re-anchored local time by -%lld ms "
                      "(PTP not locked, pre-buffer compensation)",
                      adjust_ms);
             // Recompute early_us with the adjusted anchor so the frame
