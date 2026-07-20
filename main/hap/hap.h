@@ -41,6 +41,14 @@ typedef struct {
   uint8_t encrypt_key[HAP_CHACHA20_KEY_SIZE];
   uint8_t decrypt_key[HAP_CHACHA20_KEY_SIZE];
 
+  // Transient pair-setup only: the same control keys derived from just the
+  // first 32 bytes of the 64-byte SRP session key. The HomeKit specification
+  // does not say which width senders use as HKDF input, so both are kept and
+  // rtsp_crypto adopts whichever actually authenticates the first frame.
+  uint8_t alt_encrypt_key[HAP_CHACHA20_KEY_SIZE];
+  uint8_t alt_decrypt_key[HAP_CHACHA20_KEY_SIZE];
+  bool alt_keys_valid;
+
   // Encryption nonces (counters)
   uint64_t encrypt_nonce;
   uint64_t decrypt_nonce;

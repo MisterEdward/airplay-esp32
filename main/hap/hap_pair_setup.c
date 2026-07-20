@@ -141,7 +141,19 @@ esp_err_t hap_pair_setup_m3(hap_session_t *session, const uint8_t *input,
       return ESP_ERR_INVALID_STATE;
     }
 
+    ESP_LOGI(TAG, "Transient keys: srp_key_len=%u (expect 64 for SHA-512 K)",
+             (unsigned)srp_key_len);
     memcpy(session->shared_secret, srp_key, 32);
+
+    // Alternate derivation using only the first 32 bytes of K, for senders
+    // that treat the shared secret as 32 bytes wide.
+    hap_hkdf_sha512((uint8_t *)"Control-Salt", 12, srp_key, 32,
+                    (uint8_t *)"Control-Read-Encryption-Key", 27,
+                    session->alt_encrypt_key, 32);
+    hap_hkdf_sha512((uint8_t *)"Control-Salt", 12, srp_key, 32,
+                    (uint8_t *)"Control-Write-Encryption-Key", 28,
+                    session->alt_decrypt_key, 32);
+    session->alt_keys_valid = true;
     hap_hkdf_sha512((uint8_t *)"Control-Salt", 12, srp_key, srp_key_len,
                     (uint8_t *)"Control-Read-Encryption-Key", 27,
                     session->encrypt_key, 32);

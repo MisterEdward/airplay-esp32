@@ -95,9 +95,65 @@ int rtsp_crypto_read_block(int socket, rtsp_conn_t *conn, uint8_t *buffer,
   if (crypto_aead_chacha20poly1305_ietf_decrypt(
           buffer, &plaintext_len, NULL, encrypted, encrypted_len, len_buf,
           sizeof(len_buf), nonce, conn->hap_session->decrypt_key) != 0) {
-    free(encrypted);
-    ESP_LOGE(TAG, "Failed to decrypt frame");
-    return -1;
+    // Diagnostic fallback: retry once with the accessory's write key. The HAP
+    // spec maps Control-Write-Encryption-Key to the accessory's read side, but
+    // if that role mapping is inverted for this sender the frame decrypts
+    // cleanly with the other key. Succeeding here identifies the real mapping
+    // instead of leaving an unexplained authentication failure.
+    // Candidates in order: swapped roles, then the 32-byte-IKM derivation,
+    // then that derivation with swapped roles. Whichever authenticates is the
+    // mapping this sender actually uses, so adopt it for the whole session.
+    typedef struct {
+      const char *name;
+      const uint8_t *read_key;
+      const uint8_t *write_key;
+    } key_candidate_t;
+
+    key_candidate_t candidates[3];
+    size_t candidate_count = 0;
+    candidates[candidate_count++] =
+        (key_candidate_t){"swapped roles", conn->hap_session->encrypt_key,
+                          conn->hap_session->decrypt_key};
+    if (conn->hap_session->alt_keys_valid) {
+      candidates[candidate_count++] =
+          (key_candidate_t){"32-byte IKM", conn->hap_session->alt_decrypt_key,
+                            conn->hap_session->alt_encrypt_key};
+      candidates[candidate_count++] = (key_candidate_t){
+          "32-byte IKM, swapped roles", conn->hap_session->alt_encrypt_key,
+          conn->hap_session->alt_decrypt_key};
+    }
+
+    size_t hit = candidate_count;
+    for (size_t i = 0; i < candidate_count; i++) {
+      if (crypto_aead_chacha20poly1305_ietf_decrypt(
+              buffer, &plaintext_len, NULL, encrypted, encrypted_len, len_buf,
+              sizeof(len_buf), nonce, candidates[i].read_key) == 0) {
+        hit = i;
+        break;
+      }
+    }
+
+    if (hit < candidate_count) {
+      ESP_LOGW(TAG,
+               "Decrypted using '%s' (block=%u nonce=%llu) — adopting for"
+               " this session",
+               candidates[hit].name, (unsigned)block_len,
+               (unsigned long long)conn->hap_session->decrypt_nonce);
+      uint8_t new_read[32];
+      uint8_t new_write[32];
+      memcpy(new_read, candidates[hit].read_key, 32);
+      memcpy(new_write, candidates[hit].write_key, 32);
+      memcpy(conn->hap_session->decrypt_key, new_read, 32);
+      memcpy(conn->hap_session->encrypt_key, new_write, 32);
+    } else {
+      free(encrypted);
+      ESP_LOGE(TAG,
+               "Failed to decrypt frame (block=%u nonce=%llu, both key roles"
+               " rejected)",
+               (unsigned)block_len,
+               (unsigned long long)conn->hap_session->decrypt_nonce);
+      return -1;
+    }
   }
   free(encrypted);
 
