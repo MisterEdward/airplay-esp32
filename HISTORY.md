@@ -919,11 +919,56 @@ provides a flashing path independent of OTA.
 
 ### 13.3 Root cause
 
-`hap_hkdf_sha512` in `main/hap/hap_crypto.c` implemented RFC 5869 correctly but
-built it on libsodium's `crypto_auth_hmacsha512_*` streaming API, calling it
-with keys whose length is not `crypto_auth_hmacsha512_KEYBYTES` — the salt is
-12 bytes and the PRK is 64. That produced HMAC output which does not match a
-reference HMAC-SHA512, so every derived key was wrong.
+The faulty code is upstream v0.1.29, byte for byte — no local commit ever
+touched it. `git log --follow main/hap/hap_crypto.c` shows only "Reorg of the
+repo before sharing" and "Format code" before the fix.
+
+`hap_hkdf_sha512` implemented RFC 5869 correctly but built it on libsodium's
+`crypto_auth_hmacsha512_*` streaming API. On this build that API returns wrong
+results. The generated configuration has:
+
+```text
+CONFIG_LIBSODIUM_USE_MBEDTLS_SHA=y
+```
+
+which replaces libsodium's SHA-512 with mbedTLS. libsodium's HMAC is layered on
+its own SHA-512 internals, so the substitution leaves direct SHA-512 calls
+correct while the HMAC built on top of them is not.
+
+Measured on device with a fixed vector (IKM = bytes 0x00..0x3F, salt
+`Control-Salt`, info `Control-Write-Encryption-Key`, 32-byte output):
+
+```text
+python  (reference)  5a6cb19bcbe7d4df2dd8279f39562f7fae2dbf73eb5a4f98849c245c82b2fe96
+mbedTLS (the fix)    5a6cb19bcbe7d4df2dd8279f39562f7fae2dbf73eb5a4f98849c245c82b2fe96
+libsodium (previous) c4d23a7325929c3b1b4bc86e96f2ca70231a25cda7e3c66997693711576482c1
+libsodium SHA-512    ee4320ebaf3fdb4f...  (matches python — SHA itself is fine)
+```
+
+That last line matters: plain SHA-512 is correct, which is why SRP — which uses
+it directly — worked throughout and both peers really did agree on K. Only the
+HMAC layer, and therefore everything derived through HKDF, was wrong.
+
+An earlier version of this section blamed HMAC keys whose length differs from
+`crypto_auth_hmacsha512_KEYBYTES`. That was an unverified guess and is wrong;
+libsodium's HMAC handles arbitrary key lengths. The self-test above is what
+actually settled it.
+
+### 13.3.1 Why it surfaced only now
+
+The broken derivation was latent for as long as the sender never encrypted the
+RTSP channel. There are three paths in `rtsp_handlers.c`:
+
+- line 700 — transient pair-setup completes: encryption enabled;
+- line 749 — TLV8 pair-verify M3: encryption enabled;
+- line 763 — raw (non-TLV) pair-verify, documented in `hap.h` as "used when iOS
+  sends raw 68-byte format instead of TLV": logs "RTSP unencrypted" and leaves
+  the channel in plaintext.
+
+While the sender used that raw path the control channel was never encrypted, so
+no HKDF-derived key was ever exercised on it and the bug stayed invisible. When
+the phone switched to transient pair-setup — which does enable encryption — the
+latent fault became fatal on the very first frame.
 
 For AirPlay 2 transient pair-setup the consequence is exact: both peers agree
 on the SRP session key, then derive different control-channel keys from it, so
