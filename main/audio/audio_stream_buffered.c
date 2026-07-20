@@ -11,6 +11,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "audio_crypto.h"
 #include "network/socket_utils.h"
@@ -36,12 +37,13 @@ typedef struct {
 
 static const char *TAG = "audio_buf";
 
-// Read exact number of bytes, but keep waiting on timeout if paused
+// Read exact number of bytes, but keep waiting on timeout if paused.
 // Returns: positive = bytes read, 0 = connection closed, -1 = error
 static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
                           int sock, uint8_t *buf, size_t len) {
   size_t total = 0;
   while (total < len && stream->running) {
+    int64_t recv_started_us = esp_timer_get_time();
     ssize_t n = recv(sock, buf + total, len - total, 0);
     if (n > 0) {
       total += (size_t)n;
@@ -58,8 +60,15 @@ static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
           vTaskDelay(pdMS_TO_TICKS(100));
           continue;
         }
-        // Playing but timed out - connection may be dead
-        ESP_LOGW(TAG, "Buffered audio timeout while playing");
+        // Playing but timed out: close only this audio socket. The listener
+        // remains alive and Apple can reconnect without restarting AirPlay.
+        int64_t waited_ms =
+            (esp_timer_get_time() - recv_started_us) / 1000LL;
+        state->buffered_stall_recoveries++;
+        ESP_LOGW(TAG,
+                 "Buffered audio stalled for %lld ms while playing; closing "
+                 "audio socket for sender reconnect",
+                 (long long)waited_ms);
         return -1;
       }
       ESP_LOGE(TAG, "Buffered audio recv error: %d", errno);
@@ -183,9 +192,17 @@ static void buffered_audio_task(void *pvParameters) {
     }
 
     state->buffered_client_socket = client_sock;
+    state->buffered_connections_accepted++;
+    state->buffered_last_packet_us = esp_timer_get_time();
 
-    struct timeval tv = {.tv_sec = 30, .tv_usec = 0};
-    setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    // The A1S soak history found 30 seconds too slow to recover and 3 seconds
+    // prone to false positives at track boundaries. Eight seconds preserves
+    // normal transitions while recovering before a dead connection becomes a
+    // long user-visible outage.
+    struct timeval tv = {.tv_sec = 8, .tv_usec = 0};
+    if (setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+      ESP_LOGW(TAG, "Failed to set buffered receive timeout: errno=%d", errno);
+    }
 
     // Socket receive buffer: match lwIP's TCP receive window so the kernel
     // buffer can hold exactly what the TCP window allows in flight.  A larger
@@ -231,6 +248,7 @@ static void buffered_audio_task(void *pvParameters) {
       }
 
       state->stats.packets_received++;
+      state->buffered_last_packet_us = esp_timer_get_time();
 
       uint32_t seq_no = (packet[1] << 16) | (packet[2] << 8) | packet[3];
       uint32_t timestamp =

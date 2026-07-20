@@ -406,6 +406,16 @@ Status at implementation checkpoint:
 - static RAM reported by the linker: 53,120 bytes;
 - commit and OTA follow this checkpoint.
 
+Completion record:
+
+- commit: `e1d0de4` (`fix(audio): preserve Audio Mix transition buffer`);
+- firmware SHA-256:
+  `446dcd76d0d8ebcbd2f64db926ba67b3bf4b731ce724e3e44a963f280d7e434c`;
+- OTA target identity verified as `A4:CB:8F:F8:2F:14`;
+- OTA endpoint reported successful firmware installation and reboot;
+- post-reboot system API returned successfully;
+- post-reboot free heap reported approximately 7.0 MiB before playback.
+
 Goals:
 
 - fix Audio Mix cuts;
@@ -425,6 +435,28 @@ Planned behaviour:
 - keep the listening task alive so the sender can reconnect;
 - log the measured stall duration and recovery count;
 - avoid rebooting the device for a recoverable socket problem.
+
+Implementation details:
+
+- the socket receive timeout is set independently on every newly accepted
+  buffered audio connection;
+- failure to set `SO_RCVTIMEO` is logged instead of silently ignored;
+- each blocking `recv` measures its own wait duration;
+- a timeout while paused remains non-fatal and the reader keeps waiting;
+- a timeout while playing increments `buffered_stall_recoveries` and returns
+  to the existing close-and-accept loop;
+- every successful complete packet updates `buffered_last_packet_us`;
+- every accepted buffered connection increments
+  `buffered_connections_accepted`;
+- these liveness values feed the later telemetry and recovery-ladder add-ons.
+
+Build checkpoint:
+
+- `pio run -e esp32s3` passed;
+- firmware size: 1,445,787 bytes;
+- static RAM reported by the linker: 53,136 bytes;
+- no new allocation is performed per packet;
+- the normal packet path adds only one timestamp write.
 
 Why 8 seconds:
 

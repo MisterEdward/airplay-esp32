@@ -45,6 +45,9 @@ typedef struct {
   void *buffered_packet_pool;
   QueueHandle_t buffered_free_queue;
   QueueHandle_t buffered_ready_queue;
+  int64_t buffered_last_packet_us;
+  uint32_t buffered_connections_accepted;
+  uint32_t buffered_stall_recoveries;
 
   uint8_t *decrypt_buffer;
   size_t decrypt_buffer_size;
