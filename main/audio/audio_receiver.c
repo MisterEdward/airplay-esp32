@@ -74,6 +74,14 @@ void audio_receiver_diag_note_gate_drop(audio_receiver_state_t *state,
   portEXIT_CRITICAL(&state->diag_lock);
 }
 
+uint32_t audio_receiver_get_seek_generation(void) {
+  uint32_t generation;
+  portENTER_CRITICAL(&receiver.diag_lock);
+  generation = receiver.diag_generation;
+  portEXIT_CRITICAL(&receiver.diag_lock);
+  return generation;
+}
+
 static void audio_receiver_reset_stats(void) {
   memset(&receiver.stats, 0, sizeof(receiver.stats));
 }

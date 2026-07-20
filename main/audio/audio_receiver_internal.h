@@ -7,6 +7,7 @@
 #include "lwip/sockets.h"
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 
 #include "audio_buffer.h"
@@ -39,7 +40,11 @@ typedef struct {
   int buffered_client_socket;
   uint16_t buffered_port;
   TaskHandle_t buffered_task_handle;
+  TaskHandle_t buffered_decoder_task_handle;
   uint8_t *buffered_recv_buffer;
+  void *buffered_packet_pool;
+  QueueHandle_t buffered_free_queue;
+  QueueHandle_t buffered_ready_queue;
 
   uint8_t *decrypt_buffer;
   size_t decrypt_buffer_size;
@@ -123,6 +128,7 @@ void audio_receiver_diag_note_queued(audio_receiver_state_t *state,
                                      uint32_t timestamp);
 void audio_receiver_diag_note_gate_drop(audio_receiver_state_t *state,
                                         int gate);
+uint32_t audio_receiver_get_seek_generation(void);
 
 static inline audio_receiver_state_t *
 audio_stream_state(audio_stream_t *stream) {

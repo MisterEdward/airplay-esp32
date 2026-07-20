@@ -17,6 +17,22 @@
 
 #define BUFFERED_AUDIO_PACKET_SIZE 8192
 #define AUDIO_BUFFERED_STACK_SIZE  4096
+#define AUDIO_DECODER_STACK_SIZE   6144
+#define BUFFERED_PACKET_QUEUE_LEN  32
+
+#if CONFIG_FREERTOS_UNICORE
+#define BUFFERED_DECODER_CORE 0
+#else
+#define BUFFERED_DECODER_CORE 1
+#endif
+
+typedef struct {
+  uint32_t seq_no;
+  uint32_t timestamp;
+  uint32_t seek_generation;
+  uint16_t packet_len;
+  uint8_t data[BUFFERED_AUDIO_PACKET_SIZE];
+} buffered_packet_slot_t;
 
 static const char *TAG = "audio_buf";
 
@@ -51,6 +67,90 @@ static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
     }
   }
   return stream->running ? (ssize_t)total : -1;
+}
+
+static void buffered_decoder_task(void *pvParameters) {
+  audio_stream_t *stream = (audio_stream_t *)pvParameters;
+  audio_receiver_state_t *state = audio_stream_state(stream);
+  buffered_packet_slot_t *slots =
+      (buffered_packet_slot_t *)state->buffered_packet_pool;
+
+  while (stream->running) {
+    uint8_t slot_index = 0;
+    if (xQueueReceive(state->buffered_ready_queue, &slot_index,
+                      pdMS_TO_TICKS(20)) != pdTRUE) {
+      continue;
+    }
+
+    buffered_packet_slot_t *slot = &slots[slot_index];
+
+    // During FLUSH -> anchor, retain compressed packets instead of throwing
+    // away the selected word. The 32-slot queue fills, then TCP back-pressure
+    // safely holds the rest in lwIP until the anchor defines the RTP window.
+    while (stream->running && state->discard_all_until_anchor &&
+           slot->seek_generation == audio_receiver_get_seek_generation()) {
+      vTaskDelay(pdMS_TO_TICKS(2));
+    }
+
+    if (!stream->running ||
+        slot->seek_generation != audio_receiver_get_seek_generation()) {
+      xQueueSend(state->buffered_free_queue, &slot_index, 0);
+      continue;
+    }
+
+    while (audio_buffer_is_nearly_full(&state->buffer) && stream->running &&
+           slot->seek_generation == audio_receiver_get_seek_generation()) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (!stream->running ||
+        slot->seek_generation != audio_receiver_get_seek_generation()) {
+      xQueueSend(state->buffered_free_queue, &slot_index, 0);
+      continue;
+    }
+
+    // Decode task owns the shared decrypt buffer. Stale RTP is rejected by
+    // audio_stream_process_frame before AAC decode, after cheap decryption.
+    uint8_t *decrypted = state->decrypt_buffer;
+    size_t decrypt_capacity = state->decrypt_buffer_size;
+    if (!decrypted) {
+      decrypted = slot->data + 12;
+      decrypt_capacity =
+          slot->packet_len > 12 ? slot->packet_len - 12 : 0;
+    }
+
+    int decrypted_len = audio_crypto_decrypt_buffered(
+        &stream->encrypt, slot->data, slot->packet_len, decrypted,
+        decrypt_capacity);
+    if (decrypted_len < 0) {
+      state->stats.decrypt_errors++;
+      state->stats.packets_dropped++;
+      xQueueSend(state->buffered_free_queue, &slot_index, 0);
+      continue;
+    }
+
+    state->stats.last_seq = (uint16_t)(slot->seq_no & 0xFFFF);
+    state->stats.last_timestamp = slot->timestamp;
+    state->blocks_read++;
+    state->blocks_read_in_sequence++;
+
+    uint32_t generation_before = audio_receiver_get_seek_generation();
+    bool queued = audio_stream_process_frame(
+        state, slot->timestamp, decrypted, (size_t)decrypted_len);
+    if (generation_before != audio_receiver_get_seek_generation()) {
+      // FLUSH raced the decode/queue operation. This decoder is serial, so
+      // flushing here can only remove the old generation just inserted.
+      audio_buffer_flush(&state->buffer);
+      queued = false;
+    }
+    if (!queued) {
+      state->stats.packets_dropped++;
+    }
+
+    xQueueSend(state->buffered_free_queue, &slot_index, 0);
+  }
+
+  state->buffered_decoder_task_handle = NULL;
+  vTaskDelete(NULL);
 }
 
 static void buffered_audio_task(void *pvParameters) {
@@ -102,13 +202,6 @@ static void buffered_audio_task(void *pvParameters) {
     }
 
     while (stream->running) {
-      // Back-pressure: if buffer is nearly full, pause reading to let TCP
-      // flow control slow down the sender. This prevents buffer overflow
-      // and keeps frames in order.
-      while (audio_buffer_is_nearly_full(&state->buffer) && stream->running) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-      }
-
       uint8_t len_buf[2];
       if (read_exact(stream, state, client_sock, len_buf, 2) != 2) {
         break;
@@ -133,30 +226,28 @@ static void buffered_audio_task(void *pvParameters) {
           (packet[4] << 24) | (packet[5] << 16) | (packet[6] << 8) | packet[7];
       audio_receiver_diag_note_packet(state, timestamp);
 
-      uint8_t *decrypted = state->decrypt_buffer;
-      size_t decrypt_capacity = state->decrypt_buffer_size;
-      if (!decrypted) {
-        decrypted = packet + 12;
-        decrypt_capacity = packet_len > 12 ? packet_len - 12 : 0;
+      uint8_t slot_index = 0;
+      while (stream->running &&
+             xQueueReceive(state->buffered_free_queue, &slot_index,
+                           pdMS_TO_TICKS(20)) != pdTRUE) {
+      }
+      if (!stream->running) {
+        break;
       }
 
-      int decrypted_len = audio_crypto_decrypt_buffered(
-          &stream->encrypt, packet, packet_len, decrypted, decrypt_capacity);
-      if (decrypted_len < 0) {
-        state->stats.decrypt_errors++;
+      buffered_packet_slot_t *slots =
+          (buffered_packet_slot_t *)state->buffered_packet_pool;
+      buffered_packet_slot_t *slot = &slots[slot_index];
+      slot->seq_no = seq_no;
+      slot->timestamp = timestamp;
+      slot->seek_generation = audio_receiver_get_seek_generation();
+      slot->packet_len = (uint16_t)packet_len;
+      memcpy(slot->data, packet, packet_len);
+
+      if (xQueueSend(state->buffered_ready_queue, &slot_index,
+                     pdMS_TO_TICKS(20)) != pdTRUE) {
         state->stats.packets_dropped++;
-        continue;
-      }
-
-      state->stats.last_seq = (uint16_t)(seq_no & 0xFFFF);
-      state->stats.last_timestamp = timestamp;
-
-      state->blocks_read++;
-      state->blocks_read_in_sequence++;
-
-      if (!audio_stream_process_frame(state, timestamp, decrypted,
-                                      (size_t)decrypted_len)) {
-        state->stats.packets_dropped++;
+        xQueueSend(state->buffered_free_queue, &slot_index, 0);
       }
     }
 
@@ -168,12 +259,54 @@ static void buffered_audio_task(void *pvParameters) {
   vTaskDelete(NULL);
 }
 
-static bool buffered_wait_for_task_stopped(audio_receiver_state_t *state,
-                                           int timeout_ticks) {
-  while (state->buffered_task_handle && timeout_ticks-- > 0) {
+static bool buffered_wait_for_tasks_stopped(audio_receiver_state_t *state,
+                                            int timeout_ticks) {
+  while ((state->buffered_task_handle ||
+          state->buffered_decoder_task_handle) &&
+         timeout_ticks-- > 0) {
     vTaskDelay(pdMS_TO_TICKS(50));
   }
-  return state->buffered_task_handle == NULL;
+  return state->buffered_task_handle == NULL &&
+         state->buffered_decoder_task_handle == NULL;
+}
+
+static void buffered_free_packet_queue(audio_receiver_state_t *state) {
+  if (state->buffered_free_queue) {
+    vQueueDelete(state->buffered_free_queue);
+    state->buffered_free_queue = NULL;
+  }
+  if (state->buffered_ready_queue) {
+    vQueueDelete(state->buffered_ready_queue);
+    state->buffered_ready_queue = NULL;
+  }
+  if (state->buffered_packet_pool) {
+    heap_caps_free(state->buffered_packet_pool);
+    state->buffered_packet_pool = NULL;
+  }
+}
+
+static esp_err_t buffered_init_packet_queue(audio_receiver_state_t *state) {
+  buffered_free_packet_queue(state);
+  state->buffered_packet_pool = heap_caps_calloc(
+      BUFFERED_PACKET_QUEUE_LEN, sizeof(buffered_packet_slot_t),
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  state->buffered_free_queue =
+      xQueueCreate(BUFFERED_PACKET_QUEUE_LEN, sizeof(uint8_t));
+  state->buffered_ready_queue =
+      xQueueCreate(BUFFERED_PACKET_QUEUE_LEN, sizeof(uint8_t));
+  if (!state->buffered_packet_pool || !state->buffered_free_queue ||
+      !state->buffered_ready_queue) {
+    buffered_free_packet_queue(state);
+    return ESP_ERR_NO_MEM;
+  }
+  for (uint8_t i = 0; i < BUFFERED_PACKET_QUEUE_LEN; i++) {
+    xQueueSend(state->buffered_free_queue, &i, 0);
+  }
+  ESP_LOGI(TAG, "Compressed packet queue: %u slots, %u bytes PSRAM",
+           BUFFERED_PACKET_QUEUE_LEN,
+           (unsigned)(BUFFERED_PACKET_QUEUE_LEN *
+                      sizeof(buffered_packet_slot_t)));
+  return ESP_OK;
 }
 
 static esp_err_t buffered_start(audio_stream_t *stream, uint16_t port) {
@@ -184,7 +317,7 @@ static esp_err_t buffered_start(audio_stream_t *stream, uint16_t port) {
   }
   if (state->buffered_task_handle) {
     ESP_LOGW(TAG, "Buffered audio task still stopping, waiting");
-    if (!buffered_wait_for_task_stopped(state, 20)) {
+    if (!buffered_wait_for_tasks_stopped(state, 20)) {
       ESP_LOGW(TAG, "Buffered audio task still active");
       return ESP_ERR_INVALID_STATE;
     }
@@ -198,17 +331,31 @@ static esp_err_t buffered_start(audio_stream_t *stream, uint16_t port) {
   }
   state->buffered_port = bound_port;
 
+  esp_err_t queue_err = buffered_init_packet_queue(state);
+  if (queue_err != ESP_OK) {
+    close(state->buffered_listen_socket);
+    state->buffered_listen_socket = -1;
+    return queue_err;
+  }
+
   stream->running = true;
 
   state->buffered_task_handle = NULL;
-  BaseType_t task_ret =
+  state->buffered_decoder_task_handle = NULL;
+  BaseType_t decoder_ret = xTaskCreatePinnedToCore(
+      buffered_decoder_task, "buff_decode", AUDIO_DECODER_STACK_SIZE, stream,
+      6, &state->buffered_decoder_task_handle, BUFFERED_DECODER_CORE);
+  BaseType_t reader_ret =
       xTaskCreate(buffered_audio_task, "buff_audio", AUDIO_BUFFERED_STACK_SIZE,
                   stream, 5, &state->buffered_task_handle);
-  if (task_ret != pdPASS || !state->buffered_task_handle) {
-    ESP_LOGE(TAG, "Failed to create buffered audio task");
+  if (decoder_ret != pdPASS || reader_ret != pdPASS ||
+      !state->buffered_decoder_task_handle || !state->buffered_task_handle) {
+    ESP_LOGE(TAG, "Failed to create buffered reader/decoder tasks");
+    stream->running = false;
     close(state->buffered_listen_socket);
     state->buffered_listen_socket = -1;
-    stream->running = false;
+    buffered_wait_for_tasks_stopped(state, 20);
+    buffered_free_packet_queue(state);
     return ESP_FAIL;
   }
 
@@ -217,7 +364,8 @@ static esp_err_t buffered_start(audio_stream_t *stream, uint16_t port) {
 
 static void buffered_stop(audio_stream_t *stream) {
   audio_receiver_state_t *state = audio_stream_state(stream);
-  if (!stream->running && !state->buffered_task_handle) {
+  if (!stream->running && !state->buffered_task_handle &&
+      !state->buffered_decoder_task_handle) {
     return;
   }
 
@@ -233,8 +381,8 @@ static void buffered_stop(audio_stream_t *stream) {
     state->buffered_listen_socket = -1;
   }
 
-  if (!buffered_wait_for_task_stopped(state, 20)) {
-    ESP_LOGW(TAG, "Buffered audio task did not exit within timeout");
+  if (!buffered_wait_for_tasks_stopped(state, 20)) {
+    ESP_LOGW(TAG, "Buffered audio tasks did not exit within timeout");
     return;
   }
 
@@ -242,6 +390,8 @@ static void buffered_stop(audio_stream_t *stream) {
     heap_caps_free(state->buffered_recv_buffer);
     state->buffered_recv_buffer = NULL;
   }
+
+  buffered_free_packet_queue(state);
 
   state->buffered_port = 0;
 }
@@ -262,7 +412,7 @@ static void buffered_destroy(audio_stream_t *stream) {
 
   buffered_stop(stream);
   audio_receiver_state_t *state = audio_stream_state(stream);
-  if (state->buffered_task_handle) {
+  if (state->buffered_task_handle || state->buffered_decoder_task_handle) {
     ESP_LOGW(TAG, "Leaking buffered stream because task shutdown timed out");
     return;
   }
