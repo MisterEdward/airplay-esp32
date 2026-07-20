@@ -43,6 +43,7 @@ static int sorted_insert_pos(audio_buffer_t *b, uint32_t timestamp) {
 
 static bool audio_buffer_queue_chunk(audio_buffer_t *buffer,
                                      audio_stats_t *stats, uint32_t timestamp,
+                                     uint32_t sequence_number,
                                      const int16_t *pcm_data, size_t samples,
                                      int channels) {
   if (samples == 0) {
@@ -77,6 +78,7 @@ static bool audio_buffer_queue_chunk(audio_buffer_t *buffer,
   uint8_t *dest = slot_ptr(buffer, slot);
   audio_frame_header_t *hdr = (audio_frame_header_t *)dest;
   hdr->rtp_timestamp = timestamp;
+  hdr->sequence_number = sequence_number;
   hdr->samples_per_channel = (uint16_t)samples;
   hdr->channels = (uint8_t)channels;
   hdr->reserved = 0;
@@ -347,8 +349,9 @@ bool audio_buffer_oldest_timestamp(audio_buffer_t *buffer,
 /* ---------- queue decoded (splits large frames into chunks) ---------- */
 
 bool audio_buffer_queue_decoded(audio_buffer_t *buffer, audio_stats_t *stats,
-                                uint32_t timestamp, const int16_t *pcm_data,
-                                size_t samples, int channels) {
+                                uint32_t timestamp, uint32_t sequence_number,
+                                const int16_t *pcm_data, size_t samples,
+                                int channels) {
   if (!buffer || !pcm_data || samples == 0) {
     return false;
   }
@@ -367,6 +370,7 @@ bool audio_buffer_queue_decoded(audio_buffer_t *buffer, audio_stats_t *stats,
     }
 
     if (!audio_buffer_queue_chunk(buffer, stats, chunk_timestamp,
+                                  sequence_number,
                                   pcm_data + (offset * channels), chunk_samples,
                                   channels)) {
       return false;

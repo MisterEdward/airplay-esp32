@@ -345,7 +345,8 @@ static bool realtime_receive_packet(audio_stream_t *stream, uint8_t *packet,
     audio_len = (size_t)decrypted_len;
   }
 
-  if (!audio_stream_process_frame(state, timestamp, audio_data, audio_len)) {
+  if (!audio_stream_process_frame(state, seq, timestamp, audio_data,
+                                  audio_len)) {
     state->stats.packets_dropped++;
   }
 

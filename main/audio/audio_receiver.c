@@ -350,7 +350,7 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
       receiver.timing.pending_valid = false;
       receiver.timing.pending_frame_len = 0;
       receiver.timing.ready_time_us = 0;
-      receiver.timing.deferred_flush_pending = false;
+      audio_timing_reset_deferred_flushes(&receiver.timing);
       receiver.blocks_read_in_sequence = 0;
       receiver.discard_before_rtp = rtp_time;
       receiver.discard_before_rtp_valid = true;
@@ -390,7 +390,7 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
       receiver.timing.pending_valid = false;
       receiver.timing.pending_frame_len = 0;
       receiver.timing.ready_time_us = 0;
-      receiver.timing.deferred_flush_pending = false;
+      audio_timing_reset_deferred_flushes(&receiver.timing);
       receiver.blocks_read_in_sequence = 0;
       receiver.timing.quick_start = true;
       if (!gates_armed) {
@@ -743,16 +743,16 @@ void audio_receiver_seek_flush(void) {
   ESP_LOGI(TAG, "S3TRACE seek gen=%" PRIu32 " begin", generation);
 }
 
-void audio_receiver_set_deferred_flush(uint32_t flush_until_ts) {
+bool audio_receiver_set_deferred_flush(uint32_t flush_from_seq,
+                                       uint32_t flush_from_ts,
+                                       uint32_t flush_until_seq,
+                                       uint32_t flush_until_ts) {
   if (!receiver.stream) {
-    return;
+    return false;
   }
-  // Write flush_until_ts before arming the flag so audio_timing_read never
-  // sees deferred_flush_pending=true with a stale timestamp.
-  receiver.timing.flush_until_ts = flush_until_ts;
-  receiver.timing.deferred_flush_pending = true;
-  ESP_LOGI(TAG, "Deferred flush armed: flush_until_ts=%" PRIu32,
-           flush_until_ts);
+  return audio_timing_add_deferred_flush(
+      &receiver.timing, flush_from_seq, flush_from_ts, flush_until_seq,
+      flush_until_ts);
 }
 
 void audio_receiver_pause(void) {

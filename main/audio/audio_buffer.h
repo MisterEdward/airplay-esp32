@@ -18,6 +18,7 @@
 
 typedef struct __attribute__((packed)) {
   uint32_t rtp_timestamp;
+  uint32_t sequence_number;
   uint16_t samples_per_channel;
   uint8_t channels;
   uint8_t reserved;
@@ -56,8 +57,9 @@ void audio_buffer_return(audio_buffer_t *buffer, void *item);
 int16_t *audio_buffer_get_decode_buffer(audio_buffer_t *buffer,
                                         size_t *capacity_samples);
 bool audio_buffer_queue_decoded(audio_buffer_t *buffer, audio_stats_t *stats,
-                                uint32_t timestamp, const int16_t *pcm_data,
-                                size_t samples, int channels);
+                                uint32_t timestamp, uint32_t sequence_number,
+                                const int16_t *pcm_data, size_t samples,
+                                int channels);
 /**
  * Peek at the RTP timestamp of the oldest (lowest-timestamp) frame in the
  * buffer without removing it.  Returns false if the buffer is empty.

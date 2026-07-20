@@ -27,8 +27,8 @@ static bool apply_aac_transient_mute(audio_receiver_state_t *state,
 }
 
 bool audio_stream_process_frame(audio_receiver_state_t *state,
-                                uint32_t timestamp, const uint8_t *audio_data,
-                                size_t audio_len) {
+                                uint32_t sequence_number, uint32_t timestamp,
+                                const uint8_t *audio_data, size_t audio_len) {
   if (!state || !state->decoder) {
     return false;
   }
@@ -84,7 +84,7 @@ bool audio_stream_process_frame(audio_receiver_state_t *state,
                            channels);
 
   bool queued = audio_buffer_queue_decoded(
-      &state->buffer, &state->stats, timestamp, decode_buffer,
+      &state->buffer, &state->stats, timestamp, sequence_number, decode_buffer,
       (size_t)decoded_samples, channels);
   if (queued) {
     audio_receiver_diag_note_queued(state, timestamp);

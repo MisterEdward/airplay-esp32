@@ -8,6 +8,17 @@
 #include "audio_receiver.h"
 #include "audio_stream.h"
 
+#define AUDIO_MAX_DEFERRED_FLUSH_REQUESTS 8
+
+typedef struct {
+  bool in_use;
+  uint32_t from_seq;
+  uint32_t from_ts;
+  uint32_t until_seq;
+  uint32_t until_ts;
+  int64_t expires_us;
+} audio_deferred_flush_request_t;
+
 typedef struct {
   uint32_t output_latency_us;
   uint32_t target_buffer_frames;
@@ -36,13 +47,18 @@ typedef struct {
   // silence is output until their scheduled play time, exactly like
   // shairport-sync.  Cleared once playout_started becomes true.
   bool quick_start;
-  // Deferred flush (AirPlay 2 FLUSHBUFFERED with flushFromSeq present):
-  // keep playing until a frame with rtp_timestamp >= flush_until_ts arrives,
-  // then bulk-flush and start fresh.  Written by the RTSP task, read by the
-  // DMA callback task.  Aligned 32-bit + bool — atomic on Xtensa without a
-  // mutex (write flush_until_ts first, arm bool second; read bool first).
-  bool deferred_flush_pending;
-  uint32_t flush_until_ts;
+  // Apple Music Audio Mix can arm several overlapping deferred flush ranges.
+  // Packet sequence is authoritative because RTP timestamps may jump between
+  // the old and new tracks. The RTSP, decoder and playback tasks share this
+  // table under a short critical section.
+  portMUX_TYPE deferred_flush_lock;
+  audio_deferred_flush_request_t
+      deferred_flush[AUDIO_MAX_DEFERRED_FLUSH_REQUESTS];
+  uint32_t deferred_flush_armed;
+  uint32_t deferred_flush_duplicates;
+  uint32_t deferred_flush_dropped;
+  uint32_t deferred_flush_expired;
+  uint32_t deferred_flush_overflow;
 } audio_timing_t;
 
 void audio_timing_init(audio_timing_t *timing, size_t pending_capacity);
@@ -63,6 +79,12 @@ void audio_timing_set_anchor(audio_timing_t *timing,
                              const audio_format_t *format, uint64_t clock_id,
                              uint64_t network_time_ns, uint32_t rtp_time);
 void audio_timing_set_playing(audio_timing_t *timing, bool playing);
+bool audio_timing_add_deferred_flush(audio_timing_t *timing,
+                                     uint32_t from_seq, uint32_t from_ts,
+                                     uint32_t until_seq, uint32_t until_ts);
+void audio_timing_reset_deferred_flushes(audio_timing_t *timing);
+bool audio_timing_deferred_flush_contains_sequence(audio_timing_t *timing,
+                                                   uint32_t sequence_number);
 size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
                          const audio_stream_t *stream, audio_stats_t *stats,
                          int16_t *out, size_t samples);

@@ -108,6 +108,16 @@ static void buffered_decoder_task(void *pvParameters) {
       continue;
     }
 
+    // Filter future deferred-flush packets before decrypt/AAC decode. Frames
+    // decoded before the RTSP request arrived carry the same packet sequence
+    // in their PCM header and are filtered by audio_timing_read.
+    if (audio_timing_deferred_flush_contains_sequence(&state->timing,
+                                                      slot->seq_no)) {
+      state->stats.packets_dropped++;
+      xQueueSend(state->buffered_free_queue, &slot_index, 0);
+      continue;
+    }
+
     // Decode task owns the shared decrypt buffer. Stale RTP is rejected by
     // audio_stream_process_frame before AAC decode, after cheap decryption.
     uint8_t *decrypted = state->decrypt_buffer;
@@ -135,7 +145,8 @@ static void buffered_decoder_task(void *pvParameters) {
 
     uint32_t generation_before = audio_receiver_get_seek_generation();
     bool queued = audio_stream_process_frame(
-        state, slot->timestamp, decrypted, (size_t)decrypted_len);
+        state, slot->seq_no, slot->timestamp, decrypted,
+        (size_t)decrypted_len);
     if (generation_before != audio_receiver_get_seek_generation()) {
       // FLUSH raced the decode/queue operation. This decoder is serial, so
       // flushing here can only remove the old generation just inserted.

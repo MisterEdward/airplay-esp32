@@ -45,6 +45,8 @@
 #define MAX_CONSECUTIVE_EARLY 50
 
 static const char *TAG = "audio_time";
+#define SEQUENCE_23_MASK           0x7FFFFFu
+#define DEFERRED_FLUSH_LIFETIME_US 120000000LL
 // consecutive_early_frames is now a field in audio_timing_t so it resets
 // automatically whenever a new anchor is set.
 
@@ -137,6 +139,8 @@ void audio_timing_init(audio_timing_t *timing, size_t pending_capacity) {
   }
 
   memset(timing, 0, sizeof(*timing));
+  portMUX_TYPE deferred_flush_lock = portMUX_INITIALIZER_UNLOCKED;
+  timing->deferred_flush_lock = deferred_flush_lock;
   timing->output_latency_us = DEFAULT_BUFFER_LATENCY_US;
   timing->playing = true;
 
@@ -160,8 +164,132 @@ void audio_timing_reset(audio_timing_t *timing) {
   timing->ready_time_us = 0;
   timing->consecutive_early_frames = 0;
   timing->quick_start = false;
-  timing->deferred_flush_pending = false;
-  timing->flush_until_ts = 0;
+  audio_timing_reset_deferred_flushes(timing);
+}
+
+// Signed subtraction in Apple's 23-bit buffered packet sequence space.
+// Compared values are expected to be less than half the sequence space apart.
+static int32_t sequence_23_delta(uint32_t a, uint32_t b) {
+  uint32_t diff = ((a & SEQUENCE_23_MASK) - (b & SEQUENCE_23_MASK)) &
+                  SEQUENCE_23_MASK;
+  return (diff & 0x400000u) ? (int32_t)(diff | 0xFF800000u)
+                            : (int32_t)diff;
+}
+
+void audio_timing_reset_deferred_flushes(audio_timing_t *timing) {
+  if (!timing) {
+    return;
+  }
+  portENTER_CRITICAL(&timing->deferred_flush_lock);
+  memset(timing->deferred_flush, 0, sizeof(timing->deferred_flush));
+  portEXIT_CRITICAL(&timing->deferred_flush_lock);
+}
+
+bool audio_timing_add_deferred_flush(audio_timing_t *timing,
+                                     uint32_t from_seq, uint32_t from_ts,
+                                     uint32_t until_seq, uint32_t until_ts) {
+  if (!timing) {
+    return false;
+  }
+
+  from_seq &= SEQUENCE_23_MASK;
+  until_seq &= SEQUENCE_23_MASK;
+  int64_t now_us = esp_timer_get_time();
+  int free_slot = -1;
+  bool duplicate = false;
+
+  portENTER_CRITICAL(&timing->deferred_flush_lock);
+  for (int i = 0; i < AUDIO_MAX_DEFERRED_FLUSH_REQUESTS; i++) {
+    audio_deferred_flush_request_t *request = &timing->deferred_flush[i];
+    if (request->in_use && now_us >= request->expires_us) {
+      request->in_use = false;
+      timing->deferred_flush_expired++;
+    }
+    if (!request->in_use) {
+      if (free_slot < 0) {
+        free_slot = i;
+      }
+      continue;
+    }
+    if (request->from_seq == from_seq && request->until_seq == until_seq &&
+        request->from_ts == from_ts && request->until_ts == until_ts) {
+      request->expires_us = now_us + DEFERRED_FLUSH_LIFETIME_US;
+      timing->deferred_flush_duplicates++;
+      duplicate = true;
+      break;
+    }
+  }
+
+  if (!duplicate && free_slot >= 0) {
+    timing->deferred_flush[free_slot] = (audio_deferred_flush_request_t){
+        .in_use = true,
+        .from_seq = from_seq,
+        .from_ts = from_ts,
+        .until_seq = until_seq,
+        .until_ts = until_ts,
+        .expires_us = now_us + DEFERRED_FLUSH_LIFETIME_US,
+    };
+    timing->deferred_flush_armed++;
+  } else if (!duplicate) {
+    timing->deferred_flush_overflow++;
+  }
+  portEXIT_CRITICAL(&timing->deferred_flush_lock);
+
+  if (duplicate) {
+    ESP_LOGI(TAG,
+             "Deferred flush duplicate ignored: seq=%" PRIu32 "..%" PRIu32,
+             from_seq, until_seq);
+    return true;
+  }
+  if (free_slot < 0) {
+    ESP_LOGW(TAG,
+             "Deferred flush queue full; range rejected: seq=%" PRIu32
+             "..%" PRIu32,
+             from_seq, until_seq);
+    return false;
+  }
+  ESP_LOGI(TAG,
+           "Deferred flush range armed: seq=%" PRIu32 "..%" PRIu32
+           " ts=%" PRIu32 "..%" PRIu32,
+           from_seq, until_seq, from_ts, until_ts);
+  return true;
+}
+
+bool audio_timing_deferred_flush_contains_sequence(audio_timing_t *timing,
+                                                   uint32_t sequence_number) {
+  if (!timing) {
+    return false;
+  }
+
+  sequence_number &= SEQUENCE_23_MASK;
+  int64_t now_us = esp_timer_get_time();
+  bool drop = false;
+
+  portENTER_CRITICAL(&timing->deferred_flush_lock);
+  for (int i = 0; i < AUDIO_MAX_DEFERRED_FLUSH_REQUESTS; i++) {
+    audio_deferred_flush_request_t *request = &timing->deferred_flush[i];
+    if (!request->in_use) {
+      continue;
+    }
+    if (now_us >= request->expires_us) {
+      request->in_use = false;
+      timing->deferred_flush_expired++;
+      continue;
+    }
+
+    // Half-open [fromSeq, untilSeq): keep the first packet after the removed
+    // region. This matches the AirPlay 2 receiver behaviour used by
+    // shairport-sync and avoids deleting the next track's buffered head.
+    if (sequence_23_delta(sequence_number, request->from_seq) >= 0 &&
+        sequence_23_delta(sequence_number, request->until_seq) < 0) {
+      drop = true;
+    }
+  }
+  if (drop) {
+    timing->deferred_flush_dropped++;
+  }
+  portEXIT_CRITICAL(&timing->deferred_flush_lock);
+  return drop;
 }
 
 void audio_timing_set_format(audio_timing_t *timing,
@@ -386,32 +514,21 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       frame_samples = samples;
     }
 
-    // Deferred flush check (AirPlay 2 FLUSHBUFFERED with flushFromSeq):
-    // keep playing until the frame whose RTP timestamp reaches flush_until_ts,
-    // then bulk-flush the remainder of the buffer and start fresh.
-    // Signed 32-bit subtraction handles RTP wraparound correctly.
-    if (timing->deferred_flush_pending) {
-      if ((int32_t)(hdr->rtp_timestamp - timing->flush_until_ts) >= 0) {
-        ESP_LOGI(TAG,
-                 "Deferred flush triggered at ts=%" PRIu32 " (until_ts=%" PRIu32
-                 ")",
-                 hdr->rtp_timestamp, timing->flush_until_ts);
-        if (from_pending) {
-          timing->pending_valid = false;
-          timing->pending_frame_len = 0;
-        } else {
-          audio_buffer_return(buffer, item);
-        }
-        audio_buffer_flush(buffer);
-        timing->deferred_flush_pending = false;
-        timing->playout_started = false;
-        timing->ready_time_us = 0;
-        timing->consecutive_early_frames = 0;
-        // quick_start so the first frame of the next track starts playing
-        // as soon as 1 frame arrives, with normal anchor timing applied.
-        timing->quick_start = true;
-        return 0;
+    // A deferred FLUSHBUFFERED request removes only the advertised packet
+    // range. Do not bulk-flush: Apple Music Audio Mix normally has several
+    // seconds of valid next-track PCM already behind the removed range.
+    if (audio_timing_deferred_flush_contains_sequence(
+            timing, hdr->sequence_number)) {
+      if (stats) {
+        stats->packets_dropped++;
       }
+      if (from_pending) {
+        timing->pending_valid = false;
+        timing->pending_frame_len = 0;
+      } else {
+        audio_buffer_return(buffer, item);
+      }
+      continue;
     }
 
     // Handle early/late frames based on anchor timing.

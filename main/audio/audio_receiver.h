@@ -155,16 +155,13 @@ void audio_receiver_flush(void);
 void audio_receiver_seek_flush(void);
 
 /**
- * Arm a deferred flush for AirPlay 2 FLUSHBUFFERED with flushFromSeq.
- *
- * Instead of discarding the buffer immediately, audio_timing_read will
- * continue playing normally until it encounters a frame whose rtp_timestamp
- * >= flush_until_ts, at which point it bulk-flushes the remainder and sets
- * post_flush so the next track starts without delay.
- *
- * @param flush_until_ts  RTP timestamp boundary from flushUntilTS plist key.
+ * Add an AirPlay 2 deferred FLUSHBUFFERED packet range. Multiple overlapping
+ * requests are retained because Apple Music Audio Mix sends them in bursts.
  */
-void audio_receiver_set_deferred_flush(uint32_t flush_until_ts);
+bool audio_receiver_set_deferred_flush(uint32_t flush_from_seq,
+                                       uint32_t flush_from_ts,
+                                       uint32_t flush_until_seq,
+                                       uint32_t flush_until_ts);
 
 /**
  * Pause playback while preserving the timing anchor.

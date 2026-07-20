@@ -119,8 +119,8 @@ typedef struct {
 } audio_receiver_state_t;
 
 bool audio_stream_process_frame(audio_receiver_state_t *state,
-                                uint32_t timestamp, const uint8_t *audio_data,
-                                size_t audio_len);
+                                uint32_t sequence_number, uint32_t timestamp,
+                                const uint8_t *audio_data, size_t audio_len);
 
 void audio_receiver_diag_note_packet(audio_receiver_state_t *state,
                                      uint32_t timestamp);
