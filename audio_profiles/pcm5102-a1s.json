@@ -1,0 +1,11 @@
+{
+  "name": "pcm5102-a1s",
+  "airplay_min_db": -30.0,
+  "airplay_mid_db": -15.0,
+  "airplay_max_db": 0.0,
+  "output_min_db": -48.0,
+  "output_mid_db": -30.0,
+  "output_max_db": -6.0,
+  "bass_shelf_db": -2.0,
+  "bass_shelf_hz": 180.0
+}

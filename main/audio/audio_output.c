@@ -2,6 +2,7 @@
 #include "rtsp_server.h"
 
 #include "audio_resample.h"
+#include "audio_output_profile.h"
 #include "dac.h"
 #include "led.h"
 #include "driver/i2s_std.h"
@@ -102,6 +103,9 @@ static void playback_task(void *arg) {
     if (flush_requested) {
       flush_requested = false;
       audio_resample_reset();
+#ifndef CONFIG_DAC_CONTROLS_VOLUME
+      audio_output_profile_reset();
+#endif
       i2s_channel_disable(tx_handle);
       i2s_channel_enable(tx_handle);
     }
@@ -117,6 +121,9 @@ static void playback_task(void *arg) {
       }
       ESP_LOGD(TAG, "Resampled to %u samples", (unsigned int)play_samples);
       apply_volume(play_buf, play_samples * 2);
+#ifndef CONFIG_DAC_CONTROLS_VOLUME
+      audio_output_profile_process(play_buf, play_samples);
+#endif
       apply_channel_mode(play_buf, play_samples);
       led_audio_feed(play_buf, play_samples);
       i2s_channel_write(tx_handle, play_buf, play_samples * 4, &written,
@@ -184,6 +191,9 @@ esp_err_t audio_output_init(void) {
   dac_on_i2s_started();
 
   audio_resample_init(44100, OUTPUT_RATE, 2);
+#ifndef CONFIG_DAC_CONTROLS_VOLUME
+  audio_output_profile_init(OUTPUT_RATE);
+#endif
 
   return ESP_OK;
 }
