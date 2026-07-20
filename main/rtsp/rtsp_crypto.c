@@ -1,6 +1,7 @@
 #include "rtsp_crypto.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -146,12 +147,24 @@ int rtsp_crypto_read_block(int socket, rtsp_conn_t *conn, uint8_t *buffer,
       memcpy(conn->hap_session->decrypt_key, new_read, 32);
       memcpy(conn->hap_session->encrypt_key, new_write, 32);
     } else {
-      free(encrypted);
+      // Every candidate mapping failed. Dump just enough material to verify
+      // the HKDF derivation off-device against a reference implementation.
+      char keyhex[24];
+      char altkeyhex[24];
+      char cthex[24];
+      for (int i = 0; i < 8; i++) {
+        snprintf(keyhex + i * 2, 3, "%02x", conn->hap_session->decrypt_key[i]);
+        snprintf(altkeyhex + i * 2, 3, "%02x",
+                 conn->hap_session->alt_decrypt_key[i]);
+        snprintf(cthex + i * 2, 3, "%02x", encrypted[i]);
+      }
       ESP_LOGE(TAG,
-               "Failed to decrypt frame (block=%u nonce=%llu, both key roles"
-               " rejected)",
-               (unsigned)block_len,
-               (unsigned long long)conn->hap_session->decrypt_nonce);
+               "Decrypt failed, all %u derivations rejected (block=%u"
+               " nonce=%llu) key64=%s key32=%s ct=%s",
+               (unsigned)(candidate_count + 1), (unsigned)block_len,
+               (unsigned long long)conn->hap_session->decrypt_nonce, keyhex,
+               altkeyhex, cthex);
+      free(encrypted);
       return -1;
     }
   }
