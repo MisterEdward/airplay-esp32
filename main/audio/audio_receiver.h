@@ -83,6 +83,20 @@ typedef struct {
   bool pending_valid;
   bool playout_started;
   bool playing;
+  bool stream_running;
+  bool buffered_client_connected;
+  uint8_t stream_type;
+  int64_t buffered_last_packet_us;
+  uint32_t buffered_connections_accepted;
+  uint32_t buffered_stall_recoveries;
+  uint32_t buffered_reader_stack_words;
+  uint32_t buffered_decoder_stack_words;
+  uint32_t deferred_flush_active;
+  uint32_t deferred_flush_armed;
+  uint32_t deferred_flush_duplicates;
+  uint32_t deferred_flush_dropped;
+  uint32_t deferred_flush_expired;
+  uint32_t deferred_flush_overflow;
   audio_stats_t stats;
 } audio_seek_diag_t;
 

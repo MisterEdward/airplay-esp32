@@ -662,6 +662,28 @@ void audio_receiver_get_seek_diag(audio_seek_diag_t *diag) {
   diag->pending_valid = receiver.timing.pending_valid;
   diag->playout_started = receiver.timing.playout_started;
   diag->playing = receiver.timing.playing;
+  diag->stream_running = receiver.stream && receiver.stream->running;
+  diag->stream_type = receiver.stream ? (uint8_t)receiver.stream->type : 0;
+  diag->buffered_client_connected = receiver.buffered_client_socket >= 0;
+  diag->buffered_last_packet_us = receiver.buffered_last_packet_us;
+  diag->buffered_connections_accepted = receiver.buffered_connections_accepted;
+  diag->buffered_stall_recoveries = receiver.buffered_stall_recoveries;
+  if (receiver.buffered_task_handle) {
+    diag->buffered_reader_stack_words =
+        uxTaskGetStackHighWaterMark(receiver.buffered_task_handle);
+  }
+  if (receiver.buffered_decoder_task_handle) {
+    diag->buffered_decoder_stack_words =
+        uxTaskGetStackHighWaterMark(receiver.buffered_decoder_task_handle);
+  }
+  audio_deferred_flush_stats_t flush_stats = {0};
+  audio_timing_get_deferred_flush_stats(&receiver.timing, &flush_stats);
+  diag->deferred_flush_active = flush_stats.active;
+  diag->deferred_flush_armed = flush_stats.armed;
+  diag->deferred_flush_duplicates = flush_stats.duplicates;
+  diag->deferred_flush_dropped = flush_stats.dropped;
+  diag->deferred_flush_expired = flush_stats.expired;
+  diag->deferred_flush_overflow = flush_stats.overflow;
   memcpy(&diag->stats, &receiver.stats, sizeof(diag->stats));
 }
 

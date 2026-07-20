@@ -426,7 +426,16 @@ Goals:
 
 ### 7.2 Add-on B: fast buffered TCP stall recovery
 
-Planned behaviour:
+Completion record:
+
+- commit: `f6327cd` (`fix(audio): recover buffered TCP stalls sooner`);
+- firmware SHA-256:
+  `be7122410ad7665c532eb5062bc7df43014000c6fc5bda08196581e88412b061`;
+- OTA target identity verified as `A4:CB:8F:F8:2F:14`;
+- OTA endpoint accepted the image and rebooted the device;
+- the system API returned after reboot at `192.168.68.105`.
+
+Delivered behaviour:
 
 - reduce active-play receive timeout from 30 seconds to 8 seconds;
 - continue waiting indefinitely while intentionally paused;
@@ -467,7 +476,16 @@ Why 8 seconds:
 
 ### 7.3 Add-on C: general health telemetry
 
-Planned behaviour:
+Implementation status:
+
+- source implementation complete;
+- `pio run -e esp32s3` passed;
+- firmware size: 1,447,223 bytes;
+- static RAM reported by the linker: 53,136 bytes;
+- the telemetry task stack is 4,096 bytes;
+- commit and OTA follow this checkpoint.
+
+Delivered behaviour:
 
 - retain useful seek timing data without logging stale generations forever;
 - make counter deltas safe across stream counter resets;
@@ -481,8 +499,81 @@ Planned behaviour:
 - reduce repetitive healthy logging so the log stream itself does not become
   a scheduling load.
 
-The current `S3TRACE` unsigned-underflow bug is diagnostic only, but it is fixed
-as part of this add-on so later decisions are based on trustworthy counters.
+Sampling and output policy:
+
+- the task samples the health snapshot once per second;
+- a full `HEALTH` record is emitted only once every ten seconds;
+- full health records are suppressed while no audio stream is running;
+- seek transitions remain event driven and produce only `SEEK begin` and
+  `SEEK ready` records;
+- this replaces the old one-line-per-second `S3TRACE` stream, reducing log
+  traffic by roughly ten times during ordinary playback;
+- failure to create the telemetry task is now reported explicitly rather than
+  returning an unexplained generic error.
+
+Counter correctness:
+
+- receive, decode, drop, late, underrun and decrypt-error counters are compared
+  with their previous snapshot;
+- if any source counter moves backwards, the stream statistics were reset and
+  every delta for that report is forced to zero;
+- this removes the misleading `429496...` values previously produced by
+  unsigned subtraction after a stream replacement;
+- the log includes `reset=1` on that report so the discontinuity remains
+  visible without being mistaken for billions of dropped packets.
+
+Memory observations:
+
+- internal 8-bit-capable free heap is measured separately from PSRAM;
+- the largest contiguous internal block is reported because task creation can
+  fail from fragmentation even when total free memory still looks healthy;
+- free PSRAM is reported independently;
+- a report is marked `WARN` below 64 KiB internal free heap or below a 24 KiB
+  largest internal block;
+- these are warning thresholds only; telemetry never modifies playback or
+  restarts a service.
+
+Task observations:
+
+- remaining stack high-water marks are reported for the PCM output task,
+  buffered TCP reader, AAC decoder and telemetry task;
+- zero means that task is not presently running and is not interpreted as a
+  low-stack event by telemetry;
+- a live task below 256 FreeRTOS stack words marks the report `WARN`;
+- the accessors are read-only and do not suspend the observed tasks.
+
+Network and protocol observations:
+
+- the line reports whether a buffered TCP client is connected;
+- packet age is calculated from the last fully received packet, not from a
+  partial socket read;
+- cumulative connection and active-play stall-recovery counts are shown;
+- deferred FLUSHBUFFERED telemetry exposes active request slots, total armed
+  requests, exact duplicates, selectively dropped packets, expired requests
+  and slot-overflow events;
+- reading deferred-flush statistics takes the same short mutex used by updates,
+  expires stale slots first, copies scalar counters and releases immediately;
+- packet-range matching and all normal audio behaviour are unchanged.
+
+Timing observations:
+
+- current PTP lock state and filtered clock offset in microseconds are shown;
+- decoded-buffer current and target depths are shown together;
+- seek readiness retains anchor, first-received and first-queued timing relative
+  to the exact seek generation;
+- a stale seek generation is no longer printed indefinitely after playback has
+  stopped.
+
+Warning semantics:
+
+- `WARN` is emitted for memory or stack pressure, an underrun delta, a decrypt
+  error delta or a saturated deferred-flush table;
+- packet drops and late frames remain visible but do not alone label the system
+  unhealthy because bounded drops are expected during legitimate seek timing
+  correction;
+- PTP acquisition does not trigger a warning or recovery action;
+- this add-on is intentionally diagnostic only and cannot close sockets, stop
+  services or reboot the ESP.
 
 ### 7.4 Add-on D: recovery ladder
 

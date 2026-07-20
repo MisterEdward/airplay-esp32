@@ -71,6 +71,9 @@ void audio_output_set_source_rate(int rate);
  */
 uint32_t audio_output_get_hardware_latency_us(void);
 
+/** Minimum unused playback-task stack observed by FreeRTOS, in words. */
+uint32_t audio_output_get_stack_high_watermark(void);
+
 /**
  * Cycle the output channel mode: STEREO -> LEFT -> RIGHT -> STEREO.
  * @return the new mode after cycling.

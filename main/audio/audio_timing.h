@@ -20,6 +20,15 @@ typedef struct {
 } audio_deferred_flush_request_t;
 
 typedef struct {
+  uint32_t active;
+  uint32_t armed;
+  uint32_t duplicates;
+  uint32_t dropped;
+  uint32_t expired;
+  uint32_t overflow;
+} audio_deferred_flush_stats_t;
+
+typedef struct {
   uint32_t output_latency_us;
   uint32_t target_buffer_frames;
   uint32_t nominal_frame_samples;
@@ -85,6 +94,8 @@ bool audio_timing_add_deferred_flush(audio_timing_t *timing,
 void audio_timing_reset_deferred_flushes(audio_timing_t *timing);
 bool audio_timing_deferred_flush_contains_sequence(audio_timing_t *timing,
                                                    uint32_t sequence_number);
+void audio_timing_get_deferred_flush_stats(
+    audio_timing_t *timing, audio_deferred_flush_stats_t *stats);
 size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
                          const audio_stream_t *stream, audio_stats_t *stats,
                          int16_t *out, size_t samples);

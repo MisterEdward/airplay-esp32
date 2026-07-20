@@ -257,6 +257,12 @@ uint32_t audio_output_get_hardware_latency_us(void) {
                 OUTPUT_RATE);
 }
 
+uint32_t audio_output_get_stack_high_watermark(void) {
+  return playback_task_handle
+             ? (uint32_t)uxTaskGetStackHighWaterMark(playback_task_handle)
+             : 0;
+}
+
 audio_channel_mode_t audio_output_cycle_channel_mode(void) {
   audio_channel_mode_t next;
   switch (channel_mode) {

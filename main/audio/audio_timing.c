@@ -292,6 +292,33 @@ bool audio_timing_deferred_flush_contains_sequence(audio_timing_t *timing,
   return drop;
 }
 
+void audio_timing_get_deferred_flush_stats(
+    audio_timing_t *timing, audio_deferred_flush_stats_t *stats) {
+  if (!timing || !stats) {
+    return;
+  }
+
+  memset(stats, 0, sizeof(*stats));
+  int64_t now_us = esp_timer_get_time();
+  portENTER_CRITICAL(&timing->deferred_flush_lock);
+  for (int i = 0; i < AUDIO_MAX_DEFERRED_FLUSH_REQUESTS; i++) {
+    audio_deferred_flush_request_t *request = &timing->deferred_flush[i];
+    if (request->in_use && now_us >= request->expires_us) {
+      request->in_use = false;
+      timing->deferred_flush_expired++;
+    }
+    if (request->in_use) {
+      stats->active++;
+    }
+  }
+  stats->armed = timing->deferred_flush_armed;
+  stats->duplicates = timing->deferred_flush_duplicates;
+  stats->dropped = timing->deferred_flush_dropped;
+  stats->expired = timing->deferred_flush_expired;
+  stats->overflow = timing->deferred_flush_overflow;
+  portEXIT_CRITICAL(&timing->deferred_flush_lock);
+}
+
 void audio_timing_set_format(audio_timing_t *timing,
                              const audio_format_t *format) {
   if (!timing || !format) {
