@@ -15,6 +15,9 @@ static const char *TAG = "hap_setup";
 #define TLV_TYPE_PROOF  0x04
 #define TLV_TYPE_FLAGS  0x13
 
+// kPairingFlag_Transient from the HAP pairing-flags bitfield.
+#define PAIRING_FLAG_TRANSIENT 0x10
+
 #define PAIR_SETUP_M1 1
 #define PAIR_SETUP_M2 2
 #define PAIR_SETUP_M3 3
@@ -37,11 +40,22 @@ esp_err_t hap_pair_setup_m1(hap_session_t *session, const uint8_t *input,
     return ESP_ERR_INVALID_ARG;
   }
 
-  bool transient = false;
-  if (flags && flags_len == 1) {
-    transient = (flags[0] & 0x10) != 0;
+  // The pairing-flags TLV is a little-endian integer of minimal length, not a
+  // single byte.  AirPlay 2 transient setup sends 0x138, which needs two or
+  // four bytes, so an exact flags_len==1 test silently misses the transient
+  // bit and starts SRP with the wrong password ("0000" instead of "3939").
+  // The exchange then completes with a shared secret the sender does not
+  // share, and the first encrypted RTSP frame fails to decrypt.
+  uint64_t flag_bits = 0;
+  if (flags && flags_len > 0 && flags_len <= sizeof(flag_bits)) {
+    for (size_t i = 0; i < flags_len; i++) {
+      flag_bits |= (uint64_t)flags[i] << (8 * i);
+    }
   }
+  bool transient = (flag_bits & PAIRING_FLAG_TRANSIENT) != 0;
   session->pair_setup_transient = transient;
+  ESP_LOGI(TAG, "Pair-setup M1: flags=0x%llx (%u bytes) transient=%d",
+           (unsigned long long)flag_bits, (unsigned)flags_len, transient);
 
   if (session->srp) {
     srp_session_free(session->srp);
