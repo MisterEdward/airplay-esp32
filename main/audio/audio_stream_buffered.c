@@ -131,6 +131,7 @@ static void buffered_audio_task(void *pvParameters) {
       uint32_t seq_no = (packet[1] << 16) | (packet[2] << 8) | packet[3];
       uint32_t timestamp =
           (packet[4] << 24) | (packet[5] << 16) | (packet[6] << 8) | packet[7];
+      audio_receiver_diag_note_packet(state, timestamp);
 
       uint8_t *decrypted = state->decrypt_buffer;
       size_t decrypt_capacity = state->decrypt_buffer_size;

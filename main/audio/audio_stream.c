@@ -35,6 +35,7 @@ bool audio_stream_process_frame(audio_receiver_state_t *state,
 
   // Blanket gate: reject everything between seek_flush and the next anchor.
   if (state->discard_all_until_anchor) {
+    audio_receiver_diag_note_gate_drop(state, 0);
     return false;
   }
 
@@ -46,12 +47,14 @@ bool audio_stream_process_frame(audio_receiver_state_t *state,
   // Each self-disarms on the first frame that passes it.
   if (state->discard_before_rtp_valid) {
     if ((int32_t)(timestamp - state->discard_before_rtp) < 0) {
+      audio_receiver_diag_note_gate_drop(state, 1);
       return false; // below lower bound — forward-seek stale frame
     }
     state->discard_before_rtp_valid = false;
   }
   if (state->discard_above_rtp_valid) {
     if ((int32_t)(timestamp - state->discard_above_rtp) > 0) {
+      audio_receiver_diag_note_gate_drop(state, 2);
       return false; // above upper bound — backward-seek stale frame
     }
     state->discard_above_rtp_valid = false;
@@ -80,9 +83,13 @@ bool audio_stream_process_frame(audio_receiver_state_t *state,
   apply_aac_transient_mute(state, decode_buffer, (size_t)decoded_samples,
                            channels);
 
-  return audio_buffer_queue_decoded(&state->buffer, &state->stats, timestamp,
-                                    decode_buffer, (size_t)decoded_samples,
-                                    channels);
+  bool queued = audio_buffer_queue_decoded(
+      &state->buffer, &state->stats, timestamp, decode_buffer,
+      (size_t)decoded_samples, channels);
+  if (queued) {
+    audio_receiver_diag_note_queued(state, timestamp);
+  }
+  return queued;
 }
 
 audio_stream_t *audio_stream_create_realtime(void) {

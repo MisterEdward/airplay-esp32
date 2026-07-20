@@ -95,11 +95,34 @@ typedef struct {
   // Cleared on flush/reset and consumed after one use.
   uint32_t paused_rtp;
   bool paused_rtp_valid;
+
+  // Diagnostic-only seek state. Protected because RTSP, TCP and telemetry
+  // tasks update/read it concurrently. It never affects playback decisions.
+  portMUX_TYPE diag_lock;
+  uint32_t diag_generation;
+  int64_t diag_seek_started_us;
+  int64_t diag_anchor_received_us;
+  int64_t diag_first_rx_us;
+  int64_t diag_first_queue_us;
+  int64_t diag_playout_started_us;
+  uint32_t diag_anchor_rtp;
+  uint32_t diag_first_rx_rtp;
+  uint32_t diag_first_queue_rtp;
+  uint32_t diag_blanket_drops;
+  uint32_t diag_lower_gate_drops;
+  uint32_t diag_upper_gate_drops;
 } audio_receiver_state_t;
 
 bool audio_stream_process_frame(audio_receiver_state_t *state,
                                 uint32_t timestamp, const uint8_t *audio_data,
                                 size_t audio_len);
+
+void audio_receiver_diag_note_packet(audio_receiver_state_t *state,
+                                     uint32_t timestamp);
+void audio_receiver_diag_note_queued(audio_receiver_state_t *state,
+                                     uint32_t timestamp);
+void audio_receiver_diag_note_gate_drop(audio_receiver_state_t *state,
+                                        int gate);
 
 static inline audio_receiver_state_t *
 audio_stream_state(audio_stream_t *stream) {

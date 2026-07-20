@@ -1,5 +1,6 @@
 #include "audio_output.h"
 #include "audio_receiver.h"
+#include "audio_telemetry.h"
 #include "buttons.h"
 #include "spiram_task.h"
 #include "display.h"
@@ -54,6 +55,7 @@ static void start_airplay_services(void) {
 
     ESP_ERROR_CHECK(hap_init());
     ESP_ERROR_CHECK(audio_receiver_init());
+    ESP_ERROR_CHECK(audio_telemetry_start());
     ESP_ERROR_CHECK(audio_output_init());
     mdns_airplay_init();
     s_airplay_infrastructure_ready = true;

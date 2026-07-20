@@ -24,7 +24,55 @@
 
 static const char *TAG = "audio_recv";
 
-static audio_receiver_state_t receiver = {0};
+static audio_receiver_state_t receiver = {
+    .diag_lock = portMUX_INITIALIZER_UNLOCKED,
+};
+
+enum { DIAG_GATE_BLANKET = 0, DIAG_GATE_LOWER = 1, DIAG_GATE_UPPER = 2 };
+
+void audio_receiver_diag_note_packet(audio_receiver_state_t *state,
+                                     uint32_t timestamp) {
+  if (!state) {
+    return;
+  }
+  int64_t now_us = esp_timer_get_time();
+  portENTER_CRITICAL(&state->diag_lock);
+  if (state->diag_generation && state->diag_first_rx_us == 0) {
+    state->diag_first_rx_us = now_us;
+    state->diag_first_rx_rtp = timestamp;
+  }
+  portEXIT_CRITICAL(&state->diag_lock);
+}
+
+void audio_receiver_diag_note_queued(audio_receiver_state_t *state,
+                                     uint32_t timestamp) {
+  if (!state) {
+    return;
+  }
+  int64_t now_us = esp_timer_get_time();
+  portENTER_CRITICAL(&state->diag_lock);
+  if (state->diag_generation && state->diag_first_queue_us == 0) {
+    state->diag_first_queue_us = now_us;
+    state->diag_first_queue_rtp = timestamp;
+  }
+  portEXIT_CRITICAL(&state->diag_lock);
+}
+
+void audio_receiver_diag_note_gate_drop(audio_receiver_state_t *state,
+                                        int gate) {
+  if (!state) {
+    return;
+  }
+  portENTER_CRITICAL(&state->diag_lock);
+  if (gate == DIAG_GATE_BLANKET) {
+    state->diag_blanket_drops++;
+  } else if (gate == DIAG_GATE_LOWER) {
+    state->diag_lower_gate_drops++;
+  } else if (gate == DIAG_GATE_UPPER) {
+    state->diag_upper_gate_drops++;
+  }
+  portEXIT_CRITICAL(&state->diag_lock);
+}
 
 static void audio_receiver_reset_stats(void) {
   memset(&receiver.stats, 0, sizeof(receiver.stats));
@@ -358,6 +406,14 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
 
   audio_timing_set_anchor(&receiver.timing, &receiver.stream->format, clock_id,
                           network_time_ns, rtp_time);
+
+  int64_t now_us = esp_timer_get_time();
+  portENTER_CRITICAL(&receiver.diag_lock);
+  if (receiver.diag_generation) {
+    receiver.diag_anchor_received_us = now_us;
+    receiver.diag_anchor_rtp = rtp_time;
+  }
+  portEXIT_CRITICAL(&receiver.diag_lock);
 }
 
 void audio_receiver_set_playing(bool playing) {
@@ -568,13 +624,57 @@ void audio_receiver_get_stats(audio_stats_t *stats) {
   memcpy(stats, &receiver.stats, sizeof(receiver.stats));
 }
 
+void audio_receiver_get_seek_diag(audio_seek_diag_t *diag) {
+  if (!diag) {
+    return;
+  }
+  memset(diag, 0, sizeof(*diag));
+  portENTER_CRITICAL(&receiver.diag_lock);
+  diag->generation = receiver.diag_generation;
+  diag->seek_started_us = receiver.diag_seek_started_us;
+  diag->anchor_received_us = receiver.diag_anchor_received_us;
+  diag->first_rx_us = receiver.diag_first_rx_us;
+  diag->first_queue_us = receiver.diag_first_queue_us;
+  diag->playout_started_us = receiver.diag_playout_started_us;
+  diag->anchor_rtp = receiver.diag_anchor_rtp;
+  diag->first_rx_rtp = receiver.diag_first_rx_rtp;
+  diag->first_queue_rtp = receiver.diag_first_queue_rtp;
+  diag->blanket_drops = receiver.diag_blanket_drops;
+  diag->lower_gate_drops = receiver.diag_lower_gate_drops;
+  diag->upper_gate_drops = receiver.diag_upper_gate_drops;
+  portEXIT_CRITICAL(&receiver.diag_lock);
+
+  diag->buffer_frames = audio_buffer_get_frame_count(&receiver.buffer);
+  diag->target_buffer_frames = receiver.timing.target_buffer_frames;
+  diag->discard_all_until_anchor = receiver.discard_all_until_anchor;
+  diag->lower_gate_armed = receiver.discard_before_rtp_valid;
+  diag->upper_gate_armed = receiver.discard_above_rtp_valid;
+  diag->anchor_valid = receiver.timing.anchor_valid;
+  diag->quick_start = receiver.timing.quick_start;
+  diag->pending_valid = receiver.timing.pending_valid;
+  diag->playout_started = receiver.timing.playout_started;
+  diag->playing = receiver.timing.playing;
+  memcpy(&diag->stats, &receiver.stats, sizeof(diag->stats));
+}
+
 size_t audio_receiver_read(int16_t *buffer, size_t samples) {
   if (!receiver.buffer.pool || !buffer || samples == 0) {
     return 0;
   }
 
-  return audio_timing_read(&receiver.timing, &receiver.buffer, receiver.stream,
-                           &receiver.stats, buffer, samples);
+  bool was_started = receiver.timing.playout_started;
+  size_t read = audio_timing_read(&receiver.timing, &receiver.buffer,
+                                  receiver.stream, &receiver.stats, buffer,
+                                  samples);
+  if (!was_started && receiver.timing.playout_started) {
+    int64_t now_us = esp_timer_get_time();
+    portENTER_CRITICAL(&receiver.diag_lock);
+    if (receiver.diag_generation) {
+      receiver.diag_playout_started_us = now_us;
+    }
+    portEXIT_CRITICAL(&receiver.diag_lock);
+  }
+  return read;
 }
 
 bool audio_receiver_has_data(void) {
@@ -615,6 +715,24 @@ void audio_receiver_seek_flush(void) {
   // data from filling the buffer between FLUSHBUFFERED and SETRATEANCHORTIME,
   // which would cause a second flush and double the startup delay.
   receiver.discard_all_until_anchor = true;
+
+  int64_t now_us = esp_timer_get_time();
+  portENTER_CRITICAL(&receiver.diag_lock);
+  receiver.diag_generation++;
+  receiver.diag_seek_started_us = now_us;
+  receiver.diag_anchor_received_us = 0;
+  receiver.diag_first_rx_us = 0;
+  receiver.diag_first_queue_us = 0;
+  receiver.diag_playout_started_us = 0;
+  receiver.diag_anchor_rtp = 0;
+  receiver.diag_first_rx_rtp = 0;
+  receiver.diag_first_queue_rtp = 0;
+  receiver.diag_blanket_drops = 0;
+  receiver.diag_lower_gate_drops = 0;
+  receiver.diag_upper_gate_drops = 0;
+  uint32_t generation = receiver.diag_generation;
+  portEXIT_CRITICAL(&receiver.diag_lock);
+  ESP_LOGI(TAG, "S3TRACE seek gen=%" PRIu32 " begin", generation);
 }
 
 void audio_receiver_set_deferred_flush(uint32_t flush_until_ts) {

@@ -59,6 +59,33 @@ typedef struct {
   uint32_t last_timestamp;
 } audio_stats_t;
 
+// Read-only seek diagnostics used by the WebSocket log telemetry task.
+typedef struct {
+  uint32_t generation;
+  int64_t seek_started_us;
+  int64_t anchor_received_us;
+  int64_t first_rx_us;
+  int64_t first_queue_us;
+  int64_t playout_started_us;
+  uint32_t anchor_rtp;
+  uint32_t first_rx_rtp;
+  uint32_t first_queue_rtp;
+  uint32_t blanket_drops;
+  uint32_t lower_gate_drops;
+  uint32_t upper_gate_drops;
+  uint32_t buffer_frames;
+  uint32_t target_buffer_frames;
+  bool discard_all_until_anchor;
+  bool lower_gate_armed;
+  bool upper_gate_armed;
+  bool anchor_valid;
+  bool quick_start;
+  bool pending_valid;
+  bool playout_started;
+  bool playing;
+  audio_stats_t stats;
+} audio_seek_diag_t;
+
 /**
  * Initialize audio receiver
  */
@@ -94,6 +121,9 @@ void audio_receiver_stop(void);
  * Get audio statistics
  */
 void audio_receiver_get_stats(audio_stats_t *stats);
+
+/** Take a read-only snapshot of seek and buffer diagnostics. */
+void audio_receiver_get_seek_diag(audio_seek_diag_t *diag);
 
 /**
  * Read decoded PCM samples from buffer
