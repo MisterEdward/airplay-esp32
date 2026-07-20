@@ -924,8 +924,8 @@ touched it. `git log --follow main/hap/hap_crypto.c` shows only "Reorg of the
 repo before sharing" and "Format code" before the fix.
 
 `hap_hkdf_sha512` implemented RFC 5869 correctly but built it on libsodium's
-`crypto_auth_hmacsha512_*` streaming API. On this build that API returns wrong
-results. The generated configuration has:
+`crypto_auth_hmacsha512_*` streaming API. On the image that was running, that
+API returned wrong results, because the *locally generated* configuration had:
 
 ```text
 CONFIG_LIBSODIUM_USE_MBEDTLS_SHA=y
@@ -934,6 +934,30 @@ CONFIG_LIBSODIUM_USE_MBEDTLS_SHA=y
 which replaces libsodium's SHA-512 with mbedTLS. libsodium's HMAC is layered on
 its own SHA-512 internals, so the substitution leaves direct SHA-512 calls
 correct while the HMAC built on top of them is not.
+
+The project already guards against exactly this. `sdkconfig.defaults` carries:
+
+```text
+# libsodium: disable mbedTLS SHA wrapper — ESP32 hardware SHA acceleration
+# is incompatible with libsodium's state management pattern.
+# (The Kconfig guard for this was removed in libsodium 1.0.21)
+CONFIG_LIBSODIUM_USE_MBEDTLS_SHA=n
+```
+
+The libsodium managed component is version 1.0.21 and its Kconfig defaults the
+option to `y`, so the `n` in `sdkconfig.defaults` is what keeps a correct build
+correct. `sdkconfig.<env>` is untracked and generated once; `sdkconfig.defaults`
+is not reapplied to an existing file, so a stale local `sdkconfig.esp32s3`
+carried `=y` and silently re-enabled the wrapper.
+
+Deleting `sdkconfig.esp32s3` and rebuilding produces
+`# CONFIG_LIBSODIUM_USE_MBEDTLS_SHA is not set`, confirming a clean checkout
+does not have this problem. The only other difference from the stale file was
+`CONFIG_LWIP_SO_RCVBUF=y` appearing — which the buffered audio reader needs,
+since it calls `setsockopt(SO_RCVBUF)`; without it that call silently failed.
+
+The mbedTLS-based HKDF is kept regardless, so key derivation no longer depends
+on getting this configuration option right.
 
 Measured on device with a fixed vector (IKM = bytes 0x00..0x3F, salt
 `Control-Salt`, info `Control-Write-Encryption-Key`, 32-byte output):
