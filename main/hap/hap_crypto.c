@@ -4,54 +4,79 @@
 #include "hap_internal.h"
 
 #include "esp_log.h"
+#include "mbedtls/md.h"
 #include "sodium.h"
 
 static const char *TAG = "hap_crypto";
 
+#define HKDF_SHA512_HASH_LEN 64
+
+// RFC 5869 HKDF over mbedTLS HMAC-SHA512.
+//
+// This used to call libsodium's crypto_auth_hmacsha512_* streaming API with
+// keys whose length is not crypto_auth_hmacsha512_KEYBYTES (the salt is 12
+// bytes and the PRK is 64). That produced HMAC output which does not match a
+// reference HKDF, so the derived AirPlay 2 control-channel keys were wrong
+// even though both peers agreed on the SRP session key, and every encrypted
+// RTSP frame failed authentication. mbedTLS' HMAC handles arbitrary key
+// lengths per the spec.
 int hap_hkdf_sha512(const uint8_t *salt, size_t salt_len, const uint8_t *ikm,
                     size_t ikm_len, const uint8_t *info, size_t info_len,
                     uint8_t *okm, size_t okm_len) {
-  uint8_t prk[crypto_auth_hmacsha512_BYTES];
-  crypto_auth_hmacsha512_state state;
-
-  if (salt && salt_len > 0) {
-    crypto_auth_hmacsha512_init(&state, salt, salt_len);
-  } else {
-    uint8_t zero_salt[crypto_auth_hmacsha512_BYTES] = {0};
-    crypto_auth_hmacsha512_init(&state, zero_salt, sizeof(zero_salt));
+  const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA512);
+  if (!md || !okm) {
+    return -1;
   }
-  crypto_auth_hmacsha512_update(&state, ikm, ikm_len);
-  crypto_auth_hmacsha512_final(&state, prk);
 
-  uint8_t t[crypto_auth_hmacsha512_BYTES];
-  uint8_t counter = 1;
+  uint8_t zero_salt[HKDF_SHA512_HASH_LEN] = {0};
+  const uint8_t *use_salt = (salt && salt_len > 0) ? salt : zero_salt;
+  size_t use_salt_len = (salt && salt_len > 0) ? salt_len : sizeof(zero_salt);
+
+  uint8_t prk[HKDF_SHA512_HASH_LEN];
+  uint8_t t[HKDF_SHA512_HASH_LEN];
   size_t t_len = 0;
   size_t pos = 0;
+  uint8_t counter = 1;
+  int ret = -1;
 
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+
+  // Extract: PRK = HMAC(salt, ikm)
+  if (mbedtls_md_hmac(md, use_salt, use_salt_len, ikm, ikm_len, prk) != 0) {
+    goto done;
+  }
+
+  // Expand: T(n) = HMAC(PRK, T(n-1) || info || n)
+  if (mbedtls_md_setup(&ctx, md, 1) != 0) {
+    goto done;
+  }
   while (pos < okm_len) {
-    crypto_auth_hmacsha512_init(&state, prk, sizeof(prk));
-    if (t_len > 0) {
-      crypto_auth_hmacsha512_update(&state, t, t_len);
+    if (mbedtls_md_hmac_starts(&ctx, prk, sizeof(prk)) != 0 ||
+        (t_len > 0 && mbedtls_md_hmac_update(&ctx, t, t_len) != 0) ||
+        (info && info_len > 0 &&
+         mbedtls_md_hmac_update(&ctx, info, info_len) != 0) ||
+        mbedtls_md_hmac_update(&ctx, &counter, 1) != 0 ||
+        mbedtls_md_hmac_finish(&ctx, t) != 0) {
+      goto done;
     }
-    if (info && info_len > 0) {
-      crypto_auth_hmacsha512_update(&state, info, info_len);
-    }
-    crypto_auth_hmacsha512_update(&state, &counter, 1);
-    crypto_auth_hmacsha512_final(&state, t);
-    t_len = crypto_auth_hmacsha512_BYTES;
+    t_len = sizeof(t);
 
     size_t copy_len = okm_len - pos;
-    if (copy_len > crypto_auth_hmacsha512_BYTES) {
-      copy_len = crypto_auth_hmacsha512_BYTES;
+    if (copy_len > sizeof(t)) {
+      copy_len = sizeof(t);
     }
     memcpy(okm + pos, t, copy_len);
     pos += copy_len;
     counter++;
   }
+  ret = 0;
 
+done:
+  mbedtls_md_free(&ctx);
   sodium_memzero(prk, sizeof(prk));
   sodium_memzero(t, sizeof(t));
-  return 0;
+  return ret;
 }
 
 esp_err_t hap_derive_audio_key(hap_session_t *session, uint8_t *audio_key,

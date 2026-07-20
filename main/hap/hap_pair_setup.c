@@ -141,37 +141,7 @@ esp_err_t hap_pair_setup_m3(hap_session_t *session, const uint8_t *input,
       return ESP_ERR_INVALID_STATE;
     }
 
-    // Full material so the HKDF derivation can be reproduced off-device and
-    // compared byte for byte against a reference implementation. Split across
-    // lines because the log transport truncates long records.
-    char hex[80];
-    for (int half = 0; half < 2; half++) {
-      for (int i = 0; i < 32; i++) {
-        snprintf(hex + i * 2, 3, "%02x", srp_key[half * 32 + i]);
-      }
-      ESP_LOGI(TAG, "HKDFCHK K[%d]=%s", half, hex);
-    }
-    ESP_LOGI(TAG, "HKDFCHK srp_key_len=%u", (unsigned)srp_key_len);
     memcpy(session->shared_secret, srp_key, 32);
-
-    // Alternate derivation using only the first 32 bytes of K, for senders
-    // that treat the shared secret as 32 bytes wide.
-    hap_hkdf_sha512((uint8_t *)"Control-Salt", 12, srp_key, 32,
-                    (uint8_t *)"Control-Read-Encryption-Key", 27,
-                    session->alt_encrypt_key, 32);
-    hap_hkdf_sha512((uint8_t *)"Control-Salt", 12, srp_key, 32,
-                    (uint8_t *)"Control-Write-Encryption-Key", 28,
-                    session->alt_decrypt_key, 32);
-    session->alt_keys_valid = true;
-
-    for (int i = 0; i < 32; i++) {
-      snprintf(hex + i * 2, 3, "%02x", session->decrypt_key[i]);
-    }
-    ESP_LOGI(TAG, "HKDFCHK read64=%s", hex);
-    for (int i = 0; i < 32; i++) {
-      snprintf(hex + i * 2, 3, "%02x", session->encrypt_key[i]);
-    }
-    ESP_LOGI(TAG, "HKDFCHK write64=%s", hex);
     hap_hkdf_sha512((uint8_t *)"Control-Salt", 12, srp_key, srp_key_len,
                     (uint8_t *)"Control-Read-Encryption-Key", 27,
                     session->encrypt_key, 32);

@@ -879,7 +879,100 @@ Expose Git commit, build date and selected audio profile in the system API. The
 numeric upstream version alone cannot distinguish multiple local OTA builds
 that all identify themselves as `0.1.29`.
 
-## 13. Current conclusion
+## 13. AirPlay 2 pairing failure: broken HKDF (2026-07-20/21)
+
+### 13.1 Symptom
+
+Every client connection died about two seconds after connecting:
+
+```text
+rtsp_server: New client connected / Client IP: 192.168.68.103
+rtsp_crypto: Failed to decrypt frame
+rtsp_server: Client slot 1 disconnected
+```
+
+No stream ever started, so no audio ever played.
+
+### 13.2 What it was not
+
+The hardening package in section 7 was ruled out by rolling the device back to
+the pre-hardening image `80cb059` — the exact firmware behind the successful
+playback session in section 5 — which failed identically. The recovery ladder
+never triggered, and the failure happens during RTSP pairing, before any audio
+stream exists, so add-ons A through D are inert at that point.
+
+Two hypotheses were raised with too much confidence and then disproved by
+instrumentation, which is why they are recorded here:
+
+1. Multi-byte pairing flags. The `flags_len == 1` test in pair-setup M1 was
+   suspected of missing a two- or four-byte transient flag. The device logs
+   `flags=0x10 (1 bytes) transient=1`, so the original test was already
+   correct. The parsing was still generalised (commit `76ea46f`) because the
+   TLV genuinely is a variable-width integer, but it was never the fault.
+2. Inverted control-key roles. Tried on device and rejected.
+
+A dead CH343 USB-serial bridge on the board made it briefly look as though the
+ESP32-S3 was dead: UART0 produced nothing and esptool could not sync. The chip
+was fine and reachable over its native USB-Serial-JTAG port
+(`VID:PID=303A:1001`, serial number equal to the device MAC), which also
+provides a flashing path independent of OTA.
+
+### 13.3 Root cause
+
+`hap_hkdf_sha512` in `main/hap/hap_crypto.c` implemented RFC 5869 correctly but
+built it on libsodium's `crypto_auth_hmacsha512_*` streaming API, calling it
+with keys whose length is not `crypto_auth_hmacsha512_KEYBYTES` — the salt is
+12 bytes and the PRK is 64. That produced HMAC output which does not match a
+reference HMAC-SHA512, so every derived key was wrong.
+
+For AirPlay 2 transient pair-setup the consequence is exact: both peers agree
+on the SRP session key, then derive different control-channel keys from it, so
+the very first encrypted RTSP frame fails Poly1305 authentication.
+
+### 13.4 How it was proved
+
+Guessing was replaced with an independent, specification-only AirPlay 2
+transient pair-setup client written in Python
+(`scratchpad/srp_client.py`: SRP-6a over the RFC 5054 3072-bit group, TLV8,
+RTSP framing, HKDF, ChaCha20-Poly1305). It reproduces what the sender does, so
+both sides can be compared without the phone.
+
+- The device accepted the client's M3 proof. Since M1 includes the session key
+  K in its hash, this proves both sides computed the same K. The device's own
+  log confirmed it byte for byte: `K=b943e0d6dc6344a3…`.
+- From that identical K, the reference HKDF produced `b772ff5a1660d2fd…`
+  while the device produced `ca44306eae6bd4bb…`.
+- Roughly 150 parameter variations (salt and info with and without a trailing
+  NUL, 32- versus 64-byte input key material, swapped extract arguments,
+  counter placement, PRK truncation, SHA-256) reproduced none of the device's
+  output, ruling out a constants mismatch and pointing at the HMAC primitive.
+
+The salt, info strings, 64-byte K as input key material and 32-byte output were
+each checked against the reference implementation
+(`ejurgensen/pair_ap`) and all match; only the primitive was wrong.
+
+### 13.5 Fix and verification
+
+`hap_hkdf_sha512` now performs RFC 5869 over mbedTLS HMAC-SHA512
+(`mbedtls_md_hmac` for extract, `mbedtls_md_hmac_*` for expand), which handles
+arbitrary key lengths as the specification requires. All HAP key derivation
+shares this function, so pair-verify and the audio key benefit too.
+
+Verified end to end without the phone: the Python client completes transient
+pair-setup and sends one encrypted `GET /info`; the device authenticates it and
+returns a 666-byte encrypted response. Firmware SHA-256
+`e934031e2fcd158625fd18ffde6a07d2889c38d7d1efca433c4eb4866d9b6b43`, OTA target
+identity verified as `A4:CB:8F:F8:2F:14`.
+
+All diagnostic scaffolding was removed before the final image: the session-key
+logging and the fallback that tried alternate key derivations at decrypt time
+are gone, since neither belongs in a shipped crypto path.
+
+Still to confirm on hardware: an actual iPhone session, playback, seeks and an
+Audio Mix transition — the pairing handshake is proved, the audio path beyond
+it is not yet re-exercised.
+
+## 14. Current conclusion
 
 The supplied full log does not show a weak ESP32-S3, an overloaded AAC decoder
 or unstable WiFi. It shows a stable pipeline and one reproducible protocol
