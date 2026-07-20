@@ -587,8 +587,22 @@ Implementation status:
 - `pio run -e esp32s3` passed;
 - firmware size: 1,439,575 bytes;
 - static RAM reported by the linker: 53,168 bytes;
-- the supervisor task stack is 4,096 bytes at priority 2;
-- commit and OTA follow this checkpoint.
+- the supervisor task stack is 4,096 bytes at priority 2.
+
+Completion record:
+
+- commit: `bbc4a56` (`feat(recovery): add conservative audio recovery ladder`);
+- firmware SHA-256:
+  `48efb1a5dddfdc0c25b4317bb69760c2dd79743254bf5761df41bb16eb4f6a09`;
+- OTA target identity verified as `A4:CB:8F:F8:2F:14` before upload;
+- OTA endpoint reported successful firmware installation and reboot;
+- post-reboot system API returned with the same IP, MAC and approximately
+  7.0 MiB free heap;
+- the boot backlog read over `/ws/logs` shows, in order,
+  `audio_health: Health telemetry started`,
+  `audio_recover: Recovery ladder started: stuck>30s, 3 stream
+  restarts/service, 3 service restarts/reboot` and `main: AirPlay ready`,
+  confirming the new supervisor is running on the device.
 
 Escalation order as delivered:
 
