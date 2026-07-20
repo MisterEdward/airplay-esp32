@@ -8,6 +8,9 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
 #include "audio_buffer.h"
 #include "audio_decoder.h"
 #include "audio_output.h"
@@ -27,6 +30,23 @@ static const char *TAG = "audio_recv";
 static audio_receiver_state_t receiver = {
     .diag_lock = portMUX_INITIALIZER_UNLOCKED,
 };
+
+// Serializes stream start/stop/switch operations. RTSP client tasks and the
+// recovery supervisor can otherwise race a restart against SETUP/TEARDOWN.
+// Recursive because the start/stop entry points call each other.
+static SemaphoreHandle_t stream_op_lock;
+
+static void stream_op_lock_take(void) {
+  if (stream_op_lock) {
+    xSemaphoreTakeRecursive(stream_op_lock, portMAX_DELAY);
+  }
+}
+
+static void stream_op_lock_give(void) {
+  if (stream_op_lock) {
+    xSemaphoreGiveRecursive(stream_op_lock);
+  }
+}
 
 enum { DIAG_GATE_BLANKET = 0, DIAG_GATE_LOWER = 1, DIAG_GATE_UPPER = 2 };
 
@@ -112,6 +132,13 @@ static void audio_receiver_copy_stream_state(audio_stream_t *dst,
 esp_err_t audio_receiver_init(void) {
   if (receiver.buffer.pool) {
     return ESP_OK;
+  }
+
+  if (!stream_op_lock) {
+    stream_op_lock = xSemaphoreCreateRecursiveMutex();
+    if (!stream_op_lock) {
+      return ESP_ERR_NO_MEM;
+    }
   }
 
   receiver.realtime_stream = audio_stream_create_realtime();
@@ -481,6 +508,7 @@ void audio_receiver_set_stream_type(audio_stream_type_t type) {
     return;
   }
 
+  stream_op_lock_take();
   if (receiver.stream != target) {
     if (receiver.stream) {
       audio_receiver_copy_stream_state(target, receiver.stream);
@@ -493,13 +521,16 @@ void audio_receiver_set_stream_type(audio_stream_type_t type) {
   }
 
   receiver.stream->type = type;
+  stream_op_lock_give();
 }
 
 esp_err_t audio_receiver_start(uint16_t data_port, uint16_t control_port) {
+  stream_op_lock_take();
   audio_receiver_set_stream_type(AUDIO_STREAM_REALTIME);
 
   if (!receiver.stream || !receiver.stream->ops ||
       !receiver.stream->ops->start) {
+    stream_op_lock_give();
     return ESP_FAIL;
   }
 
@@ -520,19 +551,24 @@ esp_err_t audio_receiver_start(uint16_t data_port, uint16_t control_port) {
   receiver.timing.ptp_locked = ptp_clock_is_locked();
   audio_receiver_reset_blocks();
 
-  return receiver.stream->ops->start(receiver.stream, data_port);
+  esp_err_t err = receiver.stream->ops->start(receiver.stream, data_port);
+  stream_op_lock_give();
+  return err;
 }
 
 esp_err_t audio_receiver_start_buffered(uint16_t tcp_port) {
+  stream_op_lock_take();
   audio_receiver_set_stream_type(AUDIO_STREAM_BUFFERED);
 
   if (!receiver.stream || !receiver.stream->ops ||
       !receiver.stream->ops->start) {
+    stream_op_lock_give();
     return ESP_FAIL;
   }
 
   // Buffered streams use a fixed port, no need to restart if running
   if (receiver.stream->running) {
+    stream_op_lock_give();
     return ESP_OK;
   }
 
@@ -545,7 +581,9 @@ esp_err_t audio_receiver_start_buffered(uint16_t tcp_port) {
   receiver.timing.ptp_locked = ptp_clock_is_locked();
   audio_receiver_reset_blocks();
 
-  return receiver.stream->ops->start(receiver.stream, tcp_port);
+  esp_err_t err = receiver.stream->ops->start(receiver.stream, tcp_port);
+  stream_op_lock_give();
+  return err;
 }
 
 esp_err_t audio_receiver_start_stream(uint16_t data_port, uint16_t control_port,
@@ -588,6 +626,7 @@ void audio_receiver_set_client_control(uint32_t client_ip,
 }
 
 void audio_receiver_stop(void) {
+  stream_op_lock_take();
   if (receiver.realtime_stream && receiver.realtime_stream->ops &&
       receiver.realtime_stream->ops->stop) {
     receiver.realtime_stream->ops->stop(receiver.realtime_stream);
@@ -616,13 +655,32 @@ void audio_receiver_stop(void) {
   audio_receiver_reset_resend_state();
 
   audio_receiver_flush();
+  stream_op_lock_give();
 }
 
 void audio_receiver_stop_buffered_only(void) {
+  stream_op_lock_take();
   if (receiver.buffered_stream && receiver.buffered_stream->ops &&
       receiver.buffered_stream->ops->stop) {
     receiver.buffered_stream->ops->stop(receiver.buffered_stream);
   }
+  stream_op_lock_give();
+}
+
+esp_err_t audio_receiver_restart_buffered_stream(void) {
+  esp_err_t err = ESP_ERR_INVALID_STATE;
+  stream_op_lock_take();
+  // Only the active buffered stream is restartable, and only on the port
+  // Apple already learned from SETUP so the sender can reconnect directly.
+  if (receiver.stream && receiver.stream == receiver.buffered_stream &&
+      receiver.stream->running && receiver.buffered_port != 0) {
+    uint16_t port = receiver.buffered_port;
+    ESP_LOGW(TAG, "Recovery restart of buffered stream on port %u", port);
+    audio_receiver_stop_buffered_only();
+    err = audio_receiver_start_buffered(port);
+  }
+  stream_op_lock_give();
+  return err;
 }
 
 void audio_receiver_get_stats(audio_stats_t *stats) {

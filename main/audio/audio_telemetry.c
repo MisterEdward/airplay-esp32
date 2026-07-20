@@ -5,6 +5,7 @@
 
 #include "audio_output.h"
 #include "audio_receiver.h"
+#include "audio_recovery.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -134,6 +135,9 @@ static void telemetry_task(void *arg) {
     ptp_stats_t ptp = {0};
     ptp_clock_get_stats(&ptp);
 
+    audio_recovery_stats_t recovery = {0};
+    audio_recovery_get_stats(&recovery);
+
     uint32_t output_stack = audio_output_get_stack_high_watermark();
     uint32_t telemetry_stack =
         (uint32_t)uxTaskGetStackHighWaterMark(NULL);
@@ -166,7 +170,8 @@ static void telemetry_task(void *arg) {
         "/%" PRIu32
         " tcp(up/age/conn/stall)=%d/%lld/%" PRIu32 "/%" PRIu32
         " flush(active/armed/dup/drop/exp/full)=%" PRIu32 "/%" PRIu32
-        "/%" PRIu32 "/%" PRIu32 "/%" PRIu32 "/%" PRIu32,
+        "/%" PRIu32 "/%" PRIu32 "/%" PRIu32 "/%" PRIu32
+        " recover(lvl/stream/svc)=%u/%" PRIu32 "/%" PRIu32,
         unhealthy ? "WARN" : "OK", diag.stream_type,
         diag.stream_running, diag.playing, counters_reset, received, decoded,
         dropped, late, underruns, decrypt_errors, diag.buffer_frames,
@@ -178,7 +183,8 @@ static void telemetry_task(void *arg) {
         diag.buffered_connections_accepted, diag.buffered_stall_recoveries,
         diag.deferred_flush_active, diag.deferred_flush_armed,
         diag.deferred_flush_duplicates, diag.deferred_flush_dropped,
-        diag.deferred_flush_expired, diag.deferred_flush_overflow);
+        diag.deferred_flush_expired, diag.deferred_flush_overflow,
+        recovery.level, recovery.stream_restarts, recovery.service_restarts);
   }
 }
 

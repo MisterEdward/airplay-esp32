@@ -274,6 +274,13 @@ uint16_t audio_receiver_get_buffered_port(void);
 void audio_receiver_stop_buffered_only(void);
 
 /**
+ * Recovery-ladder rung 2: stop and restart the active buffered stream on the
+ * same TCP port so the sender can reconnect without a new SETUP. Returns
+ * ESP_ERR_INVALID_STATE when no buffered stream is running.
+ */
+esp_err_t audio_receiver_restart_buffered_stream(void);
+
+/**
  * Set the stream type (realtime vs buffered)
  */
 void audio_receiver_set_stream_type(audio_stream_type_t type);

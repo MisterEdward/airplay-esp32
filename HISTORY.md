@@ -26,14 +26,18 @@ changes. This file explains why those commits exist and how they interact.
 The active S3 project is:
 
 ```text
-/Users/edward/airplay-esp32/.claude/worktrees/s3-seek-telemetry-v29
+/Users/edward/airplay-esp32/.claude/worktrees/airplay-esp32-seek-buffer-69494b
 ```
 
 The active Git branch is:
 
 ```text
-codex/s3-seek-telemetry-v29
+claude/audio-mix-transition-fixes-403fbd
 ```
+
+Earlier sections of this history referenced the retired
+`s3-seek-telemetry-v29` worktree; the custom commits listed below were carried
+into the current branch unchanged.
 
 The parent repository is:
 
@@ -577,18 +581,89 @@ Warning semantics:
 
 ### 7.4 Add-on D: recovery ladder
 
-Planned escalation order:
+Implementation status:
 
-1. recover the local buffered audio socket when it stalls;
-2. restart the active audio stream when task/socket liveness is lost;
-3. restart AirPlay services if local stream recovery fails repeatedly;
-4. restart the ESP only after repeated service-level recovery failures.
+- source implementation complete in `main/audio/audio_recovery.c`;
+- `pio run -e esp32s3` passed;
+- firmware size: 1,439,575 bytes;
+- static RAM reported by the linker: 53,168 bytes;
+- the supervisor task stack is 4,096 bytes at priority 2;
+- commit and OTA follow this checkpoint.
 
-The normal path is untouched. No recovery action occurs merely because a frame
-is late, a seek is active or PTP is acquiring lock.
+Escalation order as delivered:
 
-The supervisor must use cooldowns and consecutive-failure thresholds. A single
-transient event must never produce a reboot loop.
+1. rung 1 — recover the local buffered audio socket when it stalls. This is
+   the existing 8-second receive timeout from add-on B, inside
+   `audio_stream_buffered.c`. The supervisor does not drive it; it only reads
+   its counters.
+2. rung 2 — restart the active buffered stream via the new
+   `audio_receiver_restart_buffered_stream()`, reusing the TCP port Apple
+   already learned from SETUP so the sender can reconnect without a new
+   handshake.
+3. rung 3 — after three rung-2 restarts without recovery, restart the RTSP
+   service (`rtsp_server_stop`, `audio_receiver_stop`, `rtsp_server_start`).
+   mDNS advertising and the web server are left untouched.
+4. rung 4 — after three rung-3 restarts without recovery, reboot the ESP.
+
+Trigger conditions (sampled once per second from the same read-only snapshot
+the telemetry task uses):
+
+- task loss: the buffered stream reports running but the TCP reader or AAC
+  decoder task handle is gone, for five consecutive samples. The
+  five-sample filter absorbs the sub-second window during task creation.
+- stuck stream: a buffered TCP client is connected, playback is nominally
+  active, and no complete packet has been read for more than 30 seconds, for
+  five consecutive samples. This covers the wedge rung 1 cannot fix: the
+  8-second socket timeout only fires while the reader blocks in `recv`, not
+  while it waits for a packet slot behind a wedged decoder or a consumer
+  that stopped draining.
+
+Deliberate non-triggers:
+
+- late frames, packet drops, underruns and decrypt errors never trigger
+  recovery; they remain telemetry-only signals;
+- seeks and PTP acquisition are never consulted;
+- a paused stream is always left alone (`playing` is required);
+- a sender that simply vanished does not climb the ladder: rung 1 already
+  closed its socket, the idle listener accepts reconnects, and the stuck
+  condition requires a connected client;
+- the five-sample stuck filter also absorbs RESUME after a long pause, where
+  the packet age is momentarily large while `playing` just turned true;
+- on BT builds, a trigger while an A2DP client is connected is ignored
+  because the AirPlay teardown is intentional (not compiled on this S3).
+
+Cooldowns and reset:
+
+- 60 seconds of grace after a stream restart and 120 seconds after a service
+  restart before the ladder re-evaluates;
+- 120 consecutive seconds of a running stream with advancing receive
+  counters clears all escalation state;
+- an idle listener takes no action but does not count as proof of recovery;
+- rung 4 additionally requires at least 15 minutes of uptime; every
+  escalation path already needs more than ten minutes of repeated failures,
+  so a reboot loop is structurally impossible;
+- before rebooting, the supervisor logs all ladder counters and waits 250 ms
+  so the WebSocket log stream can flush.
+
+Concurrency:
+
+- stream start/stop/switch operations in `audio_receiver.c`
+  (`start`, `start_buffered`, `start_stream`, `stop`, `stop_buffered_only`,
+  `set_stream_type` and the new restart) are now serialized by a recursive
+  FreeRTOS mutex. RTSP client tasks and the supervisor could otherwise race
+  a recovery restart against SETUP/TEARDOWN. The mutex is recursive because
+  these entry points call each other; it is held at most for the bounded
+  task-shutdown wait (about one second).
+
+Telemetry integration:
+
+- the `HEALTH` line now ends with `recover(lvl/stream/svc)=` showing the
+  highest rung reached since the last full-health reset plus cumulative
+  stream and service restart counts;
+- separate task-loss and stuck-stream event counters are kept for the
+  reboot log line;
+- the boot log announces the ladder thresholds with
+  `audio_recover: Recovery ladder started`.
 
 ## 8. Existing protections already present on S3
 

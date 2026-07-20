@@ -3,6 +3,7 @@ set( SRC_FILES
     "alac_magic_cookie.c"
     "settings.c"
     "audio/audio_receiver.c"
+    "audio/audio_recovery.c"
     "audio/audio_telemetry.c"
     "audio/audio_output_profile.c"
     "audio/audio_stream.c"
