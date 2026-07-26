@@ -2,6 +2,7 @@
 #include "rtsp_server.h"
 
 #include "audio_resample.h"
+#include "audio_eq.h"
 #include "audio_output_profile.h"
 #include "dac.h"
 #include "led.h"
@@ -103,6 +104,9 @@ static void playback_task(void *arg) {
     if (flush_requested) {
       flush_requested = false;
       audio_resample_reset();
+      // Biquads hold two samples of history each; carrying it across a
+      // seek makes the filter ring against unrelated audio.
+      audio_eq_reset();
 #ifndef CONFIG_DAC_CONTROLS_VOLUME
       audio_output_profile_reset();
 #endif
@@ -120,6 +124,12 @@ static void playback_task(void *arg) {
         play_buf = resample_buf;
       }
       ESP_LOGD(TAG, "Resampled to %u samples", (unsigned int)play_samples);
+      // User equalizer runs ahead of volume: its automatic preamp assumes a
+      // full-scale signal, and this keeps the volume setting a plain linear
+      // scale on the result.  The board tone profile below stays last, since
+      // it compensates the hardware and belongs closest to the DAC.
+      audio_eq_process(play_buf, play_samples);
+
       apply_volume(play_buf, play_samples * 2);
 #ifndef CONFIG_DAC_CONTROLS_VOLUME
       audio_output_profile_process(play_buf, play_samples);
@@ -191,6 +201,11 @@ esp_err_t audio_output_init(void) {
   dac_on_i2s_started();
 
   audio_resample_init(44100, OUTPUT_RATE, 2);
+
+  // The EQ sits after resampling, so it always sees OUTPUT_RATE.
+  // Restores any gains saved in NVS.
+  audio_eq_init(OUTPUT_RATE);
+
 #ifndef CONFIG_DAC_CONTROLS_VOLUME
   audio_output_profile_init(OUTPUT_RATE);
 #endif

@@ -23,8 +23,15 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#ifdef CONFIG_DAC_TAS58XX
+/* The EQ page and API are backend-agnostic: they emit eq_events and let a
+   listener apply them, either to the TAS5825M's on-chip biquads or to the
+   software DSP used by DACs without any (PCM5102A, plain I2S, S/PDIF...). */
+#if defined(CONFIG_DAC_TAS58XX) || defined(CONFIG_AUDIO_EQ_SOFTWARE)
+#define WEB_EQ_ENABLED 1
 #include "eq_events.h"
+#endif
+
+#ifdef CONFIG_DAC_TAS58XX
 #include "dac_tas58xx_eq.h"
 #endif
 
@@ -459,7 +466,7 @@ static esp_err_t system_info_handler(httpd_req_t *req) {
   }
   const esp_app_desc_t *app_desc = esp_app_get_description();
   cJSON_AddStringToObject(info, "firmware_version", app_desc->version);
-#ifdef CONFIG_DAC_TAS58XX
+#ifdef WEB_EQ_ENABLED
   cJSON_AddBoolToObject(info, "eq_supported", true);
 #else
   cJSON_AddBoolToObject(info, "eq_supported", false);
@@ -656,10 +663,10 @@ static esp_err_t fs_list_handler(httpd_req_t *req) {
 }
 
 /* ================================================================== */
-/*  EQ Page + API  (only when TAS58xx DAC is configured)               */
+/*  EQ Page + API  (hardware TAS58xx biquads or software DSP)          */
 /* ================================================================== */
 
-#ifdef CONFIG_DAC_TAS58XX
+#ifdef WEB_EQ_ENABLED
 
 static esp_err_t eq_page_handler(httpd_req_t *req) {
   return serve_spiffs_file(req, "/spiffs/www/eq.html", "text/html");
@@ -748,7 +755,7 @@ static esp_err_t eq_post_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
-#endif /* CONFIG_DAC_TAS58XX */
+#endif /* WEB_EQ_ENABLED */
 
 esp_err_t web_server_start(uint16_t port) {
   if (s_server) {
@@ -889,7 +896,7 @@ esp_err_t web_server_start(uint16_t port) {
                                  .handler = captive_windows_handler};
   httpd_register_uri_handler(s_server, &windows_captive);
 
-#ifdef CONFIG_DAC_TAS58XX
+#ifdef WEB_EQ_ENABLED
   httpd_uri_t eq_page_uri = {
       .uri = "/eq", .method = HTTP_GET, .handler = eq_page_handler};
   httpd_register_uri_handler(s_server, &eq_page_uri);

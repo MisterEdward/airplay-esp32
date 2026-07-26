@@ -191,6 +191,22 @@ menu "Airplay ESP Configuration"
             ESP32-S3 (hardware FPU): 28 recommended.
             ESP32 (no FPU): 12 recommended.
 
+    config AUDIO_EQ_SOFTWARE
+        bool "15-band software equalizer"
+        default y if !DAC_TAS58XX
+        default n
+        depends on !DAC_TAS58XX
+        help
+            DSP equalizer applied in the playback path, for DACs with no
+            on-chip filtering (PCM5102A, plain I2S, S/PDIF, ES8388).
+            Exposes the same /eq web page and /api/eq endpoints as the
+            TAS5825M hardware EQ, which is used instead when DAC_TAS58XX
+            is set.
+
+            Cost is 15 cascaded stereo biquads per sample, but the filter
+            is bypassed entirely while all bands sit at 0 dB, so leaving
+            this on costs nothing until the EQ is actually used.
+
     endmenu
 
     menu "Bluetooth Configuration"

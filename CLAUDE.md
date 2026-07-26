@@ -64,7 +64,9 @@ main/
 │   ├── audio_output_usb.c  # USB audio output
 │   ├── audio_crypto.c      # AirPlay encryption
 │   ├── a2dp_sink.c         # Bluetooth A2DP sink
-│   └── eq_events.c         # EQ parameter changes (TAS58xx)
+│   ├── audio_eq.c          # 15-band software EQ (fixed-point biquads) for
+│   │                       #   DACs with no on-chip DSP (PCM5102A, S/PDIF...)
+│   └── eq_events.c         # EQ parameter changes (dispatches to either backend)
 ├── rtsp/                   # RTSP protocol server
 │   ├── rtsp_server.c       # RTSP connection handler
 │   ├── rtsp_conn.c         # Connection management
@@ -123,6 +125,7 @@ components/
 - **Git submodules**: `u8g2` (OLED graphics) and `u8g2-hal-esp-idf` (ESP-IDF HAL for u8g2) are submodules — always clone with `--recursive`.
 - **SPIFFS**: `data/` directory contents are flashed to SPIFFS. `data/www/` = web UI, `data/hf/` = hybrid flow DSP binaries for TAS57xx.
 - **Audio pipeline**: AudioReceiver (rtsp) → decoder → AudioBuffer → AudioOutput (I2S/SPDIF/USB). Buffered streams (AAC) use deep jitter buffer; realtime streams (ALAC) use low-latency UDP with early/late timing thresholds.
+- **Equalizer**: The `/eq` page and `GET`/`POST /api/eq` are backend-agnostic — they only emit `eq_events`. Exactly one listener is compiled in: the TAS5825M on-chip biquads (`CONFIG_DAC_TAS58XX`, in the Esparagus board file) or the software DSP in `main/audio/audio_eq.c` (`CONFIG_AUDIO_EQ_SOFTWARE`, default on every other target). Both share the same 15 centre frequencies/Q and the same NVS blob, so presets carry across. `eq_supported` in `/api/system/info` gates the UI card; when false the card is hidden and `/eq` is not registered at all — that is why the page looks "missing" on a board with no EQ backend. In `audio_eq.c`: flat gains are a true bypass (zero CPU when unused); the preamp is derived from the cascade's **measured peak response**, not from `-max(gain)` — adjacent bands overlap and compound, and the naive shortcut made the UI's own Bass Boost preset clip; filter state is cleared on flush/seek. In the I2S path the EQ runs before volume, and `audio_output_profile` stays last since it compensates the board's hardware.
 - **AirPlay/Bluetooth coexistence**: Mutually exclusive at runtime. BT connection suspends AirPlay; disconnect resumes it.
 - **Eth/WiFi failover**: Ethernet preferred at boot; WiFi fallback if no cable. Hot-swap at runtime.
 

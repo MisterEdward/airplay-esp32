@@ -12,6 +12,7 @@
 
 #include "audio_output.h"
 
+#include "audio_eq.h"
 #include "audio_receiver.h"
 #include "audio_resample.h"
 #include "led.h"
@@ -107,6 +108,9 @@ static void playback_task(void *arg) {
     if (flush_requested) {
       flush_requested = false;
       audio_resample_reset();
+      /* Biquads hold two samples of history each; carrying it across a
+         seek makes the filter ring against unrelated audio. */
+      audio_eq_reset();
       /* Drain the ring buffer */
       size_t item_size;
       void *item;
@@ -124,6 +128,11 @@ static void playback_task(void *arg) {
                                               MAX_RESAMPLE_FRAMES);
         play_buf = resample_buf;
       }
+      // Equalise ahead of volume: the EQ's automatic preamp assumes a
+      // full-scale signal, and running it before attenuation keeps the
+      // user's volume setting a plain linear scale on the final result.
+      audio_eq_process(play_buf, play_samples);
+
       apply_volume(play_buf, play_samples * 2);
       led_audio_feed(play_buf, play_samples);
 
@@ -169,6 +178,10 @@ esp_err_t audio_output_init(void) {
   }
 
   audio_resample_init(44100, OUTPUT_RATE, 2);
+
+  // The EQ sits after resampling, so it always sees OUTPUT_RATE.
+  // Restores any gains saved in NVS.
+  audio_eq_init(OUTPUT_RATE);
   ESP_LOGI(TAG, "USB UAC output ready");
   return ESP_OK;
 }

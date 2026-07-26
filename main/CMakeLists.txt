@@ -57,6 +57,11 @@ else()
     list(APPEND SRC_FILES "audio/audio_output.c")
 endif()
 
+# Software equalizer (boards whose DAC has no on-chip biquads)
+if(CONFIG_AUDIO_EQ_SOFTWARE)
+    list(APPEND SRC_FILES "audio/audio_eq.c")
+endif()
+
 # Bluetooth A2DP sink (only available on ESP32 with Classic BT)
 if(CONFIG_BT_A2DP_ENABLE)
     list(APPEND SRC_FILES "audio/a2dp_sink.c")
