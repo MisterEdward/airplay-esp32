@@ -17,6 +17,10 @@ typedef struct rtsp_conn rtsp_conn_t;
  * Connection state struct - consolidates all session state
  */
 struct rtsp_conn {
+  // Diagnostics only: correlates RTSP, decoder and I2S lifecycle logs.
+  uint32_t metrics_session_id;
+  int64_t metrics_connected_at_us;
+
   // HAP session for pairing/encryption
   hap_session_t *hap_session;
   bool encrypted_mode;

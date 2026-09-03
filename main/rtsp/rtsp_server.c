@@ -10,6 +10,7 @@
 
 #include "audio_receiver.h"
 #include "audio_output.h"
+#include "airplay_metrics.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -173,6 +174,8 @@ static void client_task(void *pvParameters) {
              (unsigned int)((conn->client_ip >> 16) & 0xFF),
              (unsigned int)((conn->client_ip >> 24) & 0xFF));
   }
+  conn->metrics_session_id = airplay_metrics_connection_open(
+      conn->client_ip, &conn->metrics_connected_at_us);
 
   // Allocate buffer
   size_t buf_capacity = RTSP_BUFFER_INITIAL;
@@ -263,6 +266,12 @@ static void client_task(void *pvParameters) {
 
 cleanup:
   ESP_LOGI(TAG, "Client slot %d disconnected", slot_idx);
+  const char *metrics_reason = slot->is_old     ? "replaced"
+                               : slot->should_stop ? "server_stop"
+                                                   : "peer_closed";
+  airplay_metrics_connection_closed(conn->metrics_session_id,
+                                    conn->metrics_connected_at_us,
+                                    metrics_reason);
   free(buffer);
   close(slot->socket);
   slot->socket = -1;

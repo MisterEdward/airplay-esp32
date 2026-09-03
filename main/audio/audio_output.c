@@ -1,6 +1,7 @@
 #include "audio_output.h"
 #include "rtsp_server.h"
 
+#include "airplay_metrics.h"
 #include "audio_resample.h"
 #include "dac.h"
 #include "led.h"
@@ -243,6 +244,9 @@ static void playback_task(void *arg) {
         __atomic_add_fetch(&output_submitted_frames,
                            (uint64_t)(written / (2U * sizeof(int16_t))),
                            __ATOMIC_RELAXED);
+        if (written > 0) {
+          airplay_metrics_first_output(written / (2U * sizeof(int16_t)));
+        }
       }
       taskYIELD();
     } else {

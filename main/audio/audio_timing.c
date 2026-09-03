@@ -4,6 +4,8 @@
 
 #include "audio_timing.h"
 
+#include "airplay_metrics.h"
+
 #include "audio_output.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -541,6 +543,7 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
                  "Deferred flush triggered at ts=%" PRIu32 " (until_ts=%" PRIu32
                  ")",
                  hdr->rtp_timestamp, timing->flush_until_ts);
+        airplay_metrics_deferred_flush_applied(hdr->rtp_timestamp);
         if (from_pending) {
           timing->pending_valid = false;
           timing->pending_frame_len = 0;

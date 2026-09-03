@@ -19,6 +19,7 @@
 
 #include "audio_output.h"
 #include "audio_receiver.h"
+#include "airplay_metrics.h"
 #include "audio_stream.h"
 #ifdef CONFIG_BT_A2DP_ENABLE
 #include "dac.h"
@@ -1224,10 +1225,14 @@ static void handle_setup(int socket, rtsp_conn_t *conn,
       ptp_clock_stop();
 
       conn->stream_active = true;
+      airplay_metrics_stream_setup(
+          conn->metrics_session_id, conn->metrics_connected_at_us,
+          conn->protocol_version, stream_type, false);
       return;
     }
 
     ESP_LOGI(TAG, "SETUP: Initial connection setup (no streams)");
+    airplay_metrics_initial_setup(conn->metrics_session_id);
 
     if (is_bplist) {
       uint8_t plist_body[128];
@@ -1275,6 +1280,9 @@ static void handle_setup(int socket, rtsp_conn_t *conn,
   if (!start_audio_receiver_or_fail(socket, conn, req, stream_type)) {
     return;
   }
+  airplay_metrics_stream_setup(
+      conn->metrics_session_id, conn->metrics_connected_at_us,
+      conn->protocol_version, stream_type, buffered);
 
   // Playout latency.  For REALTIME streams (type 96) the anchor from
   // SETRATEANCHORTIME maps an RTP timestamp onto the sender's source
@@ -1398,6 +1406,7 @@ static void handle_record(int socket, rtsp_conn_t *conn,
     // timing anchor has been preserved.  Just re-enable playout; the
     // pause-duration offset in audio_timing will re-align the timestamps.
     ESP_LOGI(TAG, "RECORD: resuming from pause, skipping stream restart");
+    airplay_metrics_resume();
     audio_receiver_set_playing(true);
   } else {
     // Fresh start or post-teardown reconnect: full stream restart.
@@ -1706,6 +1715,7 @@ static void handle_pause(int socket, rtsp_conn_t *conn,
   (void)raw_len;
 
   ESP_LOGI(TAG, "PAUSE received");
+  airplay_metrics_pause();
 
   // Stop the audio consumer but leave the buffer filling.  The phone will
   // send a fresh SETRATEANCHORTIME (rate=1) anchor on resume that re-aligns
@@ -1725,6 +1735,7 @@ static void handle_flush(int socket, rtsp_conn_t *conn,
 
   // Plain AirPlay 1 FLUSH — always immediate.
   ESP_LOGI(TAG, "FLUSH received");
+  airplay_metrics_seek_immediate();
   audio_receiver_seek_flush();
   audio_output_flush();
   rtsp_send_ok(socket, conn, req->cseq);
@@ -1764,6 +1775,9 @@ static void handle_flushbuffered(int socket, rtsp_conn_t *conn,
 
     if (got_from_seq && got_from_ts && got_until_seq && got_until_ts) {
       has_deferred = true;
+      airplay_metrics_deferred_flush_requested(
+          (uint32_t)flush_from_seq, (uint32_t)flush_from_ts,
+          (uint32_t)flush_until_seq, (uint32_t)flush_until_ts);
       ESP_LOGI(TAG,
                "FLUSHBUFFERED deferred: fromSeq=%" PRId64 " fromTS=%" PRId64
                " untilSeq=%" PRId64 " untilTS=%" PRId64,
@@ -1778,6 +1792,7 @@ static void handle_flushbuffered(int socket, rtsp_conn_t *conn,
 
   if (!has_deferred) {
     // Immediate flush: discard everything and reset now.
+    airplay_metrics_seek_immediate();
     audio_receiver_seek_flush();
     audio_output_flush();
   }
@@ -1806,6 +1821,9 @@ static void handle_teardown(int socket, rtsp_conn_t *conn,
   // TEARDOWN without streams = full session teardown (disconnect)
   ESP_LOGI(TAG, "TEARDOWN: has_streams=%d stream_count=%zu", has_streams,
            stream_count);
+  airplay_metrics_stream_end(conn->metrics_session_id,
+                             has_streams ? "stream_teardown"
+                                         : "session_teardown");
   // Stream-level teardown is a pause: freeze playout immediately so audio
   // silences on ALL boards. playing=false makes the output emit silence at
   // once (software mute, for software-volume/DAC-less boards); the synchronous
@@ -1898,15 +1916,20 @@ static void handle_setrateanchortime(int socket, rtsp_conn_t *conn,
 
   if (rate == 0.0) {
     ESP_LOGI(TAG, "SETRATEANCHORTIME: rate=0 -> PAUSING");
+    airplay_metrics_pause();
     // Mute the DAC first via the synchronous event so audio stops now.
     rtsp_events_emit(RTSP_EVENT_PAUSED, NULL);
     conn->stream_paused = true;
     audio_receiver_pause();
     audio_output_flush();
   } else {
+    bool was_paused = conn->stream_paused;
     ESP_LOGI(TAG, "SETRATEANCHORTIME: rate=%.1f -> RESUMING (was_paused=%d)",
              rate, conn->stream_paused);
     conn->stream_paused = false;
+    if (was_paused) {
+      airplay_metrics_resume();
+    }
     audio_receiver_set_playing(true);
     rtsp_events_emit(RTSP_EVENT_PLAYING, NULL);
   }

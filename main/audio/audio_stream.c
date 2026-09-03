@@ -3,6 +3,7 @@
 
 #include "audio_stream.h"
 
+#include "airplay_metrics.h"
 #include "audio_buffer.h"
 #include "audio_decoder.h"
 #include "audio_receiver_internal.h"
@@ -127,9 +128,13 @@ bool audio_stream_process_accepted_frame(audio_receiver_state_t *state,
     return false;
   }
 
-  return audio_buffer_queue_decoded(&state->buffer, &state->stats, timestamp,
-                                    decode_buffer, (size_t)decoded_samples,
-                                    channels);
+  bool queued = audio_buffer_queue_decoded(
+      &state->buffer, &state->stats, timestamp, decode_buffer,
+      (size_t)decoded_samples, channels);
+  if (queued) {
+    airplay_metrics_first_pcm(timestamp, (size_t)decoded_samples);
+  }
+  return queued;
 }
 
 bool audio_stream_process_frame(audio_receiver_state_t *state,

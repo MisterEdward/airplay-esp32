@@ -1,5 +1,6 @@
 set( SRC_FILES
     "main.c"
+    "airplay_metrics.c"
     "alac_magic_cookie.c"
     "settings.c"
     "audio/audio_receiver.c"
