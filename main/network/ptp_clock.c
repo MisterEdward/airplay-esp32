@@ -570,6 +570,10 @@ void ptp_clock_clear(void) {
 
   ptp.sync_count = 0;
   ptp.followup_count = 0;
+  ptp.announce_count = 0;
+  ptp.rejected_master_count = 0;
+  ptp.outlier_count = 0;
+  ptp.raw_offset_ns = 0;
 
   // Drop the master filter so the next session can lock to whatever master
   // its anchor packet names (which may differ from the previous session).

@@ -7,6 +7,7 @@
 #include "lwip/sockets.h"
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 
 #include "audio_buffer.h"
@@ -39,7 +40,15 @@ typedef struct {
   int buffered_client_socket;
   uint16_t buffered_port;
   TaskHandle_t buffered_task_handle;
+  TaskHandle_t buffered_decoder_task_handle;
   uint8_t *buffered_recv_buffer;
+  void *buffered_packet_pool;
+  QueueHandle_t buffered_free_queue;
+  QueueHandle_t buffered_ready_queue;
+  volatile uint32_t buffered_generation;
+  int64_t buffered_last_packet_us;
+  uint32_t buffered_connections_accepted;
+  uint32_t buffered_stall_timeouts;
 
   uint8_t *decrypt_buffer;
   size_t decrypt_buffer_size;

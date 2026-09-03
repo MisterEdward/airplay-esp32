@@ -610,6 +610,9 @@ void audio_receiver_seek_flush(void) {
   // audio_receiver_flush() but sets timing.quick_start so audio_timing_read
   // starts as soon as 1 frame is available, with normal anchor-based timing.
   // Also disarms any pending deferred flush (audio_timing_reset clears it).
+  // Fence compressed packets already being read or decoded. The dedicated
+  // decoder compares this generation before committing PCM to the ring.
+  receiver.buffered_generation++;
   audio_receiver_flush();
   receiver.timing.quick_start = true;
   // Request that the RTP gate be armed as soon as the next anchor arrives.

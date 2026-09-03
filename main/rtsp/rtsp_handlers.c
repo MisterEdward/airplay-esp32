@@ -814,6 +814,8 @@ static void handle_post(int socket, rtsp_conn_t *conn,
     rtsp_send_ok(socket, conn, req->cseq);
 
   } else if (strstr(req->path, "/feedback")) {
+    ESP_LOGI(TAG, "/feedback received: cseq=%d stream_type=%lld",
+             req->cseq, (long long)conn->stream_type);
     if (body && body_len >= 8 && memcmp(body, "bplist00", 8) == 0) {
       int64_t value;
       if (bplist_find_int(body, body_len, "networkTimeSecs", &value)) {
