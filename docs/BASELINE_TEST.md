@@ -13,7 +13,8 @@ Use the same iPhone, access point, track and volume for both firmware builds.
 
 ## What to save
 
-Save the complete serial log for each firmware. Do not mix runs in one file.
+Open `http://192.168.68.104/logs`, press **Clear**, then run the test. Press
+**Download** when finished. Save one log file per firmware.
 
 Filter the compact lifecycle data with:
 

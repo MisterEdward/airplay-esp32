@@ -73,15 +73,21 @@ static size_t ring_read(char *buf, size_t max) {
 /* ------------------------------------------------------------------ */
 
 static int log_vprintf_hook(const char *fmt, va_list args) {
-  /* Always print to UART first. */
-  int ret = s_orig_vprintf(fmt, args);
+  /* A va_list is consumed by vprintf/vsnprintf on some targets. Make both
+   * copies before either consumer runs so UART and WebSocket see the same
+   * arguments. */
+  va_list uart_args;
+  va_list web_args;
+  va_copy(uart_args, args);
+  va_copy(web_args, args);
+
+  int ret = s_orig_vprintf(fmt, uart_args);
+  va_end(uart_args);
 
   /* Format into a stack buffer and push to ring. */
   char buf[256];
-  va_list copy;
-  va_copy(copy, args);
-  int len = vsnprintf(buf, sizeof(buf), fmt, copy);
-  va_end(copy);
+  int len = vsnprintf(buf, sizeof(buf), fmt, web_args);
+  va_end(web_args);
 
   if (len > 0) {
     if ((size_t)len >= sizeof(buf)) {

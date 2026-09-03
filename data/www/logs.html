@@ -21,11 +21,12 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0d1117;color:#c9
 <h1>System Logs</h1>
 <span id='dot' class='dot'></span>
 <button class='btn-sm' onclick='clear_log()'>Clear</button>
+<button class='btn-sm' onclick='download_log()'>Download</button>
 <button class='btn-sm' id='scroll-btn' onclick='toggle_scroll()'>Auto-scroll: ON</button>
 </div>
 <div id='log'><div id='anchor'></div></div>
 <script>
-var log=document.getElementById('log'),dot=document.getElementById('dot'),anchor=document.getElementById('anchor'),autoScroll=true,maxLines=2000;
+var log=document.getElementById('log'),dot=document.getElementById('dot'),anchor=document.getElementById('anchor'),autoScroll=true,maxLines=2000,captured='',maxCaptured=8*1024*1024;
 function set_auto(v){autoScroll=v;document.getElementById('scroll-btn').textContent='Auto-scroll: '+(v?'ON':'OFF');}
 function toggle_scroll(){set_auto(!autoScroll);if(autoScroll)log.scrollTop=log.scrollHeight;}
 function at_bottom(){return log.scrollHeight-log.scrollTop-log.clientHeight<40;}
@@ -35,7 +36,13 @@ log.addEventListener('scroll',function(){
   if(autoScroll&&!at_bottom())set_auto(false);
   else if(!autoScroll&&at_bottom())set_auto(true);
 });
-function clear_log(){log.innerHTML='';anchor=document.createElement('div');anchor.id='anchor';log.appendChild(anchor);}
+function clear_log(){captured='';log.innerHTML='';anchor=document.createElement('div');anchor.id='anchor';log.appendChild(anchor);}
+function capture(text){captured+=text;if(captured.length>maxCaptured)captured=captured.slice(captured.length-maxCaptured);}
+function download_log(){
+  var blob=new Blob([captured],{type:'text/plain;charset=utf-8'}),a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download='airplay-'+new Date().toISOString().replace(/[:.]/g,'-')+'.log';a.click();
+  setTimeout(function(){URL.revokeObjectURL(a.href);},1000);
+}
 var ansiRe=/\x1b\[([0-9;]*)m/g;
 var ansiCls={'30':1,'31':1,'32':1,'33':1,'34':1,'35':1,'36':1,'37':1,'90':1,'91':1,'92':1,'93':1,'94':1,'95':1,'96':1,'97':1};
 var letterCls={'E':'a31','W':'a33','I':'a32','D':'a30','V':'a30'};
@@ -87,7 +94,7 @@ function connect(){
   var ws=new WebSocket('ws://'+location.host+'/ws/logs');
   ws.onopen=function(){dot.classList.add('ok');};
   ws.onclose=function(){dot.classList.remove('ok');setTimeout(connect,2000);};
-  ws.onmessage=function(e){colorize(e.data);};
+  ws.onmessage=function(e){capture(e.data);colorize(e.data);};
 }
 connect();
 </script></body></html>
