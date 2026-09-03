@@ -18,8 +18,10 @@ typedef struct {
   uint64_t anchor_network_time_ns;
   uint32_t anchor_rtp_time;
   int64_t anchor_local_time_ns;
+  uint64_t anchor_clock_id;
   int64_t ready_time_us; // When buffer became ready (0 = not ready yet)
   bool ptp_locked;
+  bool ptp_wait_expired;
   uint8_t *pending_frame;
   size_t pending_frame_len;
   size_t pending_frame_capacity;

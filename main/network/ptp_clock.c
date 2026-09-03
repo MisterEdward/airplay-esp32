@@ -112,6 +112,9 @@ static struct {
 
   // Master clock filter (0 = accept any master)
   uint64_t expected_clock_id;
+  // Clock identity that produced the samples currently in the filter.
+  // This is learned before an AirPlay anchor names the expected master.
+  uint64_t tracked_clock_id;
 } ptp = {0};
 
 // Parse 8-byte clockIdentity (big-endian) from PTP sourcePortIdentity
@@ -323,15 +326,23 @@ static void process_ptp_message(const uint8_t *data, size_t len,
   uint8_t msg_type = data[0] & 0x0F;
   uint16_t seq = ((uint16_t)data[30] << 8) | data[31];
 
-  // If a master filter is set, reject messages from other clocks.
-  // This applies only to messages that contribute to offset estimation
-  // (SYNC / FOLLOW_UP); ANNOUNCE and others are ignored anyway.
-  if (ptp.expected_clock_id != 0 &&
-      (msg_type == PTP_MSG_SYNC || msg_type == PTP_MSG_FOLLOW_UP)) {
+  // Keep every offset sample in one clock domain. Before AirPlay supplies the
+  // anchor clock_id, learn the first PTP source we see and reject other
+  // sources. When the anchor arrives this lets us retain an already-valid
+  // lock if it names that same source.
+  if (msg_type == PTP_MSG_SYNC || msg_type == PTP_MSG_FOLLOW_UP) {
     uint64_t src_clock_id = parse_ptp_clock_id(data);
-    if (src_clock_id != ptp.expected_clock_id) {
+    if ((ptp.expected_clock_id != 0 &&
+         src_clock_id != ptp.expected_clock_id) ||
+        (ptp.tracked_clock_id != 0 &&
+         src_clock_id != ptp.tracked_clock_id)) {
       ptp.rejected_master_count++;
       return;
+    }
+    if (ptp.tracked_clock_id == 0) {
+      ptp.tracked_clock_id = src_clock_id;
+      ESP_LOGI(TAG, "Tracking PTP source: %016llx",
+               (unsigned long long)src_clock_id);
     }
   }
 
@@ -563,6 +574,7 @@ void ptp_clock_clear(void) {
   // Drop the master filter so the next session can lock to whatever master
   // its anchor packet names (which may differ from the previous session).
   ptp.expected_clock_id = 0;
+  ptp.tracked_clock_id = 0;
 }
 
 void ptp_clock_notify_resume(uint32_t pause_duration_ms) {
@@ -601,6 +613,11 @@ bool ptp_clock_is_locked(void) {
   return ptp.locked;
 }
 
+bool ptp_clock_is_locked_to(uint64_t clock_id) {
+  return clock_id != 0 && ptp_clock_is_locked() &&
+         ptp.tracked_clock_id == clock_id;
+}
+
 uint64_t ptp_clock_get_time_ns(void) {
   int64_t local_ns = get_local_time_ns();
   return (uint64_t)(local_ns + ptp.filtered_offset_ns);
@@ -615,9 +632,23 @@ void ptp_clock_set_master_clock_id(uint64_t clock_id) {
     return;
   }
 
+  // PTP commonly locks before the AirPlay anchor arrives. If the anchor names
+  // the source that produced the current samples, pin that source without
+  // destroying a valid offset. v0.2.0 reset it here, briefly turning a normal
+  // anchor into a hundreds-of-thousands-of-seconds timing error.
+  if (clock_id != 0 && clock_id == ptp.tracked_clock_id &&
+      ptp.sample_count > 0) {
+    ptp.expected_clock_id = clock_id;
+    ESP_LOGI(TAG,
+             "PTP master pinned to tracked source: %016llx (lock preserved=%d)",
+             (unsigned long long)clock_id, ptp.locked);
+    return;
+  }
+
   ESP_LOGI(TAG, "PTP master clock_id %s: %016llx", clock_id ? "set" : "cleared",
            (unsigned long long)clock_id);
   ptp.expected_clock_id = clock_id;
+  ptp.tracked_clock_id = 0;
 
   // Drop accumulated samples / lock state — they may have come from a
   // different (wrong) master.

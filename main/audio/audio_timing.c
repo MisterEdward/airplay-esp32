@@ -92,6 +92,11 @@
 // or invalid anchor in a few seconds.
 #define MAX_CONSECUTIVE_EARLY 50
 
+// AirPlay 2 anchors name the PTP clock domain. Give the listener a short
+// window to lock to that exact source before falling back to local time.
+// Never switch clock domains after playout has started.
+#define PTP_START_LOCK_WAIT_US 1500000LL
+
 static const char *TAG = "audio_time";
 // consecutive_early_frames is now a field in audio_timing_t so it resets
 // automatically whenever a new anchor is set.
@@ -278,6 +283,9 @@ void audio_timing_reset(audio_timing_t *timing) {
 
   timing->playout_started = false;
   timing->anchor_valid = false;
+  timing->anchor_clock_id = 0;
+  timing->ptp_locked = false;
+  timing->ptp_wait_expired = false;
   timing->pending_valid = false;
   timing->pending_frame_len = 0;
   timing->ready_time_us = 0;
@@ -351,14 +359,15 @@ void audio_timing_set_anchor(audio_timing_t *timing,
     return;
   }
 
-  (void)clock_id;
-
   int64_t now_ns = (int64_t)esp_timer_get_time() * 1000LL;
 
   timing->anchor_rtp_time = rtp_time;
   timing->anchor_network_time_ns = network_time_ns;
   timing->anchor_local_time_ns = now_ns;
-  timing->ptp_locked = ptp_clock_is_locked();
+  timing->anchor_clock_id = clock_id;
+  timing->ptp_locked =
+      clock_id != 0 ? ptp_clock_is_locked_to(clock_id) : false;
+  timing->ptp_wait_expired = false;
   timing->anchor_valid = true;
   // Reset frame counters so pre-buffered audio after a pause/resume or
   // track skip does not accumulate into the new anchor's counts.
@@ -368,9 +377,12 @@ void audio_timing_set_anchor(audio_timing_t *timing,
   // is relative to now.  Negative means the anchor is already in the past
   // (normal: the phone pre-buffers and the anchor is 200–800 ms old by the
   // time we receive it).
-  int64_t lead_ms = ((int64_t)network_time_ns -
-                     (int64_t)(ptp_clock_get_offset_ns() + now_ns)) /
-                    1000000LL;
+  int64_t lead_ms = 0;
+  if (timing->ptp_locked) {
+    lead_ms = ((int64_t)network_time_ns -
+               (int64_t)(ptp_clock_get_offset_ns() + now_ns)) /
+              1000000LL;
+  }
   ESP_LOGI(
       TAG,
       "Anchor set: rtp=%" PRIu32 " lead=%lld ms ptp_locked=%d quick_start=%d",
@@ -441,13 +453,36 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       }
       // Waited 1 second, no anchor - proceed without sync
     }
+
+    // The anchor arrived before the listener locked to its named PTP source.
+    // Hold startup briefly, then latch PTP if it becomes ready. If it does not,
+    // use local time for this anchor and do not jump clock domains mid-song.
+    if (timing->anchor_valid && timing->anchor_clock_id != 0 &&
+        !timing->ptp_locked && !timing->ptp_wait_expired) {
+      if (ptp_clock_is_locked_to(timing->anchor_clock_id)) {
+        timing->ptp_locked = true;
+        ESP_LOGI(TAG, "PTP lock acquired before playout; network time latched");
+      } else {
+        int64_t waited_us = esp_timer_get_time() -
+                            (timing->anchor_local_time_ns / 1000LL);
+        if (waited_us < PTP_START_LOCK_WAIT_US) {
+          return 0;
+        }
+        timing->ptp_wait_expired = true;
+        ESP_LOGW(TAG,
+                 "PTP lock wait expired after %lld ms; local time latched for "
+                 "this anchor",
+                 (long long)(waited_us / 1000LL));
+      }
+    }
   }
 
-  // Determine sync mode: PTP (AirPlay 2), NTP (AirPlay 1), or local fallback
+  // Keep the selected clock domain fixed for this anchor. v0.2.0 queried the
+  // live lock here and could jump from local time to PTP during playback.
   sync_mode_t sync_mode = SYNC_MODE_NONE;
-  if (ptp_clock_is_locked()) {
+  if (timing->ptp_locked) {
     sync_mode = SYNC_MODE_PTP;
-  } else if (ntp_clock_is_locked()) {
+  } else if (timing->anchor_clock_id == 0 && ntp_clock_is_locked()) {
     sync_mode = SYNC_MODE_NTP;
   }
 

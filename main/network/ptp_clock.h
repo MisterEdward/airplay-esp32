@@ -34,6 +34,11 @@ void ptp_clock_clear(void);
 bool ptp_clock_is_locked(void);
 
 /**
+ * Check that PTP is locked to the master named by the AirPlay anchor.
+ */
+bool ptp_clock_is_locked_to(uint64_t clock_id);
+
+/**
  * Get current PTP time in nanoseconds.
  * Returns local time adjusted by PTP offset.
  * @return PTP time in nanoseconds since epoch
