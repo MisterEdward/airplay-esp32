@@ -430,7 +430,7 @@ menu "Airplay ESP Configuration"
 
         config AIRPLAY_TIMING_THRESHOLD_MS
             int "Early/late timing threshold for buffered streams (ms)"
-            default 25
+            default 10
             range 2 200
             help
                 Maximum amount a frame may be early or late (in milliseconds)

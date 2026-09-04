@@ -63,6 +63,11 @@ typedef struct {
   bool servo_engaged;
   uint8_t servo_phase;
   uint32_t servo_trims;
+  // A seek may deliberately start with very little buffered audio.  Give the
+  // position servo more authority for a few seconds, then fall back to the
+  // inaudible long-term correction rate.
+  bool fast_sync_active;
+  int64_t fast_sync_started_us;
   // Quick-start flag: set after a seek/flush/track-change so that
   // audio_timing_read starts playback with just 1 buffered frame instead of
   // waiting for target_buffer_frames.  Anchor-based timing is used from the

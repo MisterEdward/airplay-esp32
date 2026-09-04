@@ -43,6 +43,14 @@
 #define POS_SERVO_ENGAGE_US     5000 // engage when |filtered err| exceeds this
 #define POS_SERVO_DISENGAGE_US  1500 // disengage when it falls below this
 #define POS_SERVO_TRIM_INTERVAL 4    // one 1-sample trim per this many frames
+// A short high-authority acquisition mode is used only after quick-start
+// seeks.  One sample per frame is 2841 ppm for the 352-sample AAC output
+// blocks: enough to remove a small residual offset in a few seconds, but not
+// something we want to leave enabled during steady playback.
+#define POS_FAST_SERVO_ENGAGE_US      2000
+#define POS_FAST_SERVO_DISENGAGE_US    750
+#define POS_FAST_SERVO_TRIM_INTERVAL     1
+#define POS_FAST_SERVO_TIMEOUT_US  5000000LL
 // Innovation clamp: cap how far one frame's measurement can move the filter.
 // The per-frame error measurement is NOISY in a one-sided way: the DMA ring
 // holds ~40 ms of queued audio, so when the playback task is briefly starved
@@ -76,7 +84,7 @@
 #ifdef CONFIG_AIRPLAY_TIMING_THRESHOLD_MS
 #define TIMING_THRESHOLD_US (CONFIG_AIRPLAY_TIMING_THRESHOLD_MS * 1000)
 #else
-#define TIMING_THRESHOLD_US 25000 // 25ms early/late threshold (buffered)
+#define TIMING_THRESHOLD_US 10000 // 10ms early/late threshold (buffered)
 #endif
 
 #ifdef CONFIG_AIRPLAY_RT_TIMING_THRESHOLD_MS
@@ -274,6 +282,8 @@ void audio_timing_reset_continuity(audio_timing_t *timing) {
   timing->pos_err_filtered_us = 0;
   timing->servo_engaged = false;
   timing->servo_phase = 0;
+  timing->fast_sync_active = false;
+  timing->fast_sync_started_us = 0;
 }
 
 void audio_timing_reset(audio_timing_t *timing) {
@@ -905,19 +915,40 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
         int64_t abs_err = timing->pos_err_filtered_us < 0
                               ? -timing->pos_err_filtered_us
                               : timing->pos_err_filtered_us;
-        if (!timing->servo_engaged && abs_err > POS_SERVO_ENGAGE_US) {
+        if (timing->fast_sync_active &&
+            esp_timer_get_time() - timing->fast_sync_started_us >=
+                POS_FAST_SERVO_TIMEOUT_US) {
+          timing->fast_sync_active = false;
+          ESP_LOGI(TAG, "Fast position lock timed out: err=%lld us",
+                   (long long)timing->pos_err_filtered_us);
+        }
+
+        int64_t engage_us = timing->fast_sync_active
+                                ? POS_FAST_SERVO_ENGAGE_US
+                                : POS_SERVO_ENGAGE_US;
+        int64_t disengage_us = timing->fast_sync_active
+                                   ? POS_FAST_SERVO_DISENGAGE_US
+                                   : POS_SERVO_DISENGAGE_US;
+        uint8_t trim_interval = timing->fast_sync_active
+                                    ? POS_FAST_SERVO_TRIM_INTERVAL
+                                    : POS_SERVO_TRIM_INTERVAL;
+
+        if (!timing->servo_engaged && abs_err > engage_us) {
           timing->servo_engaged = true;
           timing->servo_phase = 0;
-          ESP_LOGI(TAG, "Position servo engaged: err=%lld us",
+          ESP_LOGI(TAG, "%s servo engaged: err=%lld us",
+                   timing->fast_sync_active ? "Fast position" : "Position",
                    (long long)timing->pos_err_filtered_us);
-        } else if (timing->servo_engaged && abs_err < POS_SERVO_DISENGAGE_US) {
+        } else if (timing->servo_engaged && abs_err < disengage_us) {
           timing->servo_engaged = false;
-          ESP_LOGI(TAG, "Position servo disengaged: err=%lld us trims=%" PRIu32,
+          ESP_LOGI(TAG, "%s servo disengaged: err=%lld us trims=%" PRIu32,
+                   timing->fast_sync_active ? "Fast position" : "Position",
                    (long long)timing->pos_err_filtered_us, timing->servo_trims);
+          timing->fast_sync_active = false;
         }
 
         if (timing->servo_engaged &&
-            ++timing->servo_phase >= POS_SERVO_TRIM_INTERVAL) {
+            ++timing->servo_phase >= trim_interval) {
           timing->servo_phase = 0;
           // Positive error = playing early = stretch (emit one extra sample)
           // so playout slows; negative = late = shrink to catch up.
@@ -1002,6 +1033,8 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       timing->playout_started = true;
       bool was_quick = timing->quick_start;
       timing->quick_start = false;
+      timing->fast_sync_active = was_quick;
+      timing->fast_sync_started_us = was_quick ? esp_timer_get_time() : 0;
       ESP_LOGI(TAG, "Playout started%s: rtp=%" PRIu32,
                was_quick ? " (quick_start)" : "", played_rtp_timestamp);
     }
