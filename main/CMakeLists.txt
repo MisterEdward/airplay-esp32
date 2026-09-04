@@ -64,6 +64,13 @@ if(CONFIG_BT_A2DP_ENABLE)
     list(APPEND SRC_FILES "bt_coex.c")
 endif()
 
+if(CONFIG_USB_AUDIO_SOURCE)
+    list(APPEND SRC_FILES
+        "audio/usb_audio_source.c"
+        "usb/usb_audio_descriptors.c"
+    )
+endif()
+
 # W5500 SPI Ethernet
 if(CONFIG_ETH_W5500_ENABLED)
     list(APPEND SRC_FILES "network/ethernet.c")
@@ -118,6 +125,38 @@ idf_component_register(
     INCLUDE_DIRS ${INC_DIRS}
     PRIV_REQUIRES ${DEPS}
 )
+
+if(CONFIG_USB_AUDIO_SOURCE)
+    # In composite mode the application owns TinyUSB's configuration and
+    # descriptors. Make the same UAC descriptor helpers used by Espressif's
+    # component visible to both that component and TinyUSB itself.
+    idf_component_get_property(tusb_lib espressif__tinyusb COMPONENT_LIB)
+    idf_component_get_property(uac_lib espressif__usb_device_uac COMPONENT_LIB)
+    idf_component_get_property(uac_dir espressif__usb_device_uac COMPONENT_DIR)
+    target_include_directories(${tusb_lib} PUBLIC
+        "${COMPONENT_DIR}/usb"
+        "${uac_dir}/tusb_uac"
+    )
+    target_include_directories(${uac_lib} PRIVATE
+        "${COMPONENT_DIR}/usb"
+        "${uac_dir}/tusb_uac"
+    )
+    target_include_directories(${COMPONENT_LIB} PRIVATE
+        "${uac_dir}/tusb_uac"
+    )
+
+    # TinyUSB exports this definition while compiling its own component, but
+    # application sources that include tusb.h do not inherit it through ESP-IDF's
+    # private component dependency graph. Without it, TinyUSB selects the generic
+    # FreeRTOS OSAL instead of Espressif's port.
+    if(CONFIG_IDF_TARGET_ESP32S2)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE CFG_TUSB_MCU=OPT_MCU_ESP32S2)
+    elseif(CONFIG_IDF_TARGET_ESP32S3)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE CFG_TUSB_MCU=OPT_MCU_ESP32S3)
+    elseif(CONFIG_IDF_TARGET_ESP32P4)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE CFG_TUSB_MCU=OPT_MCU_ESP32P4)
+    endif()
+endif()
 
 # Enable function wrapping for abort() to intercept panics and mute GPIO
 if(CONFIG_BOARD_SQUEEZEAMP_COMMON)

@@ -1,0 +1,8 @@
+#pragma once
+
+enum {
+  USB_ITF_AUDIO_CONTROL = 0,
+  USB_ITF_AUDIO_STREAMING_SPK,
+  USB_ITF_HID_WAKE,
+  USB_ITF_TOTAL,
+};

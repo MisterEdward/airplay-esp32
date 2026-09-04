@@ -18,6 +18,10 @@
 #include "wifi.h"
 #include "spiffs_storage.h"
 
+#ifdef CONFIG_USB_AUDIO_SOURCE
+#include "usb_audio_source.h"
+#endif
+
 #ifdef CONFIG_BT_A2DP_ENABLE
 #include "a2dp_sink.h"
 #include "bt_coex.h"
@@ -275,6 +279,12 @@ void app_main(void) {
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Board init failed: %s", esp_err_to_name(err));
   }
+
+#ifdef CONFIG_USB_AUDIO_SOURCE
+  // USB enumeration is independent of network availability. Start it before
+  // WiFi so the PC always sees the sound device promptly after boot.
+  ESP_ERROR_CHECK(usb_audio_source_init());
+#endif
 
   // Pass the board-owned bus to the display so it reuses it rather than
   // creating a duplicate bus on the same pins.

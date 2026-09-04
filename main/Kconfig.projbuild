@@ -181,6 +181,16 @@ menu "Airplay ESP Configuration"
                 when needed.
     endchoice
 
+    config USB_AUDIO_SOURCE
+        bool "USB audio input source (PC to I2S)"
+        default n
+        depends on AUDIO_OUTPUT_I2S
+        depends on IDF_TARGET_ESP32S2 || IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32P4
+        help
+            Enumerate the native USB port as a speaker and feed host audio
+            into the selected I2S DAC. This is independent from
+            AUDIO_OUTPUT_USB, which sends AirPlay audio to a USB host.
+
     choice OUTPUT_SAMPLE_RATE
         prompt "Output sample rate"
         default OUTPUT_SAMPLE_RATE_44100

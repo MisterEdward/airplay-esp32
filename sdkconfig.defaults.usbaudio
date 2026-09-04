@@ -1,0 +1,20 @@
+# PC USB speaker source. This profile deliberately leaves the normal esp32s3
+# build unchanged.
+CONFIG_USB_AUDIO_SOURCE=y
+CONFIG_OUTPUT_SAMPLE_RATE_48000=y
+
+# The application supplies a composite UAC2 + HID descriptor set.
+CONFIG_USB_DEVICE_UAC_AS_PART=y
+CONFIG_UAC_SPEAKER_CHANNEL_NUM=2
+CONFIG_UAC_MIC_CHANNEL_NUM=0
+CONFIG_UAC_SAMPLE_RATE=48000
+CONFIG_UAC_BIT_RESOLUTION_16=y
+CONFIG_UAC_SUPPORT_MACOS=n
+
+# USB has a 1 ms isochronous deadline. Keep its stack above playback and away
+# from WiFi/lwIP work.
+CONFIG_UAC_TINYUSB_TASK_PRIORITY=10
+CONFIG_UAC_TINYUSB_TASK_CORE=1
+CONFIG_UAC_SPK_TASK_PRIORITY=8
+CONFIG_UAC_SPK_TASK_CORE=1
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y

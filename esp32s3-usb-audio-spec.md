@@ -1,6 +1,6 @@
 # Spec: USB Audio Input Source + PC Wake — `airplay-esp32`
 
-**Repo:** `/Users/edward/airplay-esp32-v020` — WIP, v0.2.0, HEAD `5031cb7`
+**Repo:** `/Users/edward/airplay-esp32-v020` — WIP, v0.2.0, baseline HEAD `4a045aa`
 **Target:** ESP32-S3 + external I2S DAC (PCM5102A), permanently USB-connected to a Windows PC
 **Env:** `esp32s3` (PlatformIO default), ESP-IDF ≥ 5.5
 
@@ -226,7 +226,7 @@ At 48 kHz the nominal rates match exactly, so the loop is at least not *biased*;
 
 > **Note on why hardware clock trimming is not an option:** `soc_caps.h` for esp32s3 defines `SOC_I2S_SUPPORTS_PLL_F160M` and does **not** define `SOC_I2S_SUPPORTS_APLL` — which is exactly why `audio_output_spdif.c:289-290` guards its APLL use on that macro. There is no fractional-divider trim available on this target. Rate control must live either in the host (feedback) or in software (resampling).
 
-### ADR-6 — Arbitration: AirPlay is absolute, but ownership must be bounded
+### ADR-6 — Arbitration: AirPlay is absolute; a lost transport is bounded
 
 **Policy (as specified by the user):** while an AirPlay session is connected, AirPlay owns the output — **including while paused or idle**. USB audio is consumed and discarded, never queued.
 
@@ -234,19 +234,22 @@ At 48 kHz the nominal rates match exactly, so the loop is at least not *biased*;
 
 **Why the precedent already agrees with the user.** `main.c:194-197` handles `RTSP_EVENT_PAUSED` by keeping Bluetooth suspended: *"Session still active — BT stays suspended and hidden so the phone reconnects to AirPlay rather than falling back to BT."* That is exactly the requested semantics, already implemented for the other source. Mirror `on_airplay_client_event` (`main.c:174-206`) rather than inventing a new state machine.
 
-**The bound, and why it is required.** Per 2.4, `RTSP_EVENT_DISCONNECTED` can be delayed indefinitely for v1 sessions while the phone still advertises DACP. Without a bound, PC audio dies silently for an unbounded time after the user's phone has, from their point of view, disconnected. Therefore:
+**The bound, and why it is required.** Per 2.4, `RTSP_EVENT_DISCONNECTED` can be delayed indefinitely for v1 sessions while the phone still advertises DACP. A normal pause is intentional and must retain ownership indefinitely. A closed transport is different: the sender is no longer delivering audio, so PC audio must not remain blocked by the v1 DACP grace period. Therefore add a distinct transport-close event at the socket-close site:
 
 ```
 AIRPLAY_OWNS on:  RTSP_EVENT_CLIENT_CONNECTED, RTSP_EVENT_PLAYING
-AIRPLAY_OWNS on:  RTSP_EVENT_PAUSED           — and start a release timer
+AIRPLAY_OWNS on:  RTSP_EVENT_PAUSED           — indefinitely; no timer
+START TIMER   on: RTSP_EVENT_TRANSPORT_CLOSED — release after 3000 ms
 RELEASE      on:  RTSP_EVENT_DISCONNECTED     — immediately
 RELEASE      on:  release timer expiry
 ```
 
-- `AIRPLAY_HOLD_ON_PAUSE` — default **true** (the user's stated policy).
-- `AIRPLAY_MAX_HOLD_MS` — default **15000**. The hard bound. It only ever fires in the v1-grace-period case; for AirPlay 2 sessions `RTSP_EVENT_DISCONNECTED` arrives first and the timer never matters.
+- `AIRPLAY_HOLD_ON_PAUSE` — always **true** (the user's stated policy).
+- `AIRPLAY_TRANSPORT_CLOSE_GRACE_MS` — default **3000**. It only starts after the RTSP transport closes; it never applies to an ordinary pause.
 
-Both as build-time constants in one place, each with a comment naming the failure it prevents.
+The existing v1 DACP grace may continue to preserve reconnect semantics. Releasing USB ownership does not tear down that logical session. If the sender reconnects later, `CLIENT_CONNECTED` or `PLAYING` immediately gives AirPlay ownership again.
+
+Keep the transport-close grace as a build-time constant in one place, with a comment naming the stuck-ownership failure it prevents.
 
 **Ownership transfer mechanics.** The AirPlay playback task (`audio_output.c:200-263`) writes silence to I2S whenever the receiver has no data. If it runs while your USB writer also writes, both interleave into the same DMA ring and you get garbage. So exactly one writer task may exist at a time:
 
@@ -299,10 +302,10 @@ So: expose `I2S_DMA_DESC_NUM` / `I2S_DMA_FRAME_NUM` as Kconfig with the current 
 
 ### FR-1 — USB speaker device
 
-- **FR-1.1** Enumerate as a **UAC1 playback (speaker)** device: `output_cb` populated, host→device. It must appear under **Playback** in Windows Sound settings. (`output_cb` is currently `NULL` at `audio_output_usb.c:169` — that is the line that tells you the direction convention.)
-- **FR-1.2** Driverless on Windows 10/11, macOS and Linux. UAC1 over full speed. Do not use UAC2.
+- **FR-1.1** Enumerate as a **UAC2 playback (speaker)** device: `output_cb` populated, host→device. It must appear under **Playback** in Windows Sound settings. (`output_cb` is currently `NULL` at `audio_output_usb.c:169` — that is the line that tells you the direction convention.)
+- **FR-1.2** Driverless on Windows 11. UAC2 over full speed. The bundled Espressif component already implements UAC2; converting it to UAC1 would replace a working protocol layer without helping the target PC.
 - **FR-1.3** 48 000 Hz, 16-bit, stereo. `CONFIG_UAC_SAMPLE_RATE=48000`, `CONFIG_UAC_SPEAKER_CHANNEL_NUM=2`, `CONFIG_UAC_MIC_CHANNEL_NUM=0`. Per ADR-2, never a rate that is not a multiple of 1000.
-- **FR-1.4** Composite device: UAC + HID, optionally CDC. Requires `CONFIG_USB_DEVICE_UAC_AS_PART=y` (ADR-3).
+- **FR-1.4** Composite device: UAC + HID, without CDC. Requires `CONFIG_USB_DEVICE_UAC_AS_PART=y` (ADR-3).
 - **FR-1.5** Configuration descriptor declares remote wakeup (`bmAttributes` bit 5).
 - **FR-1.6** Set a distinct VID/PID and product string. Do not ship `0x303A:0x8000 "ESP UAC Device"`. If no VID is available, keep Espressif's VID and pick an unused PID, and say so in the README.
 - **FR-1.7** Handle `set_volume_cb` and `set_mute_cb` (`usb_device_uac.h:30-31`). The host's volume slider must work. Note `apply_volume()` is AirPlay-only and is bypassed on this path (2.3) — apply your own gain in the writer task, reusing the ramp shape from `audio_output.c:145-172` so volume changes do not zipper. Respect `CONFIG_DAC_CONTROLS_VOLUME` the same way the existing code does.
@@ -317,7 +320,7 @@ So: expose `I2S_DMA_DESC_NUM` / `I2S_DMA_FRAME_NUM` as Kconfig with the current 
 
 ### FR-3 — Source arbitration
 
-- **FR-3.1** AirPlay is absolute, per ADR-6, including while paused, bounded by `AIRPLAY_MAX_HOLD_MS`.
+- **FR-3.1** AirPlay is absolute, per ADR-6, including while paused. A normal pause never releases ownership. A lost transport is bounded to 3000 ms before USB resumes.
 - **FR-3.2** Ownership is driven by `rtsp_events` (`main/rtsp/rtsp_events.h:13-19`), registered via `rtsp_events_register()`. Mirror `on_airplay_client_event` (`main.c:174-206`).
 - **FR-3.3** Exactly one I2S writer task at any time (ADR-6). Never call `rtsp_server_stop()`.
 - **FR-3.4** While AirPlay owns the output, keep consuming and discarding USB data (§5.2).
@@ -330,7 +333,7 @@ So: expose `I2S_DMA_DESC_NUM` / `I2S_DMA_FRAME_NUM` as Kconfig with the current 
 - **FR-4.1 Primary — USB remote wakeup.** The mechanism that wakes a suspended host is **USB resume signalling**, not the keypress: call TinyUSB's `tud_remote_wakeup()`. Optionally follow, after the bus resumes, with one benign HID report — a bare **Left Ctrl** press/release, inert in essentially every application. Never a key that could trigger an action.
 - **FR-4.2 Fallback — Wake-on-LAN.** UDP broadcast to port 9; payload = 6 × `0xFF` then the target MAC repeated 16 times. **MAC must be configurable via NVS**, following the `settings.c` pattern — never hardcoded. Expose it in the web UI alongside the other settings.
 - **FR-4.3 State detection.** `tud_mounted()` true and bus active → PC on. Enumerated but suspended (`tud_suspend_cb`) → S3 → FR-4.1. VBUS present but not enumerated → off → FR-4.2. These callbacks are yours to define in composite mode (ADR-3).
-- **FR-4.4 Trigger.** Use existing surfaces: a button action via `buttons.c` / `playback_control`, and an HTTP endpoint following the `/api/...` pattern in `web_server.c:1328+`. Do not add a new control mechanism.
+- **FR-4.4 Trigger.** Use an HTTP endpoint and the existing web UI. This board has no physical buttons.
 - **FR-4.5 README must document the host-side settings**, all commonly wrong by default:
   - **BIOS: ErP / EuP Ready = Disabled.** Required *both* for +5VSB on the USB ports (so the device stays alive when the PC is off) *and* for WoL from S5. One setting, both features — if it is enabled, neither works.
   - **Windows: Fast Startup = Disabled.** Hybrid shutdown is not a true S5 and commonly breaks WoL.
@@ -340,7 +343,7 @@ So: expose `I2S_DMA_DESC_NUM` / `I2S_DMA_FRAME_NUM` as Kconfig with the current 
 
 ### FR-5 — Diagnostics
 
-- **FR-5.1** Expose: active source, ring fill level, USB feedback value in ppm relative to nominal, underruns, overruns, discarded-while-AirPlay-owns byte count, detected PC power state, and time held in `AIRPLAY_HOLD_ON_PAUSE`.
+- **FR-5.1** Expose: active source, ring fill level, USB feedback value in ppm relative to nominal, underruns, overruns, discarded-while-AirPlay-owns byte count, detected PC power state, and any active transport-close grace time.
 - **FR-5.2** Extend `main/airplay_metrics.c` — the established pattern. Do not add a new telemetry path. Surface it on the existing web UI.
 - **FR-5.3** Underrun/overrun counters are mandatory; A2 and A10 depend on them.
 - **FR-5.4** Log the resolved task/core/priority map once at boot. It is the first thing to check when someone reports clicks.
@@ -409,7 +412,7 @@ Demonstrate each on hardware and report the actual result. **Do not report compl
 | A3 | Start AirPlay while PC audio is playing | AirPlay takes over within ~200 ms, clean fade, no pop |
 | A4 | Pause the AirPlay sender without disconnecting | Output silent; PC audio does **not** resume (FR-3.1) |
 | A5 | Disconnect an AirPlay **2** sender | PC audio resumes within ~1 s |
-| A6 | Disconnect an AirPlay **1 / RAOP** sender that keeps advertising DACP | PC audio resumes within `AIRPLAY_MAX_HOLD_MS` — proves the ADR-6 bound |
+| A6 | Disconnect an AirPlay **1 / RAOP** sender that keeps advertising DACP | PC audio resumes within `AIRPLAY_TRANSPORT_CLOSE_GRACE_MS` — proves the ADR-6 bound |
 | A7 | Kill a sender ungracefully (WiFi off on the phone) | PC audio resumes; no stuck state |
 | A8 | Sleep the PC, trigger wake | PC wakes via remote wakeup |
 | A9 | Power the PC fully off, trigger wake | Device stays powered; PC wakes via WoL |
