@@ -18,6 +18,8 @@
 #include "ethernet.h"
 #include "ota.h"
 #include "log_stream.h"
+#include "device_status.h"
+#include "pc_wake.h"
 #include "rtsp_server.h"
 #include "audio_output.h"
 #include "esp_app_desc.h"
@@ -1018,6 +1020,81 @@ static esp_err_t system_info_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+static esp_err_t status_handler(httpd_req_t *req) {
+  cJSON *json = device_status_build_json();
+  char *json_str = cJSON_PrintUnformatted(json);
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
+  free(json_str);
+  cJSON_Delete(json);
+  return ESP_OK;
+}
+
+static esp_err_t pc_wake_handler(httpd_req_t *req) {
+  pc_wake_result_t r;
+  esp_err_t err = pc_wake_trigger(&r);
+  cJSON *json = cJSON_CreateObject();
+  cJSON_AddBoolToObject(json, "success", err == ESP_OK);
+  cJSON_AddBoolToObject(json, "usb_attempted", r.usb_attempted);
+  cJSON_AddBoolToObject(json, "usb_resume_sent", r.usb_resume_sent);
+  cJSON_AddBoolToObject(json, "wol_attempted", r.wol_attempted);
+  cJSON_AddBoolToObject(json, "wol_sent", r.wol_sent);
+  cJSON_AddStringToObject(json, "detail", r.detail);
+  char *json_str = cJSON_PrintUnformatted(json);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
+  free(json_str);
+  cJSON_Delete(json);
+  return ESP_OK;
+}
+
+static esp_err_t pc_config_get_handler(httpd_req_t *req) {
+  char mac[24] = {0};
+  bool have = settings_get_wol_mac(mac, sizeof(mac)) == ESP_OK;
+  cJSON *json = cJSON_CreateObject();
+  cJSON_AddBoolToObject(json, "success", true);
+  cJSON_AddStringToObject(json, "wol_mac", have ? mac : "");
+  char *json_str = cJSON_PrintUnformatted(json);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
+  free(json_str);
+  cJSON_Delete(json);
+  return ESP_OK;
+}
+
+static esp_err_t pc_config_post_handler(httpd_req_t *req) {
+  char buf[128];
+  int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+  if (len <= 0) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+    return ESP_FAIL;
+  }
+  buf[len] = '\0';
+  cJSON *json = cJSON_Parse(buf);
+  const cJSON *mac = json ? cJSON_GetObjectItem(json, "wol_mac") : NULL;
+  uint8_t bytes[6];
+  if (!cJSON_IsString(mac) || !pc_wake_parse_mac(mac->valuestring, bytes)) {
+    cJSON_Delete(json);
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                        "wol_mac must be aa:bb:cc:dd:ee:ff");
+    return ESP_FAIL;
+  }
+  char canonical[18];
+  pc_wake_format_mac(bytes, canonical, sizeof(canonical));
+  esp_err_t err = settings_set_wol_mac(canonical);
+  cJSON_Delete(json);
+  cJSON *resp = cJSON_CreateObject();
+  cJSON_AddBoolToObject(resp, "success", err == ESP_OK);
+  cJSON_AddStringToObject(resp, "wol_mac", canonical);
+  char *json_str = cJSON_PrintUnformatted(resp);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
+  free(json_str);
+  cJSON_Delete(resp);
+  return ESP_OK;
+}
+
 static esp_err_t system_restart_handler(httpd_req_t *req) {
   cJSON *json = cJSON_CreateObject();
   cJSON_AddBoolToObject(json, "success", true);
@@ -1436,6 +1513,24 @@ esp_err_t web_server_start(uint16_t port) {
                                  .method = HTTP_GET,
                                  .handler = system_info_handler};
   httpd_register_uri_handler(s_server, &system_info_uri);
+
+  httpd_uri_t status_uri = {
+      .uri = "/api/status", .method = HTTP_GET, .handler = status_handler};
+  httpd_register_uri_handler(s_server, &status_uri);
+
+  httpd_uri_t pc_wake_uri = {
+      .uri = "/api/pc/wake", .method = HTTP_POST, .handler = pc_wake_handler};
+  httpd_register_uri_handler(s_server, &pc_wake_uri);
+
+  httpd_uri_t pc_cfg_get_uri = {.uri = "/api/pc/config",
+                                .method = HTTP_GET,
+                                .handler = pc_config_get_handler};
+  httpd_register_uri_handler(s_server, &pc_cfg_get_uri);
+
+  httpd_uri_t pc_cfg_post_uri = {.uri = "/api/pc/config",
+                                 .method = HTTP_POST,
+                                 .handler = pc_config_post_handler};
+  httpd_register_uri_handler(s_server, &pc_cfg_post_uri);
 
   httpd_uri_t system_restart_uri = {.uri = "/api/system/restart",
                                     .method = HTTP_POST,

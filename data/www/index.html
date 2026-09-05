@@ -47,10 +47,39 @@ input:focus{outline:none;border-color:#e94560}
 .slider-row{display:flex;align-items:center;gap:12px}
 .slider-row input[type=range]{flex:1;accent-color:#e94560}
 .slider-row span{font-size:13px;color:#888;min-width:32px;text-align:right}
+.np{background:rgba(0,0,0,0.2);border-radius:10px;padding:14px}
+.np-src{font-size:11px;color:#e94560;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:6px}
+.np-title{font-size:18px;font-weight:600}
+.np-sub{font-size:14px;color:#bbb;margin-top:2px}
+.np-meta{font-size:12px;color:#888;margin-top:8px}
+.pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;background:rgba(255,255,255,0.12);margin-left:6px}
 </style></head><body>
 <div class='wrap'>
-<div class='header'><h1>AirPlay Receiver</h1><p>ESP32 Configuration Panel</p></div>
+<div class='header'><h1>Bedroom Speakers</h1><p>AirPlay 2 · USB · Fable 5.1</p></div>
 <div id='status-bar' class='status-bar'>Loading...</div>
+<div class='card' id='now-card'><h2>Now Playing</h2>
+<div class='np'>
+<div class='np-src' id='np-src'>–</div>
+<div class='np-title' id='np-title'>Nothing playing</div>
+<div class='np-sub' id='np-sub'></div>
+<div class='np-meta' id='np-meta'></div>
+</div>
+<div class='info-grid' style='margin-top:12px'>
+<div class='info-item'><label>Source</label><span id='st-source'>-</span></div>
+<div class='info-item'><label>Sync</label><span id='st-sync'>-</span></div>
+<div class='info-item'><label>Volume</label><span id='st-vol'>-</span></div>
+<div class='info-item'><label>Output</label><span id='st-out'>-</span></div>
+</div></div>
+<div class='card' id='pc-card'><h2>PC (USB)</h2>
+<div class='info-grid'>
+<div class='info-item'><label>PC state</label><span id='pc-state'>-</span></div>
+<div class='info-item'><label>USB audio</label><span id='pc-usb'>-</span></div>
+</div>
+<div class='actions'><button class='btn btn-primary' id='wake-btn' onclick='wakePC()'>Wake PC</button></div>
+<div id='wake-msg'></div>
+<div class='form-group' style='margin-top:14px'><label>Wake-on-LAN MAC (PC Ethernet)</label><input type='text' id='wol-mac' placeholder='aa:bb:cc:dd:ee:ff'></div>
+<button class='btn btn-secondary' onclick='saveWol()'>Save MAC</button>
+<div id='wol-msg'></div></div>
 <div class='card'><h2>WiFi Network</h2>
 <button class='btn btn-secondary' onclick='scanWiFi()'>Scan Networks</button>
 <div id='wifi-list' class='wifi-list'></div>
@@ -245,7 +274,55 @@ async function loadInfo(){
          warning on the device for every page load. */
       if(i.dual_supported&&!dualLoaded){dualLoaded=true;loadDual();}
       document.getElementById('dev-name').placeholder=i.device_name||'';}}catch(e){}}
+function fmtT(s){if(s==null)return '';s=Math.max(0,Math.floor(s));return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2);}
+async function loadStatus(){
+  try{var r=await fetch('/api/status',{cache:'no-store'});var d=await r.json();if(!d.success)return;
+    var src=d.output.source,ap=d.airplay,np=d.now_playing,pc=d.pc;
+    var srcLabel=src==='airplay'?'AirPlay':src==='usb'?'USB · PC':'Idle';
+    if(src==='airplay'&&ap.connected){srcLabel+=' · '+(ap.sender_name||ap.sender_id||'sender')+(ap.paused?' (paused)':'');}
+    document.getElementById('np-src').textContent=srcLabel;
+    if(src==='airplay'&&np.valid&&np.title){
+      document.getElementById('np-title').textContent=np.title;
+      document.getElementById('np-sub').textContent=[np.artist,np.album].filter(Boolean).join(' — ');
+      var pos=np.position_s+(np.age_s||0)*(ap.paused?0:1);
+      document.getElementById('np-meta').textContent=np.duration_s?fmtT(Math.min(pos,np.duration_s))+' / '+fmtT(np.duration_s):'';
+    }else if(src==='usb'){
+      document.getElementById('np-title').textContent=pc.streaming?'PC audio':'PC connected, no audio';
+      document.getElementById('np-sub').textContent='';document.getElementById('np-meta').textContent='';
+    }else{
+      document.getElementById('np-title').textContent=ap.connected?'Connected, idle':'Nothing playing';
+      document.getElementById('np-sub').textContent='';document.getElementById('np-meta').textContent='';
+    }
+    document.getElementById('st-source').textContent=srcLabel;
+    var t=d.timing;
+    document.getElementById('st-sync').textContent=(t.domain||'-')+(t.acquired?' · err '+Math.round(t.servo_err_us/100)/10+' ms':'')+(t.servo_engaged?' (servo)':'');
+    var vol=src==='usb'?Math.round(pc.volume_q15/327.68)+'%'+(pc.muted?' muted':''):(ap.connected?ap.volume_db.toFixed(1)+' dB':'-');
+    document.getElementById('st-vol').textContent=vol;
+    document.getElementById('st-out').textContent=d.output.envelope+' · underruns '+d.output.dma_underruns;
+    if(pc.available){document.getElementById('pc-card').style.display='';
+      var st=pc.pc_state==='on'?'On':pc.pc_state==='asleep'?'Asleep':'Off / disconnected';
+      document.getElementById('pc-state').textContent=st+(pc.pc_state==='asleep'?(pc.remote_wakeup_armed?' (USB wake armed)':' (USB wake not allowed)'):'');
+      document.getElementById('pc-usb').textContent=pc.streaming?'streaming · buffer '+Math.round(pc.ring_ms)+' ms':'idle';
+    }
+    if(!wolLoaded&&pc.wol_mac!==undefined){wolLoaded=true;document.getElementById('wol-mac').value=pc.wol_mac||'';}
+  }catch(e){}
+}
+var wolLoaded=false;
+async function wakePC(){
+  var b=document.getElementById('wake-btn');b.disabled=true;msg('wake-msg','Sending wake…','info');
+  try{var r=await fetch('/api/pc/wake',{method:'POST'});var d=await r.json();
+    msg('wake-msg',(d.success?'Wake sent: ':'Nothing sent: ')+d.detail,d.success?'ok':'err');}
+  catch(e){msg('wake-msg','Error','err');}
+  b.disabled=false;
+}
+async function saveWol(){
+  var v=document.getElementById('wol-mac').value.trim();
+  try{var r=await fetch('/api/pc/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({wol_mac:v})});
+    var d=await r.json();if(d.success){msg('wol-msg','Saved '+d.wol_mac,'ok');document.getElementById('wol-mac').value=d.wol_mac;}else{msg('wol-msg','Invalid MAC','err');}}
+  catch(e){msg('wol-msg','Invalid MAC (use aa:bb:cc:dd:ee:ff)','err');}
+}
 window.onload=function(){
+  loadStatus();setInterval(loadStatus,2000);
   document.getElementById('fw-file').onchange=function(e){var f=e.target.files[0];
     document.getElementById('fw-name').textContent=f?f.name:'No file selected';
     document.getElementById('ota-btn').disabled=!f;};

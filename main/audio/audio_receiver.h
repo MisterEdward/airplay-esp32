@@ -59,6 +59,26 @@ typedef struct {
   uint32_t last_timestamp;
 } audio_stats_t;
 
+/** Live diagnostics for the status API. */
+typedef struct {
+  const char *sync_domain; // "ptp" / "ntp" / "local"
+  bool anchor_valid;
+  bool playing;
+  bool acquired;
+  int64_t acquire_err_us;
+  int64_t servo_err_us;
+  bool servo_engaged;
+  uint32_t servo_trims;
+  int buffered_frames;
+  uint32_t gaps;
+  uint32_t late_frames;
+  uint32_t packets_received;
+  uint32_t packets_dropped;
+  uint32_t decrypt_errors;
+} audio_receiver_diag_t;
+
+void audio_receiver_get_diag(audio_receiver_diag_t *out);
+
 /**
  * Initialize audio receiver
  */

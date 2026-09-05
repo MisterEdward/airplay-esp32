@@ -567,6 +567,27 @@ void audio_receiver_stop_buffered_only(void) {
   }
 }
 
+void audio_receiver_get_diag(audio_receiver_diag_t *out) {
+  if (!out) {
+    return;
+  }
+  memset(out, 0, sizeof(*out));
+  out->sync_domain = audio_timing_sync_mode_name(&receiver.timing);
+  out->anchor_valid = receiver.timing.anchor_valid;
+  out->playing = receiver.timing.playing;
+  out->acquired = receiver.timing.acquired;
+  out->acquire_err_us = receiver.timing.acquire_err_us;
+  out->servo_err_us = receiver.timing.pos_err_filtered_us;
+  out->servo_engaged = receiver.timing.servo_engaged;
+  out->servo_trims = receiver.timing.servo_trims;
+  out->buffered_frames = audio_buffer_get_frame_count(&receiver.buffer);
+  out->gaps = receiver.timing.gaps;
+  out->late_frames = receiver.stats.late_frames;
+  out->packets_received = receiver.stats.packets_received;
+  out->packets_dropped = receiver.stats.packets_dropped;
+  out->decrypt_errors = receiver.stats.decrypt_errors;
+}
+
 void audio_receiver_get_stats(audio_stats_t *stats) {
   if (!stats) {
     return;

@@ -80,6 +80,28 @@ void rtsp_server_request_resume(void) {
   s_resume_requested = true;
 }
 
+bool rtsp_server_get_session_info(rtsp_session_info_t *out) {
+  if (!out) {
+    return false;
+  }
+  client_slot_t *c = &clients[current_slot];
+  rtsp_conn_t *conn = c->conn;
+  if (!conn || c->is_old || c->socket < 0) {
+    return false;
+  }
+  memset(out, 0, sizeof(*out));
+  out->sid = conn->sid;
+  strlcpy(out->source_id, conn->source_id, sizeof(out->source_id));
+  strlcpy(out->source_name, conn->source_name, sizeof(out->source_name));
+  strlcpy(out->source_model, conn->source_model, sizeof(out->source_model));
+  out->volume_db = conn->volume_db;
+  out->stream_active = conn->stream_active;
+  out->stream_paused = conn->stream_paused;
+  out->protocol_version = conn->protocol_version;
+  out->connected_us = conn->connected_us;
+  return true;
+}
+
 // Helper to grow buffer
 static uint8_t *grow_buffer(uint8_t *old_buf, size_t old_size, size_t new_size,
                             size_t data_len) {

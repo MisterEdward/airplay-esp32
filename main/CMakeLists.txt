@@ -42,6 +42,9 @@ set( SRC_FILES
     "network/dns_server.c"
     "network/log_stream.c"
     "network/log_journal.c"
+    "network/pc_wake.c"
+    "device_status.c"
+    "audio/audio_arbiter.c"
     "led.c"
     "audio/eq_events.c"
     "buttons.c"
@@ -67,6 +70,14 @@ if(CONFIG_BT_A2DP_ENABLE)
     list(APPEND SRC_FILES "bt_coex.c")
 endif()
 
+# USB speaker source + PC wake (composite UAC2 + HID device)
+if(CONFIG_USB_AUDIO_SOURCE)
+    list(APPEND SRC_FILES
+        "usb/usb_audio_source.c"
+        "usb/usb_descriptors.c"
+    )
+endif()
+
 # W5500 SPI Ethernet
 if(CONFIG_ETH_W5500_ENABLED)
     list(APPEND SRC_FILES "network/ethernet.c")
@@ -79,6 +90,7 @@ set( INC_DIRS
     "plist" 
     "hap" 
     "network"
+    "usb"
 )
 
 set( DEPS
@@ -121,6 +133,47 @@ idf_component_register(
     INCLUDE_DIRS ${INC_DIRS}
     PRIV_REQUIRES ${DEPS}
 )
+
+if(CONFIG_USB_AUDIO_SOURCE)
+    # Composite mode: the application owns tusb_config.h and the descriptor
+    # set.  TinyUSB and the UAC component compile against them, so both need
+    # our usb/ directory (and TinyUSB needs the UAC class headers) on their
+    # include paths.
+    idf_build_get_property(build_components BUILD_COMPONENTS)
+    if(espressif__tinyusb IN_LIST build_components)
+        set(fable_tusb espressif__tinyusb)
+    else()
+        set(fable_tusb tinyusb)
+    endif()
+    if(espressif__usb_device_uac IN_LIST build_components)
+        set(fable_uac espressif__usb_device_uac)
+    else()
+        set(fable_uac usb_device_uac)
+    endif()
+    idf_component_get_property(tusb_lib ${fable_tusb} COMPONENT_LIB)
+    idf_component_get_property(uac_lib ${fable_uac} COMPONENT_LIB)
+    idf_component_get_property(uac_dir ${fable_uac} COMPONENT_DIR)
+    target_include_directories(${tusb_lib} PUBLIC
+        "${COMPONENT_DIR}/usb"
+        "${uac_dir}/tusb_uac"
+    )
+    target_include_directories(${uac_lib} PRIVATE
+        "${COMPONENT_DIR}/usb"
+        "${uac_dir}/tusb_uac"
+    )
+    target_include_directories(${COMPONENT_LIB} PRIVATE
+        "${uac_dir}/tusb_uac"
+    )
+    # TinyUSB's own build gets CFG_TUSB_MCU from its CMakeLists; sources in
+    # main that include tusb.h need the same definition.
+    if(CONFIG_IDF_TARGET_ESP32S2)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE CFG_TUSB_MCU=OPT_MCU_ESP32S2)
+    elseif(CONFIG_IDF_TARGET_ESP32S3)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE CFG_TUSB_MCU=OPT_MCU_ESP32S3)
+    elseif(CONFIG_IDF_TARGET_ESP32P4)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE CFG_TUSB_MCU=OPT_MCU_ESP32P4)
+    endif()
+endif()
 
 # Enable function wrapping for abort() to intercept panics and mute GPIO
 if(CONFIG_BOARD_SQUEEZEAMP_COMMON)

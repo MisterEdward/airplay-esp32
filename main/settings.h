@@ -118,6 +118,17 @@ esp_err_t settings_set_device_name(const char *name);
 void settings_device_name_to_hostname(const char *name, char *out,
                                       size_t out_len);
 
+// ---- PC wake ----
+
+/**
+ * Get the Wake-on-LAN target MAC as text ("aa:bb:cc:dd:ee:ff").
+ * @return ESP_OK if configured, ESP_ERR_NOT_FOUND otherwise
+ */
+esp_err_t settings_get_wol_mac(char *mac, size_t len);
+
+/** Save the Wake-on-LAN target MAC (validated text form). */
+esp_err_t settings_set_wol_mac(const char *mac);
+
 // ---- LED settings ----
 
 /**

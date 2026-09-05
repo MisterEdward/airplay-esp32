@@ -4,12 +4,24 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 CONFIG_SPIRAM_MODE_OCT=y
 
-# USB Audio Class defaults for the current usb_device_uac integration.
-# Keep both streams stereo at 48 kHz so the UAC descriptors, feedback,
-# and AirPlay USB backend all use the same resampled output rate.
+# USB speaker source (PC -> DAC) + HID wake.  Composite mode: the app owns
+# tusb_config.h / descriptors.  Speaker only: the microphone direction is
+# the upstream AUDIO_OUTPUT_USB feature and is not built here.  48 kHz is
+# mandatory: the UAC component drains its FIFO at (rate/1000) bytes per USB
+# frame with integer division, so any rate not a multiple of 1000 Hz drifts.
+CONFIG_USB_AUDIO_SOURCE=y
+CONFIG_USB_DEVICE_UAC_AS_PART=y
 CONFIG_UAC_SPEAKER_CHANNEL_NUM=2
-CONFIG_UAC_MIC_CHANNEL_NUM=2
+CONFIG_UAC_MIC_CHANNEL_NUM=0
 CONFIG_UAC_SAMPLE_RATE=48000
+CONFIG_UAC_BIT_RESOLUTION_16=y
+CONFIG_UAC_SUPPORT_MACOS=n
+# Isochronous transfers have a 1 ms deadline: keep the USB stack above the
+# audio render task and on the audio core, away from WiFi (core 0).
+CONFIG_UAC_TINYUSB_TASK_PRIORITY=10
+CONFIG_UAC_TINYUSB_TASK_CORE=1
+CONFIG_UAC_SPK_TASK_PRIORITY=8
+CONFIG_UAC_SPK_TASK_CORE=1
 
 # GPIO defaults
 CONFIG_BAT_CHANNEL=7

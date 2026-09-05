@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 /**
@@ -33,3 +34,19 @@ int32_t airplay_get_volume_q15(void);
  * playpause to the phone so it reconnects.
  */
 void rtsp_server_request_resume(void);
+
+/** Snapshot of the active AirPlay session for the status API. */
+typedef struct {
+  uint32_t sid;
+  char source_id[40];
+  char source_name[48];
+  char source_model[32];
+  float volume_db;
+  bool stream_active;
+  bool stream_paused;
+  uint8_t protocol_version;
+  int64_t connected_us;
+} rtsp_session_info_t;
+
+/** Fill `out` for the current client; returns false if none is connected. */
+bool rtsp_server_get_session_info(rtsp_session_info_t *out);

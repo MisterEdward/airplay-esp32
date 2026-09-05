@@ -27,6 +27,7 @@ static const char *TAG = "settings";
 #define NVS_KEY_BIAMP_SWAP     "ba_swap"
 #define NVS_KEY_BIAMP_EQ       "ba_eq"
 #define NVS_KEY_DUAL_MODE      "dual_mode"
+#define NVS_KEY_WOL_MAC        "wol_mac"
 
 #define MAX_WIFI_SSID_LEN     32
 #define MAX_WIFI_PASSWORD_LEN 64
@@ -317,6 +318,41 @@ esp_err_t settings_set_device_name(const char *name) {
     ESP_LOGE(TAG, "Failed to save device name: %s", esp_err_to_name(err));
   }
 
+  return err;
+}
+
+esp_err_t settings_get_wol_mac(char *mac, size_t len) {
+  if (!mac || len < 18) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs);
+  if (err != ESP_OK) {
+    return ESP_ERR_NOT_FOUND;
+  }
+  size_t required = len;
+  err = nvs_get_str(nvs, NVS_KEY_WOL_MAC, mac, &required);
+  nvs_close(nvs);
+  return err == ESP_OK ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t settings_set_wol_mac(const char *mac) {
+  if (!mac || strlen(mac) < 12 || strlen(mac) > 23) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+  if (err != ESP_OK) {
+    return err;
+  }
+  err = nvs_set_str(nvs, NVS_KEY_WOL_MAC, mac);
+  if (err == ESP_OK) {
+    err = nvs_commit(nvs);
+  }
+  nvs_close(nvs);
+  if (err == ESP_OK) {
+    ESP_LOGI(TAG, "Saved WoL MAC: %s", mac);
+  }
   return err;
 }
 

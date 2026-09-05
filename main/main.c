@@ -1,5 +1,9 @@
+#include "audio_arbiter.h"
 #include "audio_output.h"
 #include "audio_receiver.h"
+#include "device_status.h"
+#include "esp_ota_ops.h"
+#include "esp_timer.h"
 #include "buttons.h"
 #include "spiram_task.h"
 #include "display.h"
@@ -18,6 +22,9 @@
 #include "log_stream.h"
 #include "wifi.h"
 #include "spiffs_storage.h"
+#ifdef CONFIG_USB_AUDIO_SOURCE
+#include "usb_audio_source.h"
+#endif
 
 #ifdef CONFIG_BT_A2DP_ENABLE
 #include "a2dp_sink.h"
@@ -47,6 +54,52 @@ static const char *TAG = "main";
 
 static bool s_airplay_started = false;
 static bool s_airplay_infrastructure_ready = false;
+static bool s_output_started = false;
+static bool s_audio_ready = false;
+
+// OTA rollback watchdog.  A freshly flashed image boots in PENDING_VERIFY.
+// It is confirmed once the network is up and AirPlay is serving; if that has
+// not happened within OTA_VERIFY_TIMEOUT_S the device restarts and the
+// bootloader reverts to the previous image.  Only meaningful once the
+// bootloader with CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE has been flashed.
+#define OTA_VERIFY_TIMEOUT_S 180
+static esp_timer_handle_t s_ota_timer;
+
+static void ota_verify_timer_cb(void *arg) {
+  (void)arg;
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  esp_ota_img_states_t state;
+  if (!running || esp_ota_get_state_partition(running, &state) != ESP_OK ||
+      state != ESP_OTA_IMG_PENDING_VERIFY) {
+    return;
+  }
+  ESP_LOGE(TAG,
+           "New image never became healthy within %d s (no network/AirPlay) — "
+           "restarting so the bootloader rolls back",
+           OTA_VERIFY_TIMEOUT_S);
+  vTaskDelay(pdMS_TO_TICKS(500));
+  esp_restart();
+}
+
+static void ota_verify_arm(void) {
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  esp_ota_img_states_t state;
+  if (!running || esp_ota_get_state_partition(running, &state) != ESP_OK) {
+    return;
+  }
+  ESP_LOGI(TAG, "Running from %s, OTA state=%d", running->label, (int)state);
+  if (state != ESP_OTA_IMG_PENDING_VERIFY) {
+    return;
+  }
+  const esp_timer_create_args_t args = {.callback = ota_verify_timer_cb,
+                                        .name = "ota_verify"};
+  if (esp_timer_create(&args, &s_ota_timer) == ESP_OK) {
+    esp_timer_start_once(s_ota_timer, (uint64_t)OTA_VERIFY_TIMEOUT_S * 1000000ULL);
+    ESP_LOGW(TAG, "Image pending verification: must reach the network within "
+                  "%d s or it will be rolled back",
+             OTA_VERIFY_TIMEOUT_S);
+  }
+}
 
 static void start_airplay_services(void) {
   if (s_airplay_started) {
@@ -65,19 +118,29 @@ static void start_airplay_services(void) {
     }
 
     ESP_ERROR_CHECK(hap_init());
-    ESP_ERROR_CHECK(audio_receiver_init());
-    ESP_ERROR_CHECK(audio_output_init());
+    if (!s_audio_ready) {
+      ESP_ERROR_CHECK(audio_receiver_init());
+      ESP_ERROR_CHECK(audio_output_init());
+      s_audio_ready = true;
+    }
     mdns_airplay_init();
     s_airplay_infrastructure_ready = true;
   }
 
-  audio_output_start();
+  if (!s_output_started) {
+    audio_output_start();
+    s_output_started = true;
+  }
 
   ESP_ERROR_CHECK(rtsp_server_start());
 
   s_airplay_started = true;
   playback_control_set_source(PLAYBACK_SOURCE_AIRPLAY);
   ESP_LOGI(TAG, "AirPlay ready");
+  device_status_ota_mark_valid_if_pending("network up, AirPlay serving");
+  if (s_ota_timer) {
+    esp_timer_stop(s_ota_timer);
+  }
 }
 #ifdef CONFIG_BT_A2DP_ENABLE
 static void stop_airplay_services(void) {
@@ -89,6 +152,7 @@ static void stop_airplay_services(void) {
 
   rtsp_server_stop();
   audio_output_stop();
+  s_output_started = false;
 
   s_airplay_started = false;
   playback_control_set_source(PLAYBACK_SOURCE_NONE);
@@ -267,8 +331,10 @@ void app_main(void) {
 #endif
   spiffs_storage_init();
   log_stream_init();
+  ota_verify_arm();
   ESP_ERROR_CHECK(playback_control_init());
   led_init();
+  device_status_init();
 
   // Initialize board-specific hardware (includes I2C/SPI bus for display and
   // DAC)
@@ -289,6 +355,31 @@ void app_main(void) {
   // Initialize LVGL-dependent board resources (e.g., touch input) after
   // display/LVGL port is ready.
   iot_board_init_lvgl_resources();
+
+  // The speaker must work for the PC even with no network: bring the I2S
+  // render task and the USB source up now, before WiFi.  AirPlay attaches
+  // to the same output later.
+  {
+    esp_err_t out_err = audio_receiver_init();
+    if (out_err == ESP_OK) {
+      out_err = audio_output_init();
+    }
+    if (out_err != ESP_OK) {
+      ESP_LOGE(TAG, "Audio init failed: %s", esp_err_to_name(out_err));
+    } else {
+      s_audio_ready = true;
+      audio_output_start();
+      s_output_started = true;
+    }
+    bool usb_ok = false;
+#ifdef CONFIG_USB_AUDIO_SOURCE
+    usb_ok = usb_audio_source_init() == ESP_OK;
+    if (!usb_ok) {
+      ESP_LOGE(TAG, "USB speaker source failed to start");
+    }
+#endif
+    audio_arbiter_init(usb_ok);
+  }
 
   // Try ethernet first
   bool eth_available = false;
