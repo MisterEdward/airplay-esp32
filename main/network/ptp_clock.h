@@ -96,3 +96,17 @@ void ptp_clock_set_master_clock_id(uint64_t clock_id);
  * Read the current expected master clock_id (0 if none / filter cleared).
  */
 uint64_t ptp_clock_get_master_clock_id(void);
+
+/**
+ * True when the filter is locked AND every sample in it came from
+ * `clock_id`.  This is the question the timing engine asks when an anchor
+ * arrives: "may I schedule this anchor on the PTP timeline right now?"
+ */
+bool ptp_clock_is_locked_to(uint64_t clock_id);
+
+/**
+ * Clock identity that produced the samples currently in the filter (0 if
+ * none yet).  Learned from the first SYNC seen after a clear, before the
+ * AirPlay anchor names the expected master.
+ */
+uint64_t ptp_clock_get_tracked_clock_id(void);

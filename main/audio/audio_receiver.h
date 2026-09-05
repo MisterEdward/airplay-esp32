@@ -104,6 +104,13 @@ void audio_receiver_get_stats(audio_stats_t *stats);
 size_t audio_receiver_read(int16_t *buffer, size_t samples);
 
 /**
+ * Like audio_receiver_read(), and reports whether the block is real media
+ * (true) or scheduled silence (false) so the output can shape fades only
+ * around actual audio.
+ */
+size_t audio_receiver_read_ex(int16_t *buffer, size_t max_frames, bool *media);
+
+/**
  * Check if audio data is available
  */
 bool audio_receiver_has_data(void);

@@ -1,6 +1,7 @@
 #include "rtsp_server.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdlib.h>
@@ -49,6 +50,7 @@ typedef struct {
   int socket;
   volatile bool should_stop;
   volatile bool is_old; // Marked as old client being killed
+  volatile bool audio_released; // cleanup has stopped/flushed the audio path
 } client_slot_t;
 
 static client_slot_t clients[2] = {0}; // Current and old
@@ -167,11 +169,11 @@ static void client_task(void *pvParameters) {
   if (getpeername(slot->socket, (struct sockaddr *)&peer_addr, &peer_len) ==
       0) {
     conn->client_ip = peer_addr.sin_addr.s_addr;
-    ESP_LOGI(TAG, "Client IP: %u.%u.%u.%u",
-             (unsigned int)(conn->client_ip & 0xFF),
+    ESP_LOGI(TAG, "sid=%" PRIu32 " connected from %u.%u.%u.%u (slot %d)",
+             conn->sid, (unsigned int)(conn->client_ip & 0xFF),
              (unsigned int)((conn->client_ip >> 8) & 0xFF),
              (unsigned int)((conn->client_ip >> 16) & 0xFF),
-             (unsigned int)((conn->client_ip >> 24) & 0xFF));
+             (unsigned int)((conn->client_ip >> 24) & 0xFF), slot_idx);
   }
 
   // Allocate buffer
@@ -262,15 +264,23 @@ static void client_task(void *pvParameters) {
   }
 
 cleanup:
-  ESP_LOGI(TAG, "Client slot %d disconnected", slot_idx);
+  ESP_LOGI(TAG, "sid=%" PRIu32 " disconnected (slot %d, %s)", conn->sid,
+           slot_idx,
+           slot->is_old       ? "replaced by new client"
+           : slot->should_stop ? "server stop"
+                               : "peer closed");
   free(buffer);
   close(slot->socket);
   slot->socket = -1;
 
-  // Immediate: stop audio and NTP
+  // Immediate: stop audio and NTP.  The output flush fades the block the
+  // render task holds, so even a dropped connection ends with a short ramp
+  // instead of a truncated waveform.
+  audio_output_resume();
   audio_receiver_stop();
   audio_output_flush();
   ntp_clock_stop();
+  slot->audio_released = true;
 
   bool has_dacp_remote = conn && conn->protocol_version == 1 &&
                          conn->dacp_id[0] != '\0' &&
@@ -373,6 +383,7 @@ cleanup:
   slot->task = NULL;
   slot->should_stop = false;
   slot->is_old = false;
+  slot->audio_released = false;
 
   vTaskDelete(NULL);
 }
@@ -481,13 +492,35 @@ static void server_task(void *pvParameters) {
         continue;
       }
     }
-    // Signal old client to stop (in background)
-    signal_old_client_stop(current_slot);
+    // Signal old client to stop, then give it a bounded head start.  Its
+    // cleanup stops the receiver and flushes the output; if the new client's
+    // SETUP were allowed to race that, the old task's audio_receiver_stop()
+    // could tear down the stream the new session had just started (observed
+    // as "connected but silent" on phone→Mac switches).  AirPlay senders
+    // tolerate a couple of seconds before their first request times out, so
+    // waiting for the audio side of the old session to release is safe.
+    // A v1 grace period (DACP) can keep the old TASK alive much longer; we
+    // only wait for the audio release, not the task exit.
+    if (clients[current_slot].task != NULL) {
+      signal_old_client_stop(current_slot);
+      int waited_ms = 0;
+      while (clients[current_slot].task != NULL &&
+             !clients[current_slot].audio_released && waited_ms < 2500) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        waited_ms += 20;
+      }
+      ESP_LOGI(TAG, "Hand-over: old session %s after %d ms",
+               clients[current_slot].task == NULL ? "exited"
+               : clients[current_slot].audio_released ? "released audio"
+                                                       : "still busy",
+               waited_ms);
+    }
 
     // Setup new slot
     clients[new_slot].socket = new_socket;
     clients[new_slot].should_stop = false;
     clients[new_slot].is_old = false;
+    clients[new_slot].audio_released = false;
 
     // Start new client task immediately.
     clients[new_slot].task = NULL;

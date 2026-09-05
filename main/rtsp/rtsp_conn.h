@@ -25,6 +25,16 @@ struct rtsp_conn {
   // 32768 = 0 dB (unity), 0 = mute
   volatile int32_t volume_q15;
   float volume_db;
+  // Stable identity of the sender (AirPlay 2 SETUP "deviceID", normalised),
+  // used to remember its volume.  Empty until the sender identifies itself.
+  char source_id[40];
+  char source_name[48];  // friendly name from SETUP, for logs/status
+  char source_model[32];
+  bool volume_from_sender; // a volume was received on this session
+  // Diagnostics: per-connection id and timestamps for the event log.
+  uint32_t sid;
+  int64_t connected_us;
+  uint32_t requests;
 
   // Audio streaming state
   bool stream_active;
@@ -90,6 +100,13 @@ void rtsp_conn_cleanup(rtsp_conn_t *conn);
  * @param volume_db Volume in dB (0 = max, -30 = mute)
  */
 void rtsp_conn_set_volume(rtsp_conn_t *conn, float volume_db);
+
+/**
+ * Bind the connection to a sender identity (from SETUP).  Restores that
+ * sender's remembered volume if it has not sent one itself yet.
+ */
+void rtsp_conn_identify_source(rtsp_conn_t *conn, const char *device_id,
+                               const char *name, const char *model);
 
 /**
  * Get volume as Q15 scale factor

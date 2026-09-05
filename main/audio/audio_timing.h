@@ -18,8 +18,24 @@ typedef struct {
   uint64_t anchor_network_time_ns;
   uint32_t anchor_rtp_time;
   int64_t anchor_local_time_ns;
+  // PTP clock identity named by the anchor (networkTimeTimelineID).  The
+  // clock domain is chosen ONCE per anchor and never changed while that
+  // anchor is in force: v0.2.0 re-evaluated ptp_clock_is_locked() on every
+  // frame and jumped between local time and PTP time mid-song, which is how
+  // a 222 000 s "error" and hundreds of dropped frames appeared in the logs.
+  uint64_t anchor_clock_id;
   int64_t ready_time_us; // When buffer became ready (0 = not ready yet)
-  bool ptp_locked;
+  bool ptp_locked;       // this anchor is scheduled on the PTP timeline
+  bool ptp_wait_expired; // gave up waiting for PTP; local timeline latched
+  // Set by audio_timing_read(): true when the returned block is real PCM,
+  // false when it is scheduled/alignment silence.  The render task uses it
+  // to drive the fade envelope only with actual media.
+  bool read_has_media;
+  // Acquisition diagnostics (reset per anchor).
+  int64_t acquire_err_us;   // signed error of the first released frame
+  uint32_t align_silence;   // frames of alignment silence emitted
+  uint32_t align_trimmed;   // frames trimmed from the first late block
+  bool acquired;            // first frame released since this anchor
   uint8_t *pending_frame;
   size_t pending_frame_len;
   size_t pending_frame_capacity;
@@ -60,6 +76,7 @@ typedef struct {
   int64_t pos_err_filtered_us;
   bool servo_engaged;
   uint8_t servo_phase;
+  uint8_t servo_interval; // current trim interval (tiered by error size)
   uint32_t servo_trims;
   // Quick-start flag: set after a seek/flush/track-change so that
   // audio_timing_read starts playback with just 1 buffered frame instead of
@@ -117,6 +134,14 @@ void audio_timing_set_anchor(audio_timing_t *timing,
                              const audio_format_t *format, uint64_t clock_id,
                              uint64_t network_time_ns, uint32_t rtp_time);
 void audio_timing_set_playing(audio_timing_t *timing, bool playing);
+/**
+ * Produce the next output block.  Returns the number of stereo frames
+ * written to `out` (at most `samples`).  `timing->read_has_media` tells the
+ * caller whether the block is PCM (true) or scheduled silence (false).
+ */
 size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
                          const audio_stream_t *stream, audio_stats_t *stats,
                          int16_t *out, size_t samples);
+
+/** Human-readable clock domain of the current anchor ("ptp"/"ntp"/"local"). */
+const char *audio_timing_sync_mode_name(const audio_timing_t *timing);

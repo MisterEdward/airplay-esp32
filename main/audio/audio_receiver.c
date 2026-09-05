@@ -295,6 +295,7 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
                (long)delta, (float)delta / sample_rate);
       audio_buffer_flush(&receiver.buffer);
       receiver.timing.playout_started = false;
+      receiver.timing.acquired = false;
       receiver.timing.pending_valid = false;
       receiver.timing.pending_frame_len = 0;
       receiver.timing.ready_time_us = 0;
@@ -336,6 +337,7 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
                (long)rtp_ahead, (float)rtp_ahead / sample_rate);
       audio_buffer_flush(&receiver.buffer);
       receiver.timing.playout_started = false;
+      receiver.timing.acquired = false;
       receiver.timing.pending_valid = false;
       receiver.timing.pending_frame_len = 0;
       receiver.timing.ready_time_us = 0;
@@ -459,7 +461,6 @@ esp_err_t audio_receiver_start(uint16_t data_port, uint16_t control_port) {
   audio_timing_reset(&receiver.timing);
   audio_receiver_reset_resend_state();
 
-  receiver.timing.ptp_locked = ptp_clock_is_locked();
   audio_receiver_reset_blocks();
 
   return receiver.stream->ops->start(receiver.stream, data_port);
@@ -484,7 +485,6 @@ esp_err_t audio_receiver_start_buffered(uint16_t tcp_port) {
   audio_timing_reset(&receiver.timing);
   audio_receiver_reset_resend_state();
 
-  receiver.timing.ptp_locked = ptp_clock_is_locked();
   audio_receiver_reset_blocks();
 
   return receiver.stream->ops->start(receiver.stream, tcp_port);
@@ -575,12 +575,25 @@ void audio_receiver_get_stats(audio_stats_t *stats) {
 }
 
 size_t audio_receiver_read(int16_t *buffer, size_t samples) {
-  if (!receiver.buffer.pool || !buffer || samples == 0) {
+  bool media = false;
+  return audio_receiver_read_ex(buffer, samples, &media);
+}
+
+size_t audio_receiver_read_ex(int16_t *buffer, size_t max_frames, bool *media) {
+  if (media) {
+    *media = false;
+  }
+  if (!receiver.buffer.pool || !buffer || max_frames == 0) {
     return 0;
   }
 
-  return audio_timing_read(&receiver.timing, &receiver.buffer, receiver.stream,
-                           &receiver.stats, buffer, samples);
+  size_t frames =
+      audio_timing_read(&receiver.timing, &receiver.buffer, receiver.stream,
+                        &receiver.stats, buffer, max_frames);
+  if (media) {
+    *media = frames > 0 && receiver.timing.read_has_media;
+  }
+  return frames;
 }
 
 bool audio_receiver_has_data(void) {

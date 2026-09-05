@@ -13,6 +13,7 @@
 #include "ptp_clock.h"
 #include "rtsp_server.h"
 #include "settings.h"
+#include "source_volume_store.h"
 #include "web_server.h"
 #include "log_stream.h"
 #include "wifi.h"
@@ -218,6 +219,7 @@ void app_main(void) {
   }
   ESP_ERROR_CHECK(ret);
   ESP_ERROR_CHECK(settings_init());
+  source_volume_store_init();
 #ifdef CONFIG_DAC_TAS57XX
   // Load persisted sub level offset (pre-init safe; applied on first volume).
   float sub_off;

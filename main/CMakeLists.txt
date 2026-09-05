@@ -3,6 +3,7 @@ set( SRC_FILES
     "alac_magic_cookie.c"
     "settings.c"
     "source_volume.c"
+    "source_volume_store.c"
     "audio/audio_receiver.c"
     "audio/audio_stream.c"
     "audio/audio_stream_realtime.c"

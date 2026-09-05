@@ -112,6 +112,13 @@ static struct {
 
   // Master clock filter (0 = accept any master)
   uint64_t expected_clock_id;
+  // Clock that produced the samples currently in the filter.  Learned from
+  // the first SYNC after a clear so that every sample in the filter comes
+  // from ONE clock even before AirPlay tells us which master to expect.
+  // When the anchor then names that same clock, the lock is kept instead of
+  // thrown away.
+  uint64_t tracked_clock_id;
+  uint32_t last_lock_log_ms;
 } ptp = {0};
 
 // Parse 8-byte clockIdentity (big-endian) from PTP sourcePortIdentity
@@ -323,15 +330,22 @@ static void process_ptp_message(const uint8_t *data, size_t len,
   uint8_t msg_type = data[0] & 0x0F;
   uint16_t seq = ((uint16_t)data[30] << 8) | data[31];
 
-  // If a master filter is set, reject messages from other clocks.
-  // This applies only to messages that contribute to offset estimation
-  // (SYNC / FOLLOW_UP); ANNOUNCE and others are ignored anyway.
-  if (ptp.expected_clock_id != 0 &&
-      (msg_type == PTP_MSG_SYNC || msg_type == PTP_MSG_FOLLOW_UP)) {
+  // Keep every offset sample in ONE clock domain.  Before the AirPlay anchor
+  // names the expected master, adopt the first source seen and reject the
+  // others (a LAN with a HomePod and a Mac has several PTP talkers).  Once
+  // the anchor names a master, only that one counts.
+  if (msg_type == PTP_MSG_SYNC || msg_type == PTP_MSG_FOLLOW_UP) {
     uint64_t src_clock_id = parse_ptp_clock_id(data);
-    if (src_clock_id != ptp.expected_clock_id) {
+    uint64_t want = ptp.expected_clock_id ? ptp.expected_clock_id
+                                          : ptp.tracked_clock_id;
+    if (want != 0 && src_clock_id != want) {
       ptp.rejected_master_count++;
       return;
+    }
+    if (ptp.tracked_clock_id == 0) {
+      ptp.tracked_clock_id = src_clock_id;
+      ESP_LOGI(TAG, "Tracking PTP source %016llx",
+               (unsigned long long)src_clock_id);
     }
   }
 
@@ -559,10 +573,15 @@ void ptp_clock_clear(void) {
 
   ptp.sync_count = 0;
   ptp.followup_count = 0;
+  ptp.rejected_master_count = 0;
+  ptp.outlier_count = 0;
+  ptp.raw_offset_ns = 0;
 
   // Drop the master filter so the next session can lock to whatever master
   // its anchor packet names (which may differ from the previous session).
   ptp.expected_clock_id = 0;
+  ptp.tracked_clock_id = 0;
+  ESP_LOGI(TAG, "PTP state cleared");
 }
 
 void ptp_clock_notify_resume(uint32_t pause_duration_ms) {
@@ -615,12 +634,30 @@ void ptp_clock_set_master_clock_id(uint64_t clock_id) {
     return;
   }
 
-  ESP_LOGI(TAG, "PTP master clock_id %s: %016llx", clock_id ? "set" : "cleared",
-           (unsigned long long)clock_id);
-  ptp.expected_clock_id = clock_id;
+  // The usual case: PTP locked to the phone's clock BEFORE the anchor named
+  // it.  If the anchor names the clock we have been tracking, pin it and
+  // KEEP the samples and the lock.  v0.2.0 reset the filter here every
+  // time, so the very first anchor of every session was scheduled against
+  // offset=0 — a hundreds-of-thousands-of-seconds error that the late-frame
+  // drain then "corrected" by throwing audio away.
+  if (clock_id != 0 && clock_id == ptp.tracked_clock_id &&
+      ptp.sample_count > 0) {
+    ptp.expected_clock_id = clock_id;
+    ESP_LOGI(TAG, "PTP master pinned to tracked source %016llx (locked=%d, "
+                  "samples=%lu)",
+             (unsigned long long)clock_id, ptp.locked,
+             (unsigned long)ptp.sample_count);
+    return;
+  }
 
-  // Drop accumulated samples / lock state — they may have come from a
-  // different (wrong) master.
+  ESP_LOGI(TAG, "PTP master clock_id %s: %016llx (was tracking %016llx)",
+           clock_id ? "set" : "cleared", (unsigned long long)clock_id,
+           (unsigned long long)ptp.tracked_clock_id);
+  ptp.expected_clock_id = clock_id;
+  ptp.tracked_clock_id = clock_id;
+
+  // Drop accumulated samples / lock state — they came from a different
+  // master.
   ptp.locked = false;
   ptp.lock_start_ms = 0;
   ptp.lock_candidate_start_ms = 0;
@@ -633,6 +670,15 @@ void ptp_clock_set_master_clock_id(uint64_t clock_id) {
 
 uint64_t ptp_clock_get_master_clock_id(void) {
   return ptp.expected_clock_id;
+}
+
+bool ptp_clock_is_locked_to(uint64_t clock_id) {
+  return clock_id != 0 && ptp_clock_is_locked() &&
+         ptp.tracked_clock_id == clock_id;
+}
+
+uint64_t ptp_clock_get_tracked_clock_id(void) {
+  return ptp.tracked_clock_id;
 }
 
 void ptp_clock_get_stats(ptp_stats_t *stats) {

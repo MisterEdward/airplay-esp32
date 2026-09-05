@@ -16,6 +16,9 @@
  */
 
 #include "audio_output.h"
+#include "audio_receiver.h"
+
+#include <string.h>
 
 __attribute__((weak)) bool audio_output_get_pipeline_us(int64_t *now_us,
                                                         uint32_t *pipeline_us) {
@@ -52,4 +55,41 @@ __attribute__((weak)) bool audio_output_channel_mode_locked(void) {
 
 __attribute__((weak)) bool audio_output_channel_mode_in_dsp(void) {
   return false;
+}
+
+/* Transition shaping and source arbitration are implemented by the I2S
+ * backend.  Other backends get inert defaults so the control plane links. */
+__attribute__((weak)) void audio_output_pause(void) {
+  audio_receiver_pause();
+}
+
+__attribute__((weak)) void audio_output_resume(void) {
+}
+
+__attribute__((weak)) void
+audio_output_register_external_source(audio_output_pull_fn fn, void *ctx) {
+  (void)fn;
+  (void)ctx;
+}
+
+__attribute__((weak)) void audio_output_select_source(audio_source_t source) {
+  (void)source;
+}
+
+__attribute__((weak)) audio_source_t audio_output_active_source(void) {
+  return AUDIO_SOURCE_AIRPLAY;
+}
+
+__attribute__((weak)) void
+audio_output_set_source_volume(audio_source_t source, int32_t volume_q15,
+                               bool immediate) {
+  (void)source;
+  (void)volume_q15;
+  (void)immediate;
+}
+
+__attribute__((weak)) void audio_output_get_stats(audio_output_stats_t *out) {
+  if (out) {
+    memset(out, 0, sizeof(*out));
+  }
 }

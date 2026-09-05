@@ -448,6 +448,11 @@ int rtsp_dispatch(int socket, rtsp_conn_t *conn, const uint8_t *raw_request,
     ESP_LOGW(TAG, "Failed to parse RTSP request");
     return -1;
   }
+  conn->requests++;
+  ESP_LOGD(TAG, "sid=%" PRIu32 " #%" PRIu32 " %s %s cseq=%d body=%u "
+                "paused=%d active=%d",
+           conn->sid, conn->requests, req.method, req.path, req.cseq,
+           (unsigned)req.body_len, conn->stream_paused, conn->stream_active);
 
   // Extract DACP headers if present (AirPlay 1 only — modern iOS AirPlay 2
   // does not send these; it uses MRP for remote control instead).
@@ -1227,7 +1232,27 @@ static void handle_setup(int socket, rtsp_conn_t *conn,
       return;
     }
 
-    ESP_LOGI(TAG, "SETUP: Initial connection setup (no streams)");
+    ESP_LOGI(TAG, "sid=%" PRIu32 " SETUP: initial connection setup (no streams)",
+             conn->sid);
+
+    // The initial SETUP bplist carries the sender's identity: deviceID (a
+    // MAC-style string, stable per device), name and model.  Bind the
+    // connection to it so this sender's volume can be remembered.
+    if (is_bplist && body && body_len > 8) {
+      char device_id[64] = {0};
+      char name[48] = {0};
+      char model[32] = {0};
+      bplist_find_string(body, body_len, "name", name, sizeof(name));
+      bplist_find_string(body, body_len, "model", model, sizeof(model));
+      if (bplist_find_string(body, body_len, "deviceID", device_id,
+                             sizeof(device_id))) {
+        rtsp_conn_identify_source(conn, device_id, name, model);
+      } else {
+        ESP_LOGI(TAG, "sid=%" PRIu32 " SETUP has no deviceID (name='%s' "
+                      "model='%s')",
+                 conn->sid, name, model);
+      }
+    }
 
     if (is_bplist) {
       uint8_t plist_body[128];
@@ -1369,9 +1394,12 @@ static void handle_setup(int socket, rtsp_conn_t *conn,
   dac_set_volume(conn->volume_db);
 #endif
 
+  audio_output_resume();
   audio_receiver_set_playing(true);
   conn->stream_paused = false;
   conn->stream_active = true;
+  ESP_LOGI(TAG, "sid=%" PRIu32 " stream ready: type=%lld buffered=%d",
+           conn->sid, (long long)stream_type, buffered);
   // RECORD emits PLAYING on the initial connection only; a resume after a
   // stream TEARDOWN sends just a new SETUP, so emit it here too or the DAC
   // stays in the standby it entered on pause and the stream plays silent.
@@ -1398,6 +1426,7 @@ static void handle_record(int socket, rtsp_conn_t *conn,
     // timing anchor has been preserved.  Just re-enable playout; the
     // pause-duration offset in audio_timing will re-align the timestamps.
     ESP_LOGI(TAG, "RECORD: resuming from pause, skipping stream restart");
+    audio_output_resume();
     audio_receiver_set_playing(true);
   } else {
     // Fresh start or post-teardown reconnect: full stream restart.
@@ -1408,6 +1437,7 @@ static void handle_record(int socket, rtsp_conn_t *conn,
       audio_receiver_set_client_control(conn->client_ip,
                                         conn->client_control_port);
     }
+    audio_output_resume();
     audio_receiver_set_playing(true);
   }
   conn->stream_paused = false;
@@ -1707,11 +1737,9 @@ static void handle_pause(int socket, rtsp_conn_t *conn,
 
   ESP_LOGI(TAG, "PAUSE received");
 
-  // Stop the audio consumer but leave the buffer filling.  The phone will
-  // send a fresh SETRATEANCHORTIME (rate=1) anchor on resume that re-aligns
-  // the buffered frames to the correct wall-clock position.
-  audio_receiver_pause();
-  audio_output_flush();
+  // Fade out, then the render task pauses the receiver.  The buffer keeps
+  // filling; the fresh anchor on resume re-aligns it.
+  audio_output_pause();
   conn->stream_paused = true;
 
   rtsp_send_ok(socket, conn, req->cseq);
@@ -1724,7 +1752,7 @@ static void handle_flush(int socket, rtsp_conn_t *conn,
   (void)raw_len;
 
   // Plain AirPlay 1 FLUSH — always immediate.
-  ESP_LOGI(TAG, "FLUSH received");
+  ESP_LOGI(TAG, "sid=%" PRIu32 " FLUSH (immediate)", conn->sid);
   audio_receiver_seek_flush();
   audio_output_flush();
   rtsp_send_ok(socket, conn, req->cseq);
@@ -1772,7 +1800,8 @@ static void handle_flushbuffered(int socket, rtsp_conn_t *conn,
       // let it drain naturally to the boundary so the current track finishes.
       audio_receiver_set_deferred_flush((uint32_t)flush_until_ts);
     } else {
-      ESP_LOGI(TAG, "FLUSHBUFFERED immediate (missing from/until fields)");
+      ESP_LOGI(TAG, "sid=%" PRIu32 " FLUSHBUFFERED immediate (no from/until)",
+               conn->sid);
     }
   }
 
@@ -1804,8 +1833,8 @@ static void handle_teardown(int socket, rtsp_conn_t *conn,
 
   // TEARDOWN with streams = stream teardown (may be followed by new SETUP)
   // TEARDOWN without streams = full session teardown (disconnect)
-  ESP_LOGI(TAG, "TEARDOWN: has_streams=%d stream_count=%zu", has_streams,
-           stream_count);
+  ESP_LOGI(TAG, "sid=%" PRIu32 " TEARDOWN: has_streams=%d stream_count=%zu",
+           conn->sid, has_streams, stream_count);
   // Stream-level teardown is a pause: freeze playout immediately so audio
   // silences on ALL boards. playing=false makes the output emit silence at
   // once (software mute, for software-volume/DAC-less boards); the synchronous
@@ -1816,6 +1845,7 @@ static void handle_teardown(int socket, rtsp_conn_t *conn,
     audio_receiver_set_playing(false);
     rtsp_events_emit(RTSP_EVENT_PAUSED, NULL);
   }
+  audio_output_resume(); // cancel any pending pause fade; flush shapes the end
   audio_receiver_stop();
   audio_output_flush();
   // Drop PTP lock + offset history.  AirPlay group rejoins reuse the same
@@ -1883,9 +1913,11 @@ static void handle_setrateanchortime(int socket, rtsp_conn_t *conn,
       rtp_time = (uint64_t)value;
     }
 
-    ESP_LOGI(TAG, "SETRATEANCHORTIME: secs=%llu, rtp=%llu, rate=%.1f",
-             (unsigned long long)network_time_secs,
-             (unsigned long long)rtp_time, rate);
+    ESP_LOGI(TAG,
+             "sid=%" PRIu32 " SETRATEANCHORTIME secs=%llu rtp=%llu rate=%.1f "
+             "clock=%016llx",
+             conn->sid, (unsigned long long)network_time_secs,
+             (unsigned long long)rtp_time, rate, (unsigned long long)clock_id);
 
     if (network_time_secs != 0 && rtp_time != 0) {
       uint64_t frac = network_time_frac >> 32;
@@ -1897,16 +1929,20 @@ static void handle_setrateanchortime(int socket, rtsp_conn_t *conn,
   }
 
   if (rate == 0.0) {
-    ESP_LOGI(TAG, "SETRATEANCHORTIME: rate=0 -> PAUSING");
-    // Mute the DAC first via the synchronous event so audio stops now.
+    ESP_LOGI(TAG, "sid=%" PRIu32 " SETRATEANCHORTIME rate=0 -> PAUSE (fade)",
+             conn->sid);
+    // Fade out (~100 ms) with real audio, then the render task pauses the
+    // receiver.  A seek on the wire is "rate=0, FLUSHBUFFERED, rate=1" a few
+    // tens of ms apart; the flush cancels the pending pause.
+    audio_output_pause();
     rtsp_events_emit(RTSP_EVENT_PAUSED, NULL);
     conn->stream_paused = true;
-    audio_receiver_pause();
-    audio_output_flush();
   } else {
-    ESP_LOGI(TAG, "SETRATEANCHORTIME: rate=%.1f -> RESUMING (was_paused=%d)",
-             rate, conn->stream_paused);
+    ESP_LOGI(TAG, "sid=%" PRIu32 " SETRATEANCHORTIME rate=%.1f -> PLAY "
+                  "(was_paused=%d)",
+             conn->sid, rate, conn->stream_paused);
     conn->stream_paused = false;
+    audio_output_resume();
     audio_receiver_set_playing(true);
     rtsp_events_emit(RTSP_EVENT_PLAYING, NULL);
   }

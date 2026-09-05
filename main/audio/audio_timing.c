@@ -4,6 +4,7 @@
 
 #include "audio_timing.h"
 
+#include "audio_align.h"
 #include "audio_output.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -14,85 +15,100 @@
 // Additional pipeline latency to account for task scheduling, I2S write
 // blocking, and resampler processing.  Without this, frames pass the
 // timing check "on time" but actually exit the speaker several ms later.
-#define PIPELINE_LATENCY_US 5000 // ~5ms scheduling + write delay
+// With the render task's one-block look-ahead now included in the measured
+// pipeline, this covers only scheduling jitter and the resampler's group
+// delay (taps/2 samples ≈ 0.3 ms).
+#define PIPELINE_LATENCY_US 1500
 #define MIN_STARTUP_FRAMES  4
 
-// Position servo: corrects small standing playout offsets by trimming or
-// duplicating single samples.  Residual position errors arise from
-// drop-recovery after network stalls (bounded by the late threshold) and
-// from crystal drift accumulating between sender and local clock (~10-40
-// ppm, i.e. 40-140 ms/hour) — inside the early/late gate's dead zone nothing
-// else corrects position, so without this a 20 ms post-stall bias persists
-// for the rest of the session (observed on hardware).
+// ---------------------------------------------------------------------------
+// Two regimes, deliberately kept apart:
 //
-// Control law, and why the earlier (removed) servo failed: that design
-// compared the ABSOLUTE error against a deadband and "credited" each trim
-// back onto the filtered error.  Against the then-undiagnosed 250 ms
-// structural offset the credit was ~1000x weaker than the filter's
-// re-tracking, so it pinned at max authority — a continuous 0.28% stretch.
-// This design has no credit term (trims change reality; the filter simply
-// tracks it), engages only outside POS_SERVO_ENGAGE_US with hysteresis, and
-// is rate-limited to one sample per POS_SERVO_TRIM_INTERVAL frames:
-//   1 / (352 x 4) = 710 ppm = 0.07% pitch deviation (inaudible; JND ~0.2%).
-// Saturation is impossible by construction: the early/late gate bounds any
-// played frame's error to +/-threshold (50 ms realtime), and 50 ms at
-// 710 ppm converges in ~70 s, after which the servo disengages.
-#define POS_SERVO_FILTER_DIV    16   // IIR divisor, ~0.13 s time constant
-#define POS_SERVO_ENGAGE_US     5000 // engage when |filtered err| exceeds this
-#define POS_SERVO_DISENGAGE_US  1500 // disengage when it falls below this
-#define POS_SERVO_TRIM_INTERVAL 4    // one 1-sample trim per this many frames
+//  ACQUISITION — the first frame after start / seek / track change / a gap or
+//  a drop run.  Here the error is corrected EXACTLY, once: if the frame is
+//  early by E µs we emit ceil(E) frames of silence first; if it is late by L µs
+//  we discard the first floor(L) frames of the block.  The first audible sample
+//  therefore lands within one sample period of its scheduled instant.  Nothing
+//  is slewed.  This is what makes a seek line up with the other speakers in a
+//  group immediately instead of "drifting into place" over 20 s.
+//
+//  TRACKING — everything after that.  The only remaining error sources are
+//  crystal drift between the sender's clock and ours (10-40 ppm) and slow bias
+//  in the pipeline measurement.  A slow servo trims or duplicates single
+//  samples, always at the frame's quietest point, so the correction is
+//  inaudible.  Its authority is tiered by the size of the filtered error, so a
+//  disturbance is removed in seconds while steady state stays at a gentle
+//  710 ppm.
+// ---------------------------------------------------------------------------
+
+// Position servo (tracking regime).
+//
+// Control law: filter the per-frame error with a clamped-innovation IIR,
+// engage outside a hysteresis band, trim one sample every `interval` frames
+// until back inside.  No credit term — a trim changes the real playout
+// position and the filter simply tracks it.  The innovation clamp survives
+// the one-sided "late read" noise described below.
+#define POS_SERVO_FILTER_DIV   16   // IIR divisor, ~0.13 s time constant
+#define POS_SERVO_ENGAGE_US    2500 // engage when |filtered err| exceeds this
+#define POS_SERVO_DISENGAGE_US 800  // disengage when it falls below this
+// Tiered trim intervals (frames per one-sample trim), 352-frame chunks:
+//   interval 4 → 710 ppm  (inaudible; steady state)
+//   interval 2 → 1420 ppm (still below the ~2000 ppm pitch JND)
+//   interval 1 → 2841 ppm (used only for errors > POS_SERVO_TIER2_US, i.e.
+//                          a real disturbance; shairport-sync's default
+//                          stuffing rate is the same 1 sample/frame)
+#define POS_SERVO_TIER1_US       6000 // > this → interval 2
+#define POS_SERVO_TIER2_US       15000 // > this → interval 1
+#define POS_SERVO_INTERVAL_SLOW  4
+#define POS_SERVO_INTERVAL_MED   2
+#define POS_SERVO_INTERVAL_FAST  1
 // Innovation clamp: cap how far one frame's measurement can move the filter.
-// The per-frame error measurement is NOISY in a one-sided way: the DMA ring
-// holds ~40 ms of queued audio, so when the playback task is briefly starved
-// (WiFi, metadata bursts) the READ happens late and the measurement says
-// "late" — but the audio on the wire never moved; the ring absorbed the
-// delay.  These artifacts are always negative (a delayed read can only
-// measure late), so an unclamped average is dragged below the true position
-// and the servo chases offsets that do not exist.  Observed on hardware:
-// engage/disengage chatter every few seconds with apparent inter-cycle
-// "drift" of 750-1650 ppm — 20-60x anything a crystal can do — alongside
-// single-frame err spikes of -22 ms next to -2 ms readings.  With the clamp,
-// a -22 ms spike moves the filter by at most CLAMP/DIV ~= 94 us, so spike
-// clusters cannot reach the engage threshold, while a REAL standing offset
+// The per-frame error measurement is NOISY in a one-sided way: when the
+// render task is briefly starved (WiFi, metadata bursts) the READ happens
+// late and the measurement says "late" — but the audio on the wire never
+// moved; the DMA ring absorbed the delay.  These artifacts are always
+// negative, so an unclamped average is dragged below the true position and
+// the servo chases offsets that do not exist.  With the clamp a -22 ms spike
+// moves the filter by at most CLAMP/DIV ≈ 94 µs, while a REAL standing offset
 // (present on every frame) still walks the filter to engagement in ~0.5 s.
 #define POS_SERVO_INNOV_CLAMP_US 1500
 
-// Every audio output backend (I2S, S/PDIF, USB) allocates its read buffer as
-// (FRAME_SAMPLES + 1) * 2 int16 samples — i.e. interleaved stereo — and the
-// output stage is stereo regardless of what an incoming frame header claims.
-// Writes into the caller's buffer must therefore be bounded by this constant,
-// never by hdr->channels.
+// Every audio output backend allocates its read buffer as interleaved
+// stereo, and the output stage is stereo regardless of what an incoming
+// frame header claims.  Writes into the caller's buffer must therefore be
+// bounded by this constant, never by hdr->channels.
 #define AUDIO_OUT_CHANNELS 2
 
-// Early/late threshold: how far a frame may be early (held as pending) or late
-// (dropped) before the timing engine acts.  Buffered AirPlay 2 streams have a
-// deep jitter buffer so a tight threshold keeps sync without drop-outs.
-// Unbuffered realtime streams (ALAC/UDP) have almost no buffer to absorb
-// scheduling hiccups — e.g. when artwork/metadata arrives on the RTSP
-// connection — so they need a much looser threshold to avoid audible
-// drop-outs.  Both are configurable via Kconfig.
+// Early/late threshold in the TRACKING regime: how far a contiguous frame
+// may be early (held) or late (dropped) before the engine re-acquires.
+// Buffered AirPlay 2 streams have a deep jitter buffer so a tight threshold
+// keeps sync without drop-outs; unbuffered realtime streams (ALAC/UDP) need
+// a looser one to survive scheduling hiccups.  Both are Kconfig-tunable.
 #ifdef CONFIG_AIRPLAY_TIMING_THRESHOLD_MS
 #define TIMING_THRESHOLD_US (CONFIG_AIRPLAY_TIMING_THRESHOLD_MS * 1000)
 #else
-#define TIMING_THRESHOLD_US 25000 // 25ms early/late threshold (buffered)
+#define TIMING_THRESHOLD_US 25000
 #endif
 
 #ifdef CONFIG_AIRPLAY_RT_TIMING_THRESHOLD_MS
 #define RT_TIMING_THRESHOLD_US (CONFIG_AIRPLAY_RT_TIMING_THRESHOLD_MS * 1000)
 #else
-#define RT_TIMING_THRESHOLD_US 50000 // 50ms early/late threshold (realtime)
+#define RT_TIMING_THRESHOLD_US 50000
 #endif
-// MAX_CONSECUTIVE_EARLY: safety valve — counts how many consecutive calls to
-// audio_timing_read returned silence because the pending frame was still too
-// early.  Each call corresponds to one DMA period (~46 ms on I2S at 44100 Hz).
-// 50 calls × 46 ms ≈ 2.3 s: long enough that a legitimate pre-buffer of any
-// realistic depth will never hit it, short enough to detect a genuinely stuck
-// or invalid anchor in a few seconds.
-#define MAX_CONSECUTIVE_EARLY 50
+
+// Safety valve: consecutive NEW frames found too early.  Each corresponds to
+// a buffer read (~8 ms of output), so 400 ≈ 3+ s of "everything is early"
+// — long enough for any legitimate pre-buffer, short enough to catch a
+// stuck or absurd anchor.  Pending re-checks of the same frame do not count.
+#define MAX_CONSECUTIVE_EARLY 400
+
+// How long to wait for the PTP filter to lock to the clock an AirPlay 2
+// anchor names before falling back to the local timeline for that anchor.
+// PTP normally locks in <500 ms; 1.5 s covers a slow first SYNC without
+// making a cold start feel sluggish.
+#define PTP_LOCK_WAIT_US 1500000LL
 
 static const char *TAG = "audio_time";
-// consecutive_early_frames is now a field in audio_timing_t so it resets
-// automatically whenever a new anchor is set.
 
 static uint32_t frame_samples_from_format(const audio_format_t *format) {
   if (format->frame_size > 0) {
@@ -131,6 +147,34 @@ typedef enum {
   SYNC_MODE_NTP,  // AirPlay 1 NTP sync
 } sync_mode_t;
 
+// The clock domain is decided per anchor and held (see anchor_clock_id).
+static sync_mode_t current_sync_mode(const audio_timing_t *timing) {
+  if (timing->ptp_locked) {
+    // Once latched, stay on the PTP timeline even if the lock flag drops
+    // (a 5 s SYNC gap): ptp_clock_get_offset_ns() keeps the last filtered
+    // offset, which is far closer to the truth than a jump to local time.
+    return SYNC_MODE_PTP;
+  }
+  if (timing->anchor_clock_id == 0 && ntp_clock_is_locked()) {
+    return SYNC_MODE_NTP;
+  }
+  return SYNC_MODE_NONE;
+}
+
+const char *audio_timing_sync_mode_name(const audio_timing_t *timing) {
+  if (!timing) {
+    return "?";
+  }
+  switch (current_sync_mode(timing)) {
+  case SYNC_MODE_PTP:
+    return "ptp";
+  case SYNC_MODE_NTP:
+    return "ntp";
+  default:
+    return "local";
+  }
+}
+
 // Compute how early (positive) or late (negative) a frame is in microseconds
 static bool compute_early_us(const audio_timing_t *timing,
                              const audio_format_t *format,
@@ -150,16 +194,6 @@ static bool compute_early_us(const audio_timing_t *timing,
   // 11025 samples (250 ms) unless SETUP negotiates otherwise.  Every
   // reference receiver applies this delay; playing at the anchor instant
   // directly makes this device lead the whole group by exactly 250 ms.
-  //
-  // Field evidence, all fitting latencyMin = 11025 within a few ms:
-  //   - steady jitter-buffer depth measured 1604-1748 ms, median 1716 ms:
-  //     the sender transmits 88200 samples (2 s) ahead of the play deadline,
-  //     so a receiver that fails to wait 11025 holds 88200-11025 = 77175
-  //     samples = 1750 ms;
-  //   - "First early frame" at stream start: 1711/1709 ms early vs anchor;
-  //   - issue #54: a +300 ms manual offset on a build subtracting 46 ms of
-  //     hardware latency (net +254 ms) produced near-perfect sync.
-  //
   // Buffered streams (type 103) schedule playout with the anchor directly
   // and keep this at 0.
   int64_t latency_ns =
@@ -169,43 +203,22 @@ static bool compute_early_us(const audio_timing_t *timing,
   int64_t target_ns;
   switch (sync_mode) {
   case SYNC_MODE_PTP:
-    // AirPlay 2: use network time with PTP offset for multi-room sync
     target_ns = (int64_t)timing->anchor_network_time_ns -
                 ptp_clock_get_offset_ns() + frame_offset_ns + latency_ns;
     break;
   case SYNC_MODE_NTP:
-    // AirPlay 1: use network time with NTP offset for multi-room sync
-    // offset = remote_time - local_time, so local = remote - offset
     target_ns = (int64_t)timing->anchor_network_time_ns -
                 ntp_clock_get_offset_ns() + frame_offset_ns + latency_ns;
     break;
   default:
-    // Fallback: use local anchor time (no multi-room sync)
     target_ns = timing->anchor_local_time_ns + frame_offset_ns + latency_ns;
     break;
   }
 
   // Subtract the output pipeline delay: the time between this call handing a
-  // sample to the backend and that sample leaving the DAC.
-  //
-  // Prefer the LIVE measurement (frames accepted by the hardware minus frames
-  // the hardware reports as clocked out).  The modelled constant is only a
-  // fallback for backends without a completion cursor, and it is wrong in the
-  // two situations that matter:
-  //
-  //   - it assumes the ring is always at its steady-state occupancy, so when
-  //     the playback task is briefly starved the read happens late against a
-  //     ring that is emptier than modelled and the error reads far more
-  //     negative than reality (the one-sided noise the position servo's
-  //     innovation clamp was added to survive);
-  //   - after a real underrun the ring is dry, so the next sample is heard
-  //     almost immediately rather than ~43 ms later.  With the model the
-  //     engine cannot tell the difference and the lost output time is never
-  //     recovered — the mechanism behind the drift in issue #122.
-  //
-  // The live depth is self-consistent while the ring refills: each frame
-  // consumed adds its own duration to the queue, so the measured error stays
-  // put instead of walking, and no extra frames are dropped during recovery.
+  // sample to the backend and that sample leaving the DAC.  Prefer the LIVE
+  // measurement (DMA queue depth + the render task's held block); the
+  // modelled constant is only a fallback for backends without a cursor.
   int64_t now_us = 0;
   uint32_t pipeline_us = 0;
   if (!audio_output_get_pipeline_us(&now_us, &pipeline_us)) {
@@ -222,8 +235,7 @@ static bool compute_early_us(const audio_timing_t *timing,
 // Index of the quietest sample in a frame (smallest summed magnitude across
 // the output channels).  Servo trims drop or duplicate exactly one sample;
 // doing that at the frame's quietest point makes the waveform seam
-// inaudible even on loud tonal content, where trimming the frame's last
-// sample regardless of amplitude could produce a faint click.
+// inaudible even on loud tonal content.
 static size_t quietest_sample_index(const int16_t *pcm, size_t frame_samples,
                                     size_t channels, size_t out_ch) {
   size_t best = frame_samples - 1;
@@ -250,6 +262,7 @@ void audio_timing_init(audio_timing_t *timing, size_t pending_capacity) {
   memset(timing, 0, sizeof(*timing));
   timing->output_latency_us = DEFAULT_BUFFER_LATENCY_US;
   timing->playing = true;
+  timing->servo_interval = POS_SERVO_INTERVAL_SLOW;
 
   if (pending_capacity > 0) {
     timing->pending_frame = (uint8_t *)malloc(pending_capacity);
@@ -267,6 +280,7 @@ void audio_timing_reset_continuity(audio_timing_t *timing) {
   timing->pos_err_filtered_us = 0;
   timing->servo_engaged = false;
   timing->servo_phase = 0;
+  timing->servo_interval = POS_SERVO_INTERVAL_SLOW;
 }
 
 void audio_timing_reset(audio_timing_t *timing) {
@@ -276,6 +290,9 @@ void audio_timing_reset(audio_timing_t *timing) {
 
   timing->playout_started = false;
   timing->anchor_valid = false;
+  timing->anchor_clock_id = 0;
+  timing->ptp_locked = false;
+  timing->ptp_wait_expired = false;
   timing->pending_valid = false;
   timing->pending_frame_len = 0;
   timing->ready_time_us = 0;
@@ -286,6 +303,11 @@ void audio_timing_reset(audio_timing_t *timing) {
   timing->late_drop_count = 0;
   timing->late_drop_active = false;
   timing->servo_trims = 0;
+  timing->acquired = false;
+  timing->acquire_err_us = 0;
+  timing->align_silence = 0;
+  timing->align_trimmed = 0;
+  timing->read_has_media = false;
   audio_timing_reset_continuity(timing);
 }
 
@@ -322,13 +344,6 @@ uint32_t audio_timing_get_hardware_latency(void) {
 }
 
 uint32_t audio_timing_get_advertised_latency(const audio_timing_t *timing) {
-  // Total end-to-end latency between the phone scheduling a frame and the
-  // DAC emitting it.  Reported to the phone in outputLatencyMicros so it
-  // schedules sends to land in our sorted buffer at the right time.
-  //
-  //   output_latency_us         — controller target (jitter-buffer depth)
-  // + audio_output_get_hardware_latency_us() — I2S DMA delay (dynamic)
-  // + PIPELINE_LATENCY_US — scheduling + write delay constant
   uint32_t base =
       timing ? timing->output_latency_us : DEFAULT_BUFFER_LATENCY_US;
   return base + audio_output_get_hardware_latency_us() + PIPELINE_LATENCY_US;
@@ -349,30 +364,41 @@ void audio_timing_set_anchor(audio_timing_t *timing,
     return;
   }
 
-  (void)clock_id;
-
   int64_t now_ns = (int64_t)esp_timer_get_time() * 1000LL;
 
   timing->anchor_rtp_time = rtp_time;
   timing->anchor_network_time_ns = network_time_ns;
   timing->anchor_local_time_ns = now_ns;
-  timing->ptp_locked = ptp_clock_is_locked();
+  timing->anchor_clock_id = clock_id;
+  // Latch the clock domain for this anchor.  AirPlay 2 anchors name the
+  // PTP master; only schedule on the PTP timeline if OUR filter is locked to
+  // THAT clock.  Otherwise audio_timing_read() waits briefly for the lock.
+  timing->ptp_locked =
+      clock_id != 0 ? ptp_clock_is_locked_to(clock_id) : ptp_clock_is_locked();
+  timing->ptp_wait_expired = false;
   timing->anchor_valid = true;
-  // Reset frame counters so pre-buffered audio after a pause/resume or
-  // track skip does not accumulate into the new anchor's counts.
   timing->consecutive_early_frames = 0;
+  // A new anchor is a new schedule: the first frame under it is acquired
+  // exactly, whatever was playing before.
+  timing->acquired = false;
+  timing->acquire_err_us = 0;
+  timing->align_silence = 0;
+  timing->align_trimmed = 0;
 
-  // Compute lead time: how far in the future this anchor's network timestamp
-  // is relative to now.  Negative means the anchor is already in the past
-  // (normal: the phone pre-buffers and the anchor is 200–800 ms old by the
-  // time we receive it).
-  int64_t lead_ms = ((int64_t)network_time_ns -
-                     (int64_t)(ptp_clock_get_offset_ns() + now_ns)) /
-                    1000000LL;
-  ESP_LOGI(
-      TAG,
-      "Anchor set: rtp=%" PRIu32 " lead=%lld ms ptp_locked=%d quick_start=%d",
-      rtp_time, (long long)lead_ms, timing->ptp_locked, timing->quick_start);
+  // Lead time: how far in the future the anchor's network timestamp is.
+  // Negative means already in the past (normal: the phone anchors ~10 ms
+  // before the first frame it wants heard).
+  int64_t lead_ms = 0;
+  if (timing->ptp_locked) {
+    lead_ms = ((int64_t)network_time_ns -
+               (int64_t)(ptp_clock_get_offset_ns() + now_ns)) /
+              1000000LL;
+  }
+  ESP_LOGI(TAG,
+           "Anchor: rtp=%" PRIu32 " clock=%016llx lead=%lld ms domain=%s "
+           "quick_start=%d",
+           rtp_time, (unsigned long long)clock_id, (long long)lead_ms,
+           audio_timing_sync_mode_name(timing), timing->quick_start);
 }
 
 void audio_timing_set_playing(audio_timing_t *timing, bool playing) {
@@ -380,8 +406,11 @@ void audio_timing_set_playing(audio_timing_t *timing, bool playing) {
     return;
   }
 
-  ESP_LOGI(TAG, "set_playing: %s -> %s", timing->playing ? "playing" : "paused",
-           playing ? "playing" : "paused");
+  if (timing->playing != playing) {
+    ESP_LOGI(TAG, "set_playing: %s -> %s",
+             timing->playing ? "playing" : "paused",
+             playing ? "playing" : "paused");
+  }
 
   timing->playing = playing;
   if (!playing) {
@@ -392,12 +421,31 @@ void audio_timing_set_playing(audio_timing_t *timing, bool playing) {
   }
 }
 
+// Release a frame slot back to wherever it came from.
+static void release_item(audio_timing_t *timing, audio_buffer_t *buffer,
+                         void *item, bool from_pending) {
+  if (from_pending) {
+    timing->pending_valid = false;
+    timing->pending_frame_len = 0;
+  } else {
+    audio_buffer_return(buffer, item);
+  }
+}
+
+// Emit `frames` frames of silence and report it as non-media.
+static size_t emit_silence(audio_timing_t *timing, int16_t *out, size_t frames) {
+  memset(out, 0, frames * AUDIO_OUT_CHANNELS * sizeof(int16_t));
+  timing->read_has_media = false;
+  return frames;
+}
+
 size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
                          const audio_stream_t *stream, audio_stats_t *stats,
                          int16_t *out, size_t samples) {
   if (!timing || !buffer || !stream || !out || samples == 0) {
     return 0;
   }
+  timing->read_has_media = false;
 
   if (!timing->playing) {
     return 0;
@@ -406,66 +454,66 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
   const audio_format_t *format = &stream->format;
   int buffered_frames = audio_buffer_get_frame_count(buffer);
 
-  // Unbuffered realtime streams (ALAC/UDP) get a looser early/late threshold
-  // than buffered AirPlay 2 streams, because they have little jitter buffer to
-  // absorb scheduling hiccups and would otherwise drop frames (audible
-  // drop-outs) whenever the pipeline stalls — e.g. while artwork/metadata is
-  // received on the RTSP connection.
   const int64_t timing_threshold_us = audio_stream_uses_buffer(stream->type)
                                           ? TIMING_THRESHOLD_US
                                           : RT_TIMING_THRESHOLD_US;
 
-  // Wait for enough buffer before starting.
-  // In quick_start mode (after a seek/skip), start as soon as 1 frame is
-  // available to minimise the gap between tracks.  Anchor-based timing
-  // still applies — if the frame is early, silence is output until its
-  // scheduled play time, just like shairport-sync.
-  // Normal startup waits for target_buffer_frames to build jitter margin.
+  // Startup gate.  In quick_start mode (after a seek/skip) start as soon as
+  // one frame is available; a normal start waits for target_buffer_frames.
   if (!timing->playout_started && !timing->pending_valid) {
     int required = timing->quick_start ? 1 : (int)timing->target_buffer_frames;
     if (buffered_frames < required) {
       return 0;
     }
-    // Wait for anchor before playing.
-    // Normal startup: allow a 1-second fallback so a stream with no anchor
-    // (e.g. AirPlay 1 without NTP) can still start.
     if (!timing->anchor_valid) {
+      // Allow a 1-second fallback so a stream with no anchor (AirPlay 1
+      // without NTP) can still start.
       int64_t now_us = esp_timer_get_time();
       if (timing->ready_time_us == 0) {
         timing->ready_time_us = now_us;
       }
       if (now_us - timing->ready_time_us < 1000000) {
-        return 0; // Still waiting for anchor
+        return 0;
       }
-      // Waited 1 second, no anchor - proceed without sync
     }
   }
 
-  // Determine sync mode: PTP (AirPlay 2), NTP (AirPlay 1), or local fallback
-  sync_mode_t sync_mode = SYNC_MODE_NONE;
-  if (ptp_clock_is_locked()) {
-    sync_mode = SYNC_MODE_PTP;
-  } else if (ntp_clock_is_locked()) {
-    sync_mode = SYNC_MODE_NTP;
+  // PTP lock wait.  The anchor named a clock we are not locked to yet: hold
+  // playout briefly, latch PTP the moment the filter locks, or give up and
+  // latch the local timeline for this anchor.  Never switch domains after
+  // playout under this anchor has begun.
+  if (timing->anchor_valid && timing->anchor_clock_id != 0 &&
+      !timing->ptp_locked && !timing->ptp_wait_expired) {
+    if (ptp_clock_is_locked_to(timing->anchor_clock_id)) {
+      timing->ptp_locked = true;
+      ESP_LOGI(TAG, "PTP locked to %016llx before playout; network timeline "
+                    "latched",
+               (unsigned long long)timing->anchor_clock_id);
+    } else {
+      int64_t waited_us =
+          esp_timer_get_time() - timing->anchor_local_time_ns / 1000LL;
+      if (waited_us < PTP_LOCK_WAIT_US && !timing->playout_started) {
+        return 0;
+      }
+      timing->ptp_wait_expired = true;
+      ESP_LOGW(TAG,
+               "PTP not locked to %016llx after %lld ms (tracking %016llx); "
+               "local timeline latched for this anchor",
+               (unsigned long long)timing->anchor_clock_id,
+               (long long)(waited_us / 1000LL),
+               (unsigned long long)ptp_clock_get_tracked_clock_id());
+    }
   }
 
-  // Keep the playout task bounded.  Stale frames are still drained in batches,
-  // but a single call may spend at most ~1.5 ms here.  The RTP gate in the
-  // buffered receiver now prevents new old-track frames from being decoded, so
-  // this loop normally only clears a small residual PCM backlog.
+  sync_mode_t sync_mode = current_sync_mode(timing);
+
+  // Bounded drain: stale frames are discarded in batches, but a single call
+  // spends at most ~1.5 ms here.
   enum { MAX_DRAIN_ATTEMPTS = 64 };
   const int64_t drain_deadline_us = esp_timer_get_time() + 1500;
-  // Set when the drain loop below discards at least one late frame in this
-  // call, or when a previous call left a drop run unfinished.  A drop run
-  // re-locks the stream onto a new position, so both the release point for
-  // the next playable frame and the point at which dropping stops tighten
-  // from the wide jitter threshold to half a frame period — see the gate
-  // below.
   bool dropped_late = timing->late_drop_active;
-  // Stale start-island frames skipped in this call (see the check below).
   int start_skips = 0;
   for (int attempt = 0; attempt < MAX_DRAIN_ATTEMPTS; attempt++) {
-    // Check the deadline every eight iterations to limit esp_timer overhead.
     if ((attempt & 7) == 0 && attempt != 0 &&
         esp_timer_get_time() >= drain_deadline_us) {
       break;
@@ -474,7 +522,6 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
     void *item = NULL;
     bool from_pending = false;
 
-    // Get frame from pending or buffer
     if (timing->pending_valid) {
       item_size = timing->pending_frame_len;
       if (item_size < sizeof(audio_frame_header_t)) {
@@ -492,7 +539,6 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
         return 0;
       }
       buffered_frames = audio_buffer_get_frame_count(buffer);
-
       if (item_size < sizeof(audio_frame_header_t)) {
         audio_buffer_return(buffer, item);
         continue;
@@ -504,95 +550,51 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
     size_t channels = hdr->channels ? hdr->channels : format->channels;
     int16_t *pcm = (int16_t *)(hdr + 1);
 
-    // Validate frame
     if (frame_samples == 0 || channels == 0) {
-      if (from_pending) {
-        timing->pending_valid = false;
-        timing->pending_frame_len = 0;
-      } else {
-        audio_buffer_return(buffer, item);
-      }
+      release_item(timing, buffer, item, from_pending);
       continue;
     }
-
     size_t expected_bytes =
         sizeof(*hdr) + frame_samples * channels * sizeof(int16_t);
     if (item_size < expected_bytes) {
-      if (from_pending) {
-        timing->pending_valid = false;
-        timing->pending_frame_len = 0;
-      } else {
-        audio_buffer_return(buffer, item);
-      }
+      release_item(timing, buffer, item, from_pending);
       continue;
     }
-
     if (frame_samples > samples) {
       frame_samples = samples;
     }
 
-    // Deferred flush check (AirPlay 2 FLUSHBUFFERED with flushFromSeq):
-    // keep playing until the frame whose RTP timestamp reaches flush_until_ts,
-    // then bulk-flush the remainder of the buffer and start fresh.
-    // Signed 32-bit subtraction handles RTP wraparound correctly.
+    // Deferred flush (AirPlay 2 FLUSHBUFFERED with flushFromSeq): play up to
+    // the boundary, then discard the rest and start the next track fresh.
     if (timing->deferred_flush_pending) {
       if ((int32_t)(hdr->rtp_timestamp - timing->flush_until_ts) >= 0) {
         ESP_LOGI(TAG,
-                 "Deferred flush triggered at ts=%" PRIu32 " (until_ts=%" PRIu32
-                 ")",
+                 "Deferred flush at ts=%" PRIu32 " (until_ts=%" PRIu32 ")",
                  hdr->rtp_timestamp, timing->flush_until_ts);
-        if (from_pending) {
-          timing->pending_valid = false;
-          timing->pending_frame_len = 0;
-        } else {
-          audio_buffer_return(buffer, item);
-        }
+        release_item(timing, buffer, item, from_pending);
         audio_buffer_flush(buffer);
         timing->deferred_flush_pending = false;
         audio_timing_reset_continuity(timing);
         timing->playout_started = false;
         timing->ready_time_us = 0;
         timing->consecutive_early_frames = 0;
-        // quick_start so the first frame of the next track starts playing
-        // as soon as 1 frame arrives, with normal anchor timing applied.
         timing->quick_start = true;
+        timing->acquired = false;
         return 0;
       }
     }
 
-    // Handle early/late frames based on anchor timing.
-    //
-    // After a seek/flush, anchor-based timing is applied immediately from the
-    // first frame — no bypass.  With a stable PTP clock the anchor is
-    // accurate, so early frames are held as pending (silence output) until
-    // their scheduled play time, and late frames are dropped.  This mirrors
-    // shairport-sync's approach and guarantees the first audible sample is
-    // correctly synchronised.
-    // Stale start-island rejection.  A stream start (fresh or post-flush)
-    // can leave a small ISLAND of stale frames stranded at the head of the
-    // buffer, separated from the real stream by a large hole — typically
-    // late retransmissions answering NACKs from before the flush, which
-    // arrive after the RTP gates re-arm and fall inside their 10 s window.
-    // Starting playout from such an island plays a ~100 ms blip of audio,
-    // then the hole (concealed as silence), then the track — an audible pop
-    // at every affected stream start (observed on hardware: a 14-frame
-    // island followed by an 830 ms hole on a track change).  Until playout
-    // has started, skip any frame that sits more than ~100 ms below the
-    // start of the contiguous run that ends at the newest received frame:
-    // the discarded audio is stale by definition, and the real stream still
-    // starts at exactly its scheduled instant via the early-hold.
+    // Stale start-island rejection: before playout, skip frames stranded
+    // more than ~100 ms below the contiguous run that ends at the newest
+    // frame (late retransmissions from before a flush).  Playing them would
+    // be a ~100 ms blip, then silence, then the track.
     if (!timing->playout_started && format->sample_rate > 0) {
       uint32_t bulk_rtp = 0;
       if (audio_buffer_bulk_start_rtp(buffer, &bulk_rtp)) {
         int32_t behind = (int32_t)(bulk_rtp - hdr->rtp_timestamp);
         if (behind > (int32_t)(format->sample_rate / 10)) {
           start_skips++;
-          if (from_pending) {
-            timing->pending_valid = false;
-            timing->pending_frame_len = 0;
-          } else {
-            audio_buffer_return(buffer, item);
-          }
+          release_item(timing, buffer, item, from_pending);
           continue;
         }
       }
@@ -606,17 +608,8 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
     }
 
     // RTP continuity vs the frame just played.  A fresh frame ABOVE
-    // expected_rtp means packets were lost and not recovered by the resend
-    // mechanism: conceal the hole by holding the frame to the strict
-    // release, so exactly gap-length silence plays at the right schedule.
-    // Without this, the post-gap frame (typically ~8 ms early, far inside
-    // the 50 ms realtime threshold) played immediately — an audible skip
-    // AND a permanent early shift of the whole playback position for every
-    // unrecovered packet.  At or below expected_rtp is contiguous audio (or
-    // a duplicate from a redundant resend, which is played because repeating
-    // at most one frame keeps the stream moving); its schedule slot begins
-    // the instant the previous frame ends, so it is normally released
-    // straight away by the wide threshold below.
+    // expected_rtp means packets were lost and not recovered: conceal the
+    // hole by re-acquiring (exact silence for exactly the gap length).
     bool gap = false;
     if (!from_pending && timing->playout_started &&
         timing->expected_rtp_valid) {
@@ -624,8 +617,6 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       if (cont_delta > 0) {
         gap = true;
         timing->gaps++;
-        // Rate-limited: a burst of separate holes must not throttle this
-        // path with blocking log writes.
         int64_t now_us = esp_timer_get_time();
         if (now_us - timing->last_gap_log_us > 250000) {
           ESP_LOGW(TAG,
@@ -643,182 +634,166 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       }
     }
 
+    size_t prefix_trim = 0;
     if (timing->anchor_valid && format->sample_rate > 0) {
       int64_t early_us = 0;
       if (compute_early_us(timing, format, hdr->rtp_timestamp, sync_mode,
                            &early_us)) {
-        // Hold-release point.  A FRESH frame is shelved as pending when it
-        // is more than the (wide, jitter-hysteresis) threshold early.  But a
-        // frame ALREADY pending is re-checked once per frame period (~8 ms),
-        // and must be held until its play time has actually arrived —
-        // releasing it at the threshold instead starts playback up to
-        // threshold_us early, and nothing downstream ever corrects position,
-        // so the whole session inherits that bias (measured: err pinned at
-        // +33..48 ms with the 50 ms realtime threshold).  Releasing at half
-        // a frame period centres the startup error at 0 (±4 ms at 44.1 kHz).
-        // Frames following a drop run or a detected RTP gap also use the
-        // strict release, so discontinuity recovery re-locks position
-        // precisely instead of anywhere inside the wide threshold.
         int64_t frame_period_us =
             ((int64_t)frame_samples * 1000000LL) / format->sample_rate;
-        int64_t strict_us = frame_period_us / 2;
-        int64_t release_us = (from_pending || dropped_late || gap)
-                                 ? strict_us
-                                 : timing_threshold_us;
+        // Acquisition regime: first frame under this anchor, a pending
+        // re-check, the frame after a drop run, or the frame after a gap.
+        bool acquiring = !timing->acquired || from_pending || dropped_late ||
+                         gap;
 
-        // Late gate, with hysteresis.  Lateness beyond the wide threshold
-        // STARTS a drop run; once started, frames keep being dropped until
-        // the stream is back on schedule rather than until it is merely
-        // inside the threshold again.
-        //
-        // Stopping at the threshold is what left the realtime path parked at
-        // err = -(threshold - one drain overshoot) for the rest of a session
-        // and made the drop path the sole regulator of queue depth (issue
-        // #122): every disturbance walked the position later, the drain
-        // clawed back just enough to re-enter the threshold, and the standing
-        // offset survived because the position servo's 710 ppm of authority
-        // needs ~11 minutes to remove 470 ms.  Draining to the strict window
-        // instead makes err ≈ 0 the equilibrium, so the servo only ever has
-        // to handle crystal drift — which is what it was designed for.
-        int64_t late_limit_us =
-            dropped_late ? -strict_us : -timing_threshold_us;
-
-        // A contiguous frame is no longer exempt from the early gate.  It
-        // used to bypass it entirely so that measurement noise could not
-        // insert silence into an unbroken stream, but that also meant a
-        // forward anchor jump mid-stream was never corrected.  Now that
-        // compute_early_us() measures the live output queue instead of
-        // modelling it, the residual noise is a fraction of a DMA descriptor
-        // (~±3 ms) and cannot reach the 25/50 ms threshold.
-        if (early_us > release_us) {
-          // Only advance the stuck-anchor counter for NEW frames taken from
-          // the buffer — not for pending re-checks of the same early frame.
-          // A pending frame is re-examined every DMA callback (~8 ms) while
-          // we wait for wall-clock to reach its scheduled play time.  Counting
-          // those re-checks would fire the stuck-anchor detector in
-          // (MAX_CONSECUTIVE_EARLY × 8 ms) = 6 s even for a legitimately
-          // early frame that just needs to wait its pre-buffer depth (~1.5 s).
-          if (!from_pending) {
-            timing->consecutive_early_frames++;
-            // Log the first early frame after each anchor set (shows lead
-            // time before audio starts) and every 50 new frames after that
-            // (confirms the counter only counts real buffer reads, not
-            // pending re-checks).
-            if (timing->consecutive_early_frames == 1) {
-              ESP_LOGI(TAG,
-                       "First early frame: rtp=%" PRIu32 " early=%.1f ms"
-                       " quick_start=%d buffered=%d",
-                       hdr->rtp_timestamp, (float)early_us / 1000.0f,
-                       timing->quick_start, buffered_frames);
-            } else if (timing->consecutive_early_frames % 50 == 0) {
-              ESP_LOGD(TAG, "Early counter: %d/%d early=%.1f ms rtp=%" PRIu32,
-                       timing->consecutive_early_frames, MAX_CONSECUTIVE_EARLY,
-                       (float)early_us / 1000.0f, hdr->rtp_timestamp);
+        if (acquiring) {
+          // ---- exact alignment -------------------------------------
+          // An anchor more than 10 s in the future is not an AirPlay
+          // schedule (senders anchor at most ~2-3 s ahead); it is a clock
+          // domain mismatch.  Play unscheduled rather than sit in silence.
+          if (early_us > 10000000LL) {
+            ESP_LOGW(TAG,
+                     "Anchor %lld ms in the future — implausible, playing "
+                     "unscheduled (domain=%s)",
+                     (long long)(early_us / 1000LL),
+                     audio_timing_sync_mode_name(timing));
+            timing->anchor_valid = false;
+            goto play_frame;
+          }
+          if (early_us > 0) {
+            // Too early.  Shelve the frame and emit exactly the silence
+            // that separates now from its play time (bounded by the
+            // caller's capacity; long waits take several calls, each
+            // of which shortens the remaining error via the pipeline
+            // measurement).
+            if (!from_pending) {
+              timing->consecutive_early_frames++;
+              if (timing->consecutive_early_frames == 1) {
+                ESP_LOGI(TAG,
+                         "First early frame: rtp=%" PRIu32 " early=%.1f ms "
+                         "quick_start=%d buffered=%d domain=%s",
+                         hdr->rtp_timestamp, (float)early_us / 1000.0f,
+                         timing->quick_start, buffered_frames,
+                         audio_timing_sync_mode_name(timing));
+              }
+              if (timing->consecutive_early_frames > MAX_CONSECUTIVE_EARLY) {
+                ESP_LOGW(TAG,
+                         "Invalidating stuck anchor: consecutive=%d early=%lld "
+                         "ms",
+                         timing->consecutive_early_frames,
+                         (long long)(early_us / 1000LL));
+                timing->anchor_valid = false;
+                timing->consecutive_early_frames = 0;
+                goto play_frame; // fall through: play without schedule
+              }
+              if (timing->pending_frame &&
+                  item_size <= timing->pending_frame_capacity) {
+                memcpy(timing->pending_frame, item, item_size);
+                timing->pending_frame_len = item_size;
+                timing->pending_valid = true;
+                audio_buffer_return(buffer, item);
+              } else {
+                // Cannot shelve (should never happen): play it now.
+                goto play_frame;
+              }
             }
+            size_t silence = audio_align_silence_frames(
+                early_us, (uint32_t)format->sample_rate, samples);
+            if (silence == 0) {
+              silence = 1;
+            }
+            timing->align_silence += (uint32_t)silence;
+            return emit_silence(timing, out, silence);
           }
 
-          // If we have had an implausibly long run of early frames the anchor
-          // is probably stuck or wrong — give up on it so playback can
-          // continue.  This threshold is high enough (~17 s at 23 ms/frame)
-          // that it never fires during normal pre-buffered-audio scenarios.
-          if (timing->consecutive_early_frames > MAX_CONSECUTIVE_EARLY) {
-            ESP_LOGW(TAG,
-                     "Invalidating stuck anchor: consecutive=%d, early=%lld ms",
-                     timing->consecutive_early_frames, early_us / 1000LL);
-            timing->anchor_valid = false;
-            timing->consecutive_early_frames = 0;
-            // Fall through to play the frame normally
-          } else {
-            // Frame is early — store it as pending and output silence.
-            // The pending frame is re-checked on every subsequent call;
-            // once wall-clock catches up it will be played on time.
-            // This is the normal path for pre-buffered audio after a pause.
-            static int early_count = 0;
-            early_count++;
-            if (early_count % 100 == 1) {
-              ESP_LOGD(TAG,
-                       "Frame too early #%d: %lld ms, buffered=%d, pending=%d",
-                       early_count, early_us / 1000LL, buffered_frames,
-                       timing->pending_valid ? 1 : 0);
+          // On time or late.  Late by less than the block: trim the expired
+          // leading samples.  Late by a whole block or more: it is a stale
+          // frame, drop it and keep draining.
+          if (early_us < 0) {
+            size_t trim = audio_align_trim_frames(
+                -early_us, (uint32_t)format->sample_rate, frame_samples);
+            if (trim >= frame_samples) {
+              dropped_late = true;
+              timing->late_drop_count++;
+              timing->late_drop_active = true;
+              uint32_t drop_next =
+                  hdr->rtp_timestamp + hdr->samples_per_channel;
+              if (!timing->expected_rtp_valid ||
+                  (int32_t)(drop_next - timing->expected_rtp) > 0) {
+                timing->expected_rtp = drop_next;
+                timing->expected_rtp_valid = true;
+              }
+              if (stats) {
+                stats->late_frames++;
+              }
+              release_item(timing, buffer, item, from_pending);
+              continue;
             }
-            if (!from_pending && timing->pending_frame &&
+            prefix_trim = trim;
+            timing->align_trimmed += (uint32_t)trim;
+          }
+          timing->acquire_err_us = early_us;
+          timing->consecutive_early_frames = 0;
+        } else {
+          // ---- tracking regime ------------------------------------
+          if (early_us > timing_threshold_us) {
+            // A contiguous frame far too early means the anchor jumped
+            // forward (or our position ran ahead).  Shelve it; the pending
+            // re-check re-acquires exactly.
+            if (timing->pending_frame &&
                 item_size <= timing->pending_frame_capacity) {
               memcpy(timing->pending_frame, item, item_size);
               timing->pending_frame_len = item_size;
               timing->pending_valid = true;
               audio_buffer_return(buffer, item);
+              ESP_LOGW(TAG,
+                       "Tracking: frame %.1f ms early (> %lld ms); "
+                       "re-acquiring",
+                       (float)early_us / 1000.0f,
+                       (long long)(timing_threshold_us / 1000LL));
+              size_t silence = audio_align_silence_frames(
+                  early_us, (uint32_t)format->sample_rate, samples);
+              return emit_silence(timing, out, silence ? silence : 1);
             }
-            // Emit one frame's worth of silence, not the caller's full
-            // capacity.  Callers allocate exactly `samples` stereo frames
-            // (see audio_output.c), so the write must be bounded by
-            // AUDIO_OUT_CHANNELS rather than the frame header's channel
-            // count — a malformed header claiming >2 channels would
-            // otherwise overrun the caller's buffer.  Returning
-            // frame_samples (not `samples`) also keeps the silence path's
-            // output length consistent with the normal playback path, so
-            // holding a frame pending does not advance the output clock
-            // faster than playing one.
-            memset(out, 0,
-                   frame_samples * AUDIO_OUT_CHANNELS * sizeof(int16_t));
-            return frame_samples;
+          } else if (early_us < -timing_threshold_us) {
+            // Far too late: start a drop run.  Frames keep being dropped
+            // until one is within a block of its schedule; that frame is
+            // then acquired exactly (trimmed) by the branch above.
+            dropped_late = true;
+            timing->late_drop_count++;
+            timing->late_drop_active = true;
+            uint32_t drop_next = hdr->rtp_timestamp + hdr->samples_per_channel;
+            if (!timing->expected_rtp_valid ||
+                (int32_t)(drop_next - timing->expected_rtp) > 0) {
+              timing->expected_rtp = drop_next;
+              timing->expected_rtp_valid = true;
+            }
+            if (stats) {
+              stats->late_frames++;
+            }
+            release_item(timing, buffer, item, from_pending);
+            continue;
           }
-        } else if (early_us < late_limit_us) {
-          // Reset consecutive early counter on late/normal frames
           timing->consecutive_early_frames = 0;
-
-          // Late frame: count it and continue within the bounded drain budget.
-          // Do not log per frame here; UART logging in the playout task is
-          // expensive and can itself cause further lateness.  A single summary
-          // is emitted when playout resumes.
-          dropped_late = true;
-          timing->late_drop_count++;
-          timing->late_drop_active = true;
-          // A dropped frame is consumed from the RTP sequence just like a
-          // played one: advance the continuity marker past it (forward
-          // only).  Without this, expected_rtp froze at the last PLAYED
-          // frame during a drain, so every subsequent contiguous stale
-          // frame was miscounted as a fresh loss.
-          uint32_t drop_next = hdr->rtp_timestamp + hdr->samples_per_channel;
-          if (!timing->expected_rtp_valid ||
-              (int32_t)(drop_next - timing->expected_rtp) > 0) {
-            timing->expected_rtp = drop_next;
-            timing->expected_rtp_valid = true;
-          }
-          if (stats) {
-            stats->late_frames++;
-          }
-          if (from_pending) {
-            timing->pending_valid = false;
-            timing->pending_frame_len = 0;
-          } else {
-            audio_buffer_return(buffer, item);
-          }
-          continue;
         }
+        (void)frame_period_us;
       }
     }
 
-    // Frame is on time (or anchor-invalid) — reset counter.
-    timing->consecutive_early_frames = 0;
+  play_frame:;
+    // Snapshot metadata before the pool slot is returned below.
+    uint32_t played_rtp_timestamp = hdr->rtp_timestamp + (uint32_t)prefix_trim;
+    uint32_t played_samples = hdr->samples_per_channel - (uint16_t)prefix_trim;
+    pcm += prefix_trim * channels;
+    frame_samples -= prefix_trim;
 
-    // Snapshot metadata before the pool slot is returned below — reading
-    // hdr fields after audio_buffer_return would be a use-after-return.
-    uint32_t played_rtp_timestamp = hdr->rtp_timestamp;
-    uint32_t played_samples = hdr->samples_per_channel;
-
-    // Playout report (diagnostic) and position servo.
+    // Position servo (tracking only) and periodic playout report.
     int sample_adjust = 0;
     if (timing->anchor_valid && sync_mode != SYNC_MODE_NONE &&
-        timing->playout_started) {
+        timing->playout_started && timing->acquired) {
       int64_t on_time_err_us = 0;
       if (compute_early_us(timing, format, played_rtp_timestamp, sync_mode,
                            &on_time_err_us)) {
-        //   err      — distance from this frame's scheduled play time
-        //              (anchor + stream playout latency).  Should sit near 0.
-        //   buffered — frames still queued behind this one.
-        //   depth_ms — how far the played frame sits behind the NEWEST frame
-        //              in the buffer.  For a realtime stream with the sender
-        //              transmitting 2 s ahead, ~2000 ms minus err is healthy.
         if (timing->playout_reports++ % 125 == 0) {
           uint32_t newest_rtp = 0;
           int64_t depth_ms = -1;
@@ -827,35 +802,23 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
                         1000LL) /
                        format->sample_rate;
           }
-          // PTP filter divergence.  err/lead/depth are all computed THROUGH
-          // filtered_offset_ns, so none of them can reveal an error in that
-          // offset — the device converges perfectly onto a displaced target
-          // and reports err=0 the whole time.  Comparing the filtered offset
-          // against the most recent raw sample is the only independent check
-          // available on-device.
           ptp_stats_t ps;
           ptp_clock_get_stats(&ps);
           int64_t ptp_gap_us =
               (ps.last_offset_ns - ps.filtered_offset_ns) / 1000LL;
-          // under: output underruns since boot.  Any increase means the
-          // playback task was starved long enough for the DMA ring to run
-          // dry, which is the disturbance the drain has to clean up after.
           ESP_LOGI(TAG,
-                   "Playout: err=%lld ms buffered=%d depth=%lld ms "
-                   "ptp_gap=%lld us outliers=%" PRIu32 " gaps=%" PRIu32
-                   " under=%" PRIu32 " rtp=%" PRIu32,
-                   (long long)(on_time_err_us / 1000LL), buffered_frames,
-                   (long long)depth_ms, (long long)ptp_gap_us, ps.outlier_count,
-                   timing->gaps, audio_output_get_underruns(),
-                   played_rtp_timestamp);
+                   "Playout: err=%+lld us filt=%+lld us servo=%s/%u trims=%" PRIu32
+                   " buffered=%d depth=%lld ms ptp_gap=%lld us outliers=%" PRIu32
+                   " gaps=%" PRIu32 " under=%" PRIu32 " domain=%s rtp=%" PRIu32,
+                   (long long)on_time_err_us,
+                   (long long)timing->pos_err_filtered_us,
+                   timing->servo_engaged ? "on" : "off", timing->servo_interval,
+                   timing->servo_trims, buffered_frames, (long long)depth_ms,
+                   (long long)ptp_gap_us, ps.outlier_count, timing->gaps,
+                   audio_output_get_underruns(),
+                   audio_timing_sync_mode_name(timing), played_rtp_timestamp);
         }
 
-        // Position servo (see POS_SERVO_* above).  Smooth the per-frame
-        // error with a clamped-innovation IIR (robust to one-sided
-        // late-read measurement spikes), engage outside the hysteresis
-        // band, trim one sample per POS_SERVO_TRIM_INTERVAL frames until
-        // the error is back inside.  No credit term: a trim changes the
-        // real playout position and the IIR tracks that on its own.
         int64_t innovation = on_time_err_us - timing->pos_err_filtered_us;
         if (innovation > POS_SERVO_INNOV_CLAMP_US) {
           innovation = POS_SERVO_INNOV_CLAMP_US;
@@ -870,16 +833,28 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
         if (!timing->servo_engaged && abs_err > POS_SERVO_ENGAGE_US) {
           timing->servo_engaged = true;
           timing->servo_phase = 0;
-          ESP_LOGI(TAG, "Position servo engaged: err=%lld us",
+          ESP_LOGI(TAG, "Servo engaged: err=%+lld us",
                    (long long)timing->pos_err_filtered_us);
         } else if (timing->servo_engaged && abs_err < POS_SERVO_DISENGAGE_US) {
           timing->servo_engaged = false;
-          ESP_LOGI(TAG, "Position servo disengaged: err=%lld us trims=%" PRIu32,
+          ESP_LOGI(TAG, "Servo disengaged: err=%+lld us trims=%" PRIu32,
                    (long long)timing->pos_err_filtered_us, timing->servo_trims);
+        }
+        // Tier the authority by the size of the remaining error.
+        uint8_t interval = abs_err > POS_SERVO_TIER2_US ? POS_SERVO_INTERVAL_FAST
+                           : abs_err > POS_SERVO_TIER1_US
+                               ? POS_SERVO_INTERVAL_MED
+                               : POS_SERVO_INTERVAL_SLOW;
+        if (interval != timing->servo_interval) {
+          timing->servo_interval = interval;
+          if (timing->servo_engaged) {
+            ESP_LOGI(TAG, "Servo tier: 1 trim / %u frames (err=%+lld us)",
+                     interval, (long long)timing->pos_err_filtered_us);
+          }
         }
 
         if (timing->servo_engaged &&
-            ++timing->servo_phase >= POS_SERVO_TRIM_INTERVAL) {
+            ++timing->servo_phase >= timing->servo_interval) {
           timing->servo_phase = 0;
           // Positive error = playing early = stretch (emit one extra sample)
           // so playout slows; negative = late = shrink to catch up.
@@ -889,10 +864,6 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       }
     }
 
-    // Apply the servo's one-sample trim.  Shrink: copy one sample fewer.
-    // Stretch: copy the frame then repeat its final sample once.  The
-    // stretch stays within the caller's capacity (`samples` frames, which
-    // is FRAME_SAMPLES + 1 in every output backend).
     size_t out_samples = frame_samples;
     if (sample_adjust < 0 && out_samples > 1) {
       out_samples--;
@@ -900,51 +871,37 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       out_samples++;
     }
 
-    // Copy PCM data to output.  The output buffer is interleaved stereo of
-    // exactly `samples` frames, so never write more than AUDIO_OUT_CHANNELS
-    // per sample regardless of what the frame header claims.  `channels` is
-    // still used to step through the SOURCE frame, which was
-    // length-validated above against expected_bytes.
-    size_t out_ch =
-        channels < AUDIO_OUT_CHANNELS ? channels : AUDIO_OUT_CHANNELS;
-    if (out_samples == frame_samples) {
-      if (out_ch == channels) {
-        memcpy(out, pcm, frame_samples * out_ch * sizeof(int16_t));
-      } else {
-        // Source has more channels than we emit — take the leading out_ch.
-        for (size_t i = 0; i < frame_samples; i++) {
-          for (size_t ch = 0; ch < out_ch; ch++) {
-            out[i * out_ch + ch] = pcm[i * channels + ch];
-          }
-        }
-      }
+    // Copy PCM to the interleaved stereo output.  `channels` steps through
+    // the SOURCE frame (length-validated above); the output is always
+    // AUDIO_OUT_CHANNELS wide.  Mono sources are duplicated to both sides.
+    size_t out_ch = AUDIO_OUT_CHANNELS;
+    if (out_samples == frame_samples && channels == AUDIO_OUT_CHANNELS) {
+      memcpy(out, pcm, frame_samples * out_ch * sizeof(int16_t));
     } else {
-      // Servo trim: drop or duplicate exactly one sample, placed at the
-      // frame's quietest point so the seam is inaudible.
-      size_t m = quietest_sample_index(pcm, frame_samples, channels, out_ch);
+      size_t m = out_samples == frame_samples
+                     ? SIZE_MAX
+                     : quietest_sample_index(pcm, frame_samples, channels,
+                                             channels < out_ch ? channels
+                                                               : out_ch);
       size_t o = 0;
       for (size_t i = 0; i < frame_samples; i++) {
         if (out_samples < frame_samples && i == m) {
           continue; // shrink: skip the quietest sample
         }
         for (size_t ch = 0; ch < out_ch; ch++) {
-          out[o * out_ch + ch] = pcm[i * channels + ch];
+          out[o * out_ch + ch] = pcm[i * channels + (channels == 1 ? 0 : ch)];
         }
         o++;
         if (out_samples > frame_samples && i == m) {
-          // stretch: duplicate the quietest sample
           for (size_t ch = 0; ch < out_ch; ch++) {
-            out[o * out_ch + ch] = pcm[i * channels + ch];
+            out[o * out_ch + ch] = pcm[i * channels + (channels == 1 ? 0 : ch)];
           }
           o++;
         }
       }
     }
 
-    // The next contiguous frame starts where this one's SOURCE data ends
-    // (servo trims alter output length, not source consumption).  Forward
-    // only: playing a duplicate (redundant resend) must not rewind the
-    // marker, which would misread the following real frame as a gap.
+    // The next contiguous frame starts where this one's SOURCE data ends.
     uint32_t play_next = played_rtp_timestamp + played_samples;
     if (!timing->expected_rtp_valid ||
         (int32_t)(play_next - timing->expected_rtp) > 0) {
@@ -952,14 +909,18 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       timing->expected_rtp_valid = true;
     }
 
-    // Cleanup
-    if (from_pending) {
-      timing->pending_valid = false;
-      timing->pending_frame_len = 0;
-    } else {
-      audio_buffer_return(buffer, item);
-    }
+    release_item(timing, buffer, item, from_pending);
 
+    if (!timing->acquired) {
+      timing->acquired = true;
+      ESP_LOGI(TAG,
+               "Acquired: rtp=%" PRIu32 " err=%+lld us silence=%" PRIu32
+               " trimmed=%" PRIu32 " domain=%s%s",
+               played_rtp_timestamp, (long long)timing->acquire_err_us,
+               timing->align_silence, timing->align_trimmed,
+               audio_timing_sync_mode_name(timing),
+               timing->anchor_valid ? "" : " (no anchor)");
+    }
     if (!timing->playout_started) {
       timing->playout_started = true;
       bool was_quick = timing->quick_start;
@@ -967,7 +928,6 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       ESP_LOGI(TAG, "Playout started%s: rtp=%" PRIu32,
                was_quick ? " (quick_start)" : "", played_rtp_timestamp);
     }
-
     if (timing->late_drop_active) {
       ESP_LOGW(TAG, "Late-frame drain complete: dropped=%" PRIu32,
                timing->late_drop_count);
@@ -975,6 +935,7 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       timing->late_drop_active = false;
     }
 
+    timing->read_has_media = true;
     return out_samples;
   }
 
