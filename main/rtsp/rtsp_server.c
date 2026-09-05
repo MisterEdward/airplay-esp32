@@ -55,6 +55,9 @@ typedef struct {
 
 static client_slot_t clients[2] = {0}; // Current and old
 static int current_slot = 0;
+// Guards slot->conn against the status API reading a connection that the
+// client task is about to free.
+static portMUX_TYPE s_slot_lock = portMUX_INITIALIZER_UNLOCKED;
 
 // Flag set by the play/pause button to tell the grace period loop
 // to send a DACP resume command and keep waiting for reconnect.
@@ -84,22 +87,24 @@ bool rtsp_server_get_session_info(rtsp_session_info_t *out) {
   if (!out) {
     return false;
   }
+  memset(out, 0, sizeof(*out));
+  portENTER_CRITICAL(&s_slot_lock);
   client_slot_t *c = &clients[current_slot];
   rtsp_conn_t *conn = c->conn;
-  if (!conn || c->is_old || c->socket < 0) {
-    return false;
+  bool ok = conn && !c->is_old && c->socket >= 0;
+  if (ok) {
+    out->sid = conn->sid;
+    strlcpy(out->source_id, conn->source_id, sizeof(out->source_id));
+    strlcpy(out->source_name, conn->source_name, sizeof(out->source_name));
+    strlcpy(out->source_model, conn->source_model, sizeof(out->source_model));
+    out->volume_db = conn->volume_db;
+    out->stream_active = conn->stream_active;
+    out->stream_paused = conn->stream_paused;
+    out->protocol_version = conn->protocol_version;
+    out->connected_us = conn->connected_us;
   }
-  memset(out, 0, sizeof(*out));
-  out->sid = conn->sid;
-  strlcpy(out->source_id, conn->source_id, sizeof(out->source_id));
-  strlcpy(out->source_name, conn->source_name, sizeof(out->source_name));
-  strlcpy(out->source_model, conn->source_model, sizeof(out->source_model));
-  out->volume_db = conn->volume_db;
-  out->stream_active = conn->stream_active;
-  out->stream_paused = conn->stream_paused;
-  out->protocol_version = conn->protocol_version;
-  out->connected_us = conn->connected_us;
-  return true;
+  portEXIT_CRITICAL(&s_slot_lock);
+  return ok;
 }
 
 // Helper to grow buffer
@@ -183,7 +188,9 @@ static void client_task(void *pvParameters) {
     vTaskDelete(NULL);
     return;
   }
+  portENTER_CRITICAL(&s_slot_lock);
   slot->conn = conn;
+  portEXIT_CRITICAL(&s_slot_lock);
 
   // Get client IP address for timing requests
   struct sockaddr_in peer_addr;
@@ -203,8 +210,10 @@ static void client_task(void *pvParameters) {
   uint8_t *buffer = malloc(buf_capacity);
   if (!buffer) {
     ESP_LOGE(TAG, "Failed to allocate buffer");
-    rtsp_conn_free(conn);
+    portENTER_CRITICAL(&s_slot_lock);
     slot->conn = NULL;
+    portEXIT_CRITICAL(&s_slot_lock);
+    rtsp_conn_free(conn);
     close(slot->socket);
     slot->socket = -1;
     slot->task = NULL;
@@ -397,10 +406,14 @@ cleanup:
     conn->event_socket = -1;
   }
 
+  // Detach from the slot BEFORE freeing so a concurrent status read cannot
+  // follow a dangling pointer.
+  portENTER_CRITICAL(&s_slot_lock);
+  slot->conn = NULL;
+  portEXIT_CRITICAL(&s_slot_lock);
   rtsp_conn_cleanup(conn);
   rtsp_conn_free(conn);
 
-  slot->conn = NULL;
   slot->socket = -1;
   slot->task = NULL;
   slot->should_stop = false;

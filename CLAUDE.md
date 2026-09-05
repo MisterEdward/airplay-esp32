@@ -2,6 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Fork note (branch `fable-5.1`)**: this is Edward's personal fork for one
+> ESP32-S3 + PCM5102A speaker.  The `esp32s3` env is tuned for that board
+> (fixed 48 kHz, USB speaker source, OTA rollback).  See `docs/FABLE.md` for
+> what differs from upstream, how to flash, and the hardware test plan.
+> Pure modules have host unit tests: `tests/host/run.sh`.  The project path
+> must not contain spaces (PlatformIO).  Delete the generated
+> `sdkconfig.esp32s3` after editing any `sdkconfig.defaults*`.
+
 ## Project Overview
 
 ESP32 AirPlay 2 Receiver — firmware that turns ESP32/ESP32-S3/ESP32-P4 boards into AirPlay 2 speakers. Supports ALAC and AAC decoding, Bluetooth A2DP (ESP32 only), W5500 Ethernet (Esparagus Audio Brick), OLED/TFT displays, hardware buttons, and OTA updates.
@@ -60,7 +68,10 @@ main/
 │   ├── audio_buffer.c      # Frame buffering between receiver and output
 │   ├── audio_timing.c      # PTP-based timing — early/late frame handling
 │   ├── audio_resample.c    # Sample rate conversion (44.1→48kHz)
-│   ├── audio_output.c      # I2S output
+│   ├── audio_output.c      # I2S render task: continuous clock, fades, source pull
+│   ├── audio_envelope.c    # Fade/volume envelope (host-tested)
+│   ├── audio_align.h       # Sample-accurate acquisition helpers (host-tested)
+│   ├── audio_arbiter.c     # AirPlay vs USB ownership (3 s release grace)
 │   ├── audio_output_spdif.c # S/PDIF output
 │   ├── audio_output_usb.c  # USB audio output
 │   ├── audio_crypto.c      # AirPlay encryption
@@ -87,10 +98,15 @@ main/
 │   ├── mdns_airplay.c      # mDNS AirPlay service advertisement
 │   ├── ptp_clock.c         # Precision Time Protocol clock
 │   ├── ntp_clock.c         # NTP time sync fallback
-│   ├── web_server.c        # HTTP config/control server
+│   ├── web_server.c        # HTTP config/control server (+ /api/status, /api/pc/*)
+│   ├── pc_wake.c           # USB remote wakeup + Wake-on-LAN
+│   ├── log_journal.c       # Ring journal with reader cursors (host-tested)
 │   ├── ota.c               # OTA firmware updates
 │   ├── dns_server.c        # Captive portal DNS
 │   └── log_stream.c        # Remote log streaming
+├── usb/                    # Composite UAC2 speaker + HID wake device (CONFIG_USB_AUDIO_SOURCE)
+├── device_status.c         # /api/status collector, OTA valid-marking
+├── source_volume*.c        # Per-sender volume memory (table host-tested, NVS glue)
 ├── dacp_client.c           # DACP (Digital Audio Control Protocol) — button/remote commands
 ├── playback_control.c      # Unified playback control abstraction
 ├── buttons.c               # Hardware button input with debounce + auto-repeat

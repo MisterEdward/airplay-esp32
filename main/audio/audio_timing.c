@@ -378,12 +378,18 @@ void audio_timing_set_anchor(audio_timing_t *timing,
   timing->ptp_wait_expired = false;
   timing->anchor_valid = true;
   timing->consecutive_early_frames = 0;
-  // A new anchor is a new schedule: the first frame under it is acquired
-  // exactly, whatever was playing before.
-  timing->acquired = false;
-  timing->acquire_err_us = 0;
-  timing->align_silence = 0;
-  timing->align_trimmed = 0;
+  // Acquisition state is NOT reset here.  A pause (set_playing(false)), a
+  // flush or a stream start already cleared it, so the first frame after
+  // any of those is acquired exactly under the new anchor.  An anchor that
+  // arrives while audio is flowing (some senders re-anchor mid-song) must
+  // not insert silence or trim samples for a few-ms schedule shift: the
+  // tracking regime absorbs small shifts with the servo and re-acquires on
+  // its own only beyond the early/late threshold.
+  if (!timing->acquired) {
+    timing->acquire_err_us = 0;
+    timing->align_silence = 0;
+    timing->align_trimmed = 0;
+  }
 
   // Lead time: how far in the future the anchor's network timestamp is.
   // Negative means already in the past (normal: the phone anchors ~10 ms
@@ -415,9 +421,12 @@ void audio_timing_set_playing(audio_timing_t *timing, bool playing) {
   timing->playing = playing;
   if (!playing) {
     // Discard any partially-pending frame so resume starts cleanly from
-    // the oldest frame in the sorted buffer.
+    // the oldest frame in the sorted buffer, and re-acquire exactly under
+    // the resume anchor.
     timing->pending_valid = false;
     timing->pending_frame_len = 0;
+    timing->acquired = false;
+    audio_timing_reset_continuity(timing);
   }
 }
 

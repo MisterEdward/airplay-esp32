@@ -553,7 +553,9 @@ void audio_output_start(void) {
   // The DMA has been free-running since the last session (A2DP, or plain
   // silence), so the cursor carries an arbitrary submitted/sent skew.
   output_cursor_reset();
-  if (xTaskCreatePinnedToCore(playback_task, "audio_play", 4096, NULL,
+  // 6 KB: the pull path (timing engine + resampler glue + USB adapter) and
+  // the diagnostic log formatting need more than v0.2.0's 4 KB with margin.
+  if (xTaskCreatePinnedToCore(playback_task, "audio_play", 6144, NULL,
                               AUDIO_PLAYBACK_TASK_PRIORITY,
                               &playback_task_handle, PLAYBACK_CORE) != pdPASS) {
     playback_running = false;

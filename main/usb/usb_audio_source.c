@@ -207,8 +207,10 @@ static size_t usb_pull(int16_t *pcm, size_t max_frames, void *ctx) {
     want_in = want_out - 1;
   }
 
-  // The ring may hand the request back in two pieces (wrap-around).
-  int16_t tmp[2 * 1026];
+  // The ring may hand the request back in two pieces (wrap-around).  Static
+  // scratch: 4 KB would not fit on the render task's stack, and only the
+  // render task ever calls this.
+  static int16_t tmp[2 * 1026];
   if (want_in > 1025) {
     want_in = 1025;
     want_out = s_adapter_dir < 0 ? 1024 : (s_adapter_dir > 0 ? 1026 : 1025);
