@@ -10,9 +10,10 @@
  * Wireless diagnostics: every ESP log line goes to UART (unchanged) AND into a
  * PSRAM journal that outlives the browser tab.  Exposed as:
  *
- *   ws://<ip>/ws/logs             live stream, each new viewer first gets the
- *                                 recent backlog so a page refresh loses
- * nothing GET  /api/logs?after=<cursor> incremental pull (headers X-Log-Cursor,
+ *   ws://<ip>/ws/logs             live stream; each new viewer first gets
+ *                                 the recent backlog, so a page refresh
+ *                                 loses nothing
+ *   GET  /api/logs?after=<cursor> incremental pull (headers X-Log-Cursor,
  *                                 X-Log-Missed, X-Log-Boot)
  *   GET  /api/logs/download       the whole retained journal as text/plain
  *   GET  /api/logs/level          current runtime log levels
