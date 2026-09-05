@@ -7,6 +7,7 @@
 #include "lwip/sockets.h"
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 
 #include "audio_buffer.h"
@@ -38,8 +39,28 @@ typedef struct {
   int buffered_listen_socket;
   int buffered_client_socket;
   uint16_t buffered_port;
-  TaskHandle_t buffered_task_handle;
+  TaskHandle_t buffered_task_handle;         // TCP reader
+  TaskHandle_t buffered_decoder_task_handle; // decrypt + decode
   uint8_t *buffered_recv_buffer;
+  // Compressed-packet hand-off between the reader and the decoder.  Slots
+  // live in PSRAM; the queues carry slot indices.  A generation counter,
+  // bumped by audio_receiver_seek_flush(), lets the decoder tell packets
+  // that were already in flight before a seek from packets that belong to
+  // the new position — the former are dropped, the latter are HELD until the
+  // anchor arrives and then gated by RTP timestamp.  Holding instead of
+  // discarding is what makes a seek start ~0.5 s sooner: the sender's first
+  // burst after FLUSHBUFFERED usually lands before SETRATEANCHORTIME.
+  void *buffered_packet_pool;
+  QueueHandle_t buffered_free_queue;
+  QueueHandle_t buffered_ready_queue;
+  volatile uint32_t buffered_generation;
+  // Diagnostics
+  uint32_t buffered_connections;
+  uint32_t buffered_stall_timeouts;
+  uint32_t buffered_held_packets;    // packets held for an anchor (total)
+  uint32_t buffered_generation_drops; // packets dropped as pre-seek
+  int64_t buffered_last_packet_us;
+  int64_t buffered_flush_us; // when the last seek flush happened
 
   uint8_t *decrypt_buffer;
   size_t decrypt_buffer_size;

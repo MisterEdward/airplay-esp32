@@ -623,6 +623,12 @@ void audio_receiver_seek_flush(void) {
   // audio_receiver_flush() but sets timing.quick_start so audio_timing_read
   // starts as soon as 1 frame is available, with normal anchor-based timing.
   // Also disarms any pending deferred flush (audio_timing_reset clears it).
+  //
+  // Fence the compressed-packet queue first: everything the reader has
+  // already queued belongs to the old position.  The decoder drops those by
+  // generation and holds whatever arrives from now on until the new anchor.
+  receiver.buffered_generation++;
+  receiver.buffered_flush_us = esp_timer_get_time();
   audio_receiver_flush();
   receiver.timing.quick_start = true;
   // Request that the RTP gate be armed as soon as the next anchor arrives.
