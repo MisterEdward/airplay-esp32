@@ -68,8 +68,9 @@ void rtsp_conn_free(rtsp_conn_t *conn) {
   // stalls the cache).  Both the global "last level" and the per-sender one.
   settings_persist_volume();
   source_volume_store_persist();
-  ESP_LOGI(TAG, "sid=%" PRIu32 " closed: requests=%" PRIu32 " lifetime=%lld ms "
-                "source=%s",
+  ESP_LOGI(TAG,
+           "sid=%" PRIu32 " closed: requests=%" PRIu32 " lifetime=%lld ms "
+           "source=%s",
            conn->sid, conn->requests,
            (long long)((esp_timer_get_time() - conn->connected_us) / 1000LL),
            conn->source_id[0] ? conn->source_id : "unknown");

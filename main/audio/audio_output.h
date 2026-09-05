@@ -60,15 +60,15 @@ typedef size_t (*audio_output_pull_fn)(int16_t *pcm, size_t max_frames,
 
 /** Render-task statistics for the status API and diagnostics. */
 typedef struct {
-  uint32_t dma_underruns;     // DMA clocked out descriptors nobody filled
-  uint32_t source_starved;    // pull returned 0 while a source was active
+  uint32_t dma_underruns;  // DMA clocked out descriptors nobody filled
+  uint32_t source_starved; // pull returned 0 while a source was active
   uint32_t fades_in;
   uint32_t fades_out;
   uint32_t flushes;
   uint32_t source_switches;
-  uint64_t frames_rendered;   // media frames written since boot
+  uint64_t frames_rendered; // media frames written since boot
   audio_source_t active_source;
-  int envelope_state;         // envelope_state_t
+  int envelope_state; // envelope_state_t
   bool pause_pending;
 } audio_output_stats_t;
 
@@ -132,7 +132,8 @@ void audio_output_get_stats(audio_output_stats_t *out);
  */
 esp_err_t audio_output_write(const void *data, size_t bytes, TickType_t wait);
 
-/** Change the I2S sample rate (Bluetooth only; the render task must be stopped). */
+/** Change the I2S sample rate (Bluetooth only; the render task must be
+ * stopped). */
 void audio_output_set_sample_rate(uint32_t rate);
 
 /**

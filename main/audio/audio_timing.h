@@ -32,10 +32,10 @@ typedef struct {
   // to drive the fade envelope only with actual media.
   bool read_has_media;
   // Acquisition diagnostics (reset per anchor).
-  int64_t acquire_err_us;   // signed error of the first released frame
-  uint32_t align_silence;   // frames of alignment silence emitted
-  uint32_t align_trimmed;   // frames trimmed from the first late block
-  bool acquired;            // first frame released since this anchor
+  int64_t acquire_err_us; // signed error of the first released frame
+  uint32_t align_silence; // frames of alignment silence emitted
+  uint32_t align_trimmed; // frames trimmed from the first late block
+  bool acquired;          // first frame released since this anchor
   uint8_t *pending_frame;
   size_t pending_frame_len;
   size_t pending_frame_capacity;

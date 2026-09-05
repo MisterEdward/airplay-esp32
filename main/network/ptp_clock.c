@@ -336,8 +336,8 @@ static void process_ptp_message(const uint8_t *data, size_t len,
   // the anchor names a master, only that one counts.
   if (msg_type == PTP_MSG_SYNC || msg_type == PTP_MSG_FOLLOW_UP) {
     uint64_t src_clock_id = parse_ptp_clock_id(data);
-    uint64_t want = ptp.expected_clock_id ? ptp.expected_clock_id
-                                          : ptp.tracked_clock_id;
+    uint64_t want =
+        ptp.expected_clock_id ? ptp.expected_clock_id : ptp.tracked_clock_id;
     if (want != 0 && src_clock_id != want) {
       ptp.rejected_master_count++;
       return;
@@ -643,8 +643,9 @@ void ptp_clock_set_master_clock_id(uint64_t clock_id) {
   if (clock_id != 0 && clock_id == ptp.tracked_clock_id &&
       ptp.sample_count > 0) {
     ptp.expected_clock_id = clock_id;
-    ESP_LOGI(TAG, "PTP master pinned to tracked source %016llx (locked=%d, "
-                  "samples=%lu)",
+    ESP_LOGI(TAG,
+             "PTP master pinned to tracked source %016llx (locked=%d, "
+             "samples=%lu)",
              (unsigned long long)clock_id, ptp.locked,
              (unsigned long)ptp.sample_count);
     return;

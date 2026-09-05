@@ -49,7 +49,7 @@ typedef struct {
   TaskHandle_t task;
   int socket;
   volatile bool should_stop;
-  volatile bool is_old; // Marked as old client being killed
+  volatile bool is_old;         // Marked as old client being killed
   volatile bool audio_released; // cleanup has stopped/flushed the audio path
 } client_slot_t;
 
@@ -297,7 +297,7 @@ static void client_task(void *pvParameters) {
 cleanup:
   ESP_LOGI(TAG, "sid=%" PRIu32 " disconnected (slot %d, %s)", conn->sid,
            slot_idx,
-           slot->is_old       ? "replaced by new client"
+           slot->is_old        ? "replaced by new client"
            : slot->should_stop ? "server stop"
                                : "peer closed");
   free(buffer);
@@ -545,9 +545,9 @@ static void server_task(void *pvParameters) {
         waited_ms += 20;
       }
       ESP_LOGI(TAG, "Hand-over: old session %s after %d ms",
-               clients[current_slot].task == NULL ? "exited"
+               clients[current_slot].task == NULL     ? "exited"
                : clients[current_slot].audio_released ? "released audio"
-                                                       : "still busy",
+                                                      : "still busy",
                waited_ms);
     }
 

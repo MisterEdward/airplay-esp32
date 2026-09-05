@@ -518,21 +518,38 @@ static void apply_state(led_state_t state) {
   render_state(state);
 }
 
+static bool s_airplay_session;  // an AirPlay session owns the indication
+static bool s_external_playing; // USB speaker path has audio
+
+void led_set_external_playing(bool playing) {
+  if (s_external_playing == playing) {
+    return;
+  }
+  s_external_playing = playing;
+  if (!s_airplay_session && s_current_state != STATE_ERROR) {
+    apply_state(playing ? STATE_PLAYING : STATE_STANDBY);
+  }
+}
+
 static void on_rtsp_event(rtsp_event_t event, const rtsp_event_data_t *data,
                           void *user_data) {
   ESP_LOGD(TAG, "RTSP event: %d", event);
   switch (event) {
   case RTSP_EVENT_CLIENT_CONNECTED:
+    s_airplay_session = true;
     apply_state(STATE_PAUSED);
     break;
   case RTSP_EVENT_PLAYING:
+    s_airplay_session = true;
     apply_state(STATE_PLAYING);
     break;
   case RTSP_EVENT_PAUSED:
+    s_airplay_session = true;
     apply_state(STATE_PAUSED);
     break;
   case RTSP_EVENT_DISCONNECTED:
-    apply_state(STATE_STANDBY);
+    s_airplay_session = false;
+    apply_state(s_external_playing ? STATE_PLAYING : STATE_STANDBY);
     break;
   case RTSP_EVENT_METADATA:
     break;

@@ -25,7 +25,7 @@
 
 typedef struct {
   char id[SOURCE_VOLUME_ID_SIZE];
-  int32_t centi_db; // volume in dB × 100, AirPlay range -3000..0
+  int32_t centi_db;   // volume in dB × 100, AirPlay range -3000..0
   uint32_t last_used; // monotonically increasing use counter (LRU)
 } source_volume_entry_t;
 

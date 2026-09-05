@@ -53,10 +53,10 @@
 // Slot payload: AAC-LC at Apple Music's 256 kbps is ~750 bytes per 1024
 // samples; 2048 leaves headroom for ALAC-over-TCP or higher rates.  48 slots
 // ≈ 1.1 s of audio, comfortably more than the sender's post-seek burst.
-#define BUFFERED_SLOT_PAYLOAD     2048
-#define BUFFERED_SLOT_COUNT       48
-#define BUFFERED_STALL_TIMEOUT_S  8
-#define BUFFERED_HOLD_POLL_MS     2
+#define BUFFERED_SLOT_PAYLOAD    2048
+#define BUFFERED_SLOT_COUNT      48
+#define BUFFERED_STALL_TIMEOUT_S 8
+#define BUFFERED_HOLD_POLL_MS    2
 
 #if CONFIG_FREERTOS_UNICORE
 #define BUFFERED_DECODER_CORE 0
@@ -102,13 +102,14 @@ static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
         }
         int64_t now_us = esp_timer_get_time();
         state->buffered_stall_timeouts++;
-        ESP_LOGW(TAG,
-                 "Buffered audio stalled while playing: waited=%lld ms "
-                 "last_packet=%lld ms ago partial=%u/%u — reopening data "
-                 "connection (listener stays up)",
-                 (long long)((now_us - started_us) / 1000LL),
-                 (long long)((now_us - state->buffered_last_packet_us) / 1000LL),
-                 (unsigned)total, (unsigned)len);
+        ESP_LOGW(
+            TAG,
+            "Buffered audio stalled while playing: waited=%lld ms "
+            "last_packet=%lld ms ago partial=%u/%u — reopening data "
+            "connection (listener stays up)",
+            (long long)((now_us - started_us) / 1000LL),
+            (long long)((now_us - state->buffered_last_packet_us) / 1000LL),
+            (unsigned)total, (unsigned)len);
         return -1;
       }
       if (stream->running) {
@@ -391,10 +392,11 @@ static void buffered_free_queues(audio_receiver_state_t *state) {
 
 static esp_err_t buffered_init_queues(audio_receiver_state_t *state) {
   buffered_free_queues(state);
-  state->buffered_packet_pool = heap_caps_calloc(
-      BUFFERED_SLOT_COUNT, sizeof(buffered_slot_t),
-      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  state->buffered_free_queue = xQueueCreate(BUFFERED_SLOT_COUNT, sizeof(uint8_t));
+  state->buffered_packet_pool =
+      heap_caps_calloc(BUFFERED_SLOT_COUNT, sizeof(buffered_slot_t),
+                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  state->buffered_free_queue =
+      xQueueCreate(BUFFERED_SLOT_COUNT, sizeof(uint8_t));
   state->buffered_ready_queue =
       xQueueCreate(BUFFERED_SLOT_COUNT, sizeof(uint8_t));
   if (!state->buffered_packet_pool || !state->buffered_free_queue ||

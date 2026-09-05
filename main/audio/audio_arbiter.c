@@ -5,6 +5,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "led.h"
 
 #ifdef CONFIG_USB_AUDIO_SOURCE
 #include "usb_audio_source.h"
@@ -29,6 +30,19 @@ static void give_to(audio_source_t src, const char *why) {
                                           : "none",
            why);
 }
+
+#ifdef CONFIG_USB_AUDIO_SOURCE
+// The LED is event-driven for AirPlay; USB has no session events, so poll
+// its streaming flag at a human rate.
+static esp_timer_handle_t s_led_poll_timer;
+static void led_poll_cb(void *arg) {
+  (void)arg;
+  usb_audio_stats_t st;
+  usb_audio_source_get_stats(&st);
+  led_set_external_playing(
+      audio_output_active_source() == AUDIO_SOURCE_EXTERNAL && st.streaming);
+}
+#endif
 
 static void release_timer_cb(void *arg) {
   (void)arg;
@@ -88,6 +102,15 @@ esp_err_t audio_arbiter_init(bool usb_available) {
     return err;
   }
   rtsp_events_register(on_rtsp_event, NULL);
+#ifdef CONFIG_USB_AUDIO_SOURCE
+  if (usb_available) {
+    const esp_timer_create_args_t poll = {.callback = led_poll_cb,
+                                          .name = "arb_led"};
+    if (esp_timer_create(&poll, &s_led_poll_timer) == ESP_OK) {
+      esp_timer_start_periodic(s_led_poll_timer, 500000);
+    }
+  }
+#endif
   // Nobody is connected at boot: USB (if present) may have the speaker.
   give_to(usb_available ? AUDIO_SOURCE_EXTERNAL : AUDIO_SOURCE_AIRPLAY, "boot");
   return ESP_OK;

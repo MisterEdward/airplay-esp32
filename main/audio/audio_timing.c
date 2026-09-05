@@ -57,11 +57,11 @@
 //   interval 1 → 2841 ppm (used only for errors > POS_SERVO_TIER2_US, i.e.
 //                          a real disturbance; shairport-sync's default
 //                          stuffing rate is the same 1 sample/frame)
-#define POS_SERVO_TIER1_US       6000 // > this → interval 2
-#define POS_SERVO_TIER2_US       15000 // > this → interval 1
-#define POS_SERVO_INTERVAL_SLOW  4
-#define POS_SERVO_INTERVAL_MED   2
-#define POS_SERVO_INTERVAL_FAST  1
+#define POS_SERVO_TIER1_US      6000  // > this → interval 2
+#define POS_SERVO_TIER2_US      15000 // > this → interval 1
+#define POS_SERVO_INTERVAL_SLOW 4
+#define POS_SERVO_INTERVAL_MED  2
+#define POS_SERVO_INTERVAL_FAST 1
 // Innovation clamp: cap how far one frame's measurement can move the filter.
 // The per-frame error measurement is NOISY in a one-sided way: when the
 // render task is briefly starved (WiFi, metadata bursts) the READ happens
@@ -442,7 +442,8 @@ static void release_item(audio_timing_t *timing, audio_buffer_t *buffer,
 }
 
 // Emit `frames` frames of silence and report it as non-media.
-static size_t emit_silence(audio_timing_t *timing, int16_t *out, size_t frames) {
+static size_t emit_silence(audio_timing_t *timing, int16_t *out,
+                           size_t frames) {
   memset(out, 0, frames * AUDIO_OUT_CHANNELS * sizeof(int16_t));
   timing->read_has_media = false;
   return frames;
@@ -495,8 +496,9 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       !timing->ptp_locked && !timing->ptp_wait_expired) {
     if (ptp_clock_is_locked_to(timing->anchor_clock_id)) {
       timing->ptp_locked = true;
-      ESP_LOGI(TAG, "PTP locked to %016llx before playout; network timeline "
-                    "latched",
+      ESP_LOGI(TAG,
+               "PTP locked to %016llx before playout; network timeline "
+               "latched",
                (unsigned long long)timing->anchor_clock_id);
     } else {
       int64_t waited_us =
@@ -577,8 +579,7 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
     // the boundary, then discard the rest and start the next track fresh.
     if (timing->deferred_flush_pending) {
       if ((int32_t)(hdr->rtp_timestamp - timing->flush_until_ts) >= 0) {
-        ESP_LOGI(TAG,
-                 "Deferred flush at ts=%" PRIu32 " (until_ts=%" PRIu32 ")",
+        ESP_LOGI(TAG, "Deferred flush at ts=%" PRIu32 " (until_ts=%" PRIu32 ")",
                  hdr->rtp_timestamp, timing->flush_until_ts);
         release_item(timing, buffer, item, from_pending);
         audio_buffer_flush(buffer);
@@ -652,8 +653,8 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
             ((int64_t)frame_samples * 1000000LL) / format->sample_rate;
         // Acquisition regime: first frame under this anchor, a pending
         // re-check, the frame after a drop run, or the frame after a gap.
-        bool acquiring = !timing->acquired || from_pending || dropped_late ||
-                         gap;
+        bool acquiring =
+            !timing->acquired || from_pending || dropped_late || gap;
 
         if (acquiring) {
           // ---- exact alignment -------------------------------------
@@ -815,17 +816,17 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
           ptp_clock_get_stats(&ps);
           int64_t ptp_gap_us =
               (ps.last_offset_ns - ps.filtered_offset_ns) / 1000LL;
-          ESP_LOGI(TAG,
-                   "Playout: err=%+lld us filt=%+lld us servo=%s/%u trims=%" PRIu32
-                   " buffered=%d depth=%lld ms ptp_gap=%lld us outliers=%" PRIu32
-                   " gaps=%" PRIu32 " under=%" PRIu32 " domain=%s rtp=%" PRIu32,
-                   (long long)on_time_err_us,
-                   (long long)timing->pos_err_filtered_us,
-                   timing->servo_engaged ? "on" : "off", timing->servo_interval,
-                   timing->servo_trims, buffered_frames, (long long)depth_ms,
-                   (long long)ptp_gap_us, ps.outlier_count, timing->gaps,
-                   audio_output_get_underruns(),
-                   audio_timing_sync_mode_name(timing), played_rtp_timestamp);
+          ESP_LOGI(
+              TAG,
+              "Playout: err=%+lld us filt=%+lld us servo=%s/%u trims=%" PRIu32
+              " buffered=%d depth=%lld ms ptp_gap=%lld us outliers=%" PRIu32
+              " gaps=%" PRIu32 " under=%" PRIu32 " domain=%s rtp=%" PRIu32,
+              (long long)on_time_err_us, (long long)timing->pos_err_filtered_us,
+              timing->servo_engaged ? "on" : "off", timing->servo_interval,
+              timing->servo_trims, buffered_frames, (long long)depth_ms,
+              (long long)ptp_gap_us, ps.outlier_count, timing->gaps,
+              audio_output_get_underruns(), audio_timing_sync_mode_name(timing),
+              played_rtp_timestamp);
         }
 
         int64_t innovation = on_time_err_us - timing->pos_err_filtered_us;
@@ -850,10 +851,10 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
                    (long long)timing->pos_err_filtered_us, timing->servo_trims);
         }
         // Tier the authority by the size of the remaining error.
-        uint8_t interval = abs_err > POS_SERVO_TIER2_US ? POS_SERVO_INTERVAL_FAST
-                           : abs_err > POS_SERVO_TIER1_US
-                               ? POS_SERVO_INTERVAL_MED
-                               : POS_SERVO_INTERVAL_SLOW;
+        uint8_t interval =
+            abs_err > POS_SERVO_TIER2_US   ? POS_SERVO_INTERVAL_FAST
+            : abs_err > POS_SERVO_TIER1_US ? POS_SERVO_INTERVAL_MED
+                                           : POS_SERVO_INTERVAL_SLOW;
         if (interval != timing->servo_interval) {
           timing->servo_interval = interval;
           if (timing->servo_engaged) {
@@ -887,11 +888,11 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
     if (out_samples == frame_samples && channels == AUDIO_OUT_CHANNELS) {
       memcpy(out, pcm, frame_samples * out_ch * sizeof(int16_t));
     } else {
-      size_t m = out_samples == frame_samples
-                     ? SIZE_MAX
-                     : quietest_sample_index(pcm, frame_samples, channels,
-                                             channels < out_ch ? channels
-                                                               : out_ch);
+      size_t m =
+          out_samples == frame_samples
+              ? SIZE_MAX
+              : quietest_sample_index(pcm, frame_samples, channels,
+                                      channels < out_ch ? channels : out_ch);
       size_t o = 0;
       for (size_t i = 0; i < frame_samples; i++) {
         if (out_samples < frame_samples && i == m) {

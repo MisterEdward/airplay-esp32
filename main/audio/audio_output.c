@@ -271,8 +271,8 @@ static void fade_tail(int16_t *pcm, size_t frames) {
     return;
   }
   for (size_t i = 0; i < frames; i++) {
-    int32_t gain = (int32_t)(((uint64_t)(frames - 1 - i) * 32768ULL) /
-                             (frames - 1));
+    int32_t gain =
+        (int32_t)(((uint64_t)(frames - 1 - i) * 32768ULL) / (frames - 1));
     pcm[2 * i] = (int16_t)(((int32_t)pcm[2 * i] * gain) / 32768);
     pcm[2 * i + 1] = (int16_t)(((int32_t)pcm[2 * i + 1] * gain) / 32768);
   }
@@ -532,9 +532,10 @@ esp_err_t audio_output_init(void) {
 
   ESP_RETURN_ON_ERROR(i2s_channel_enable(tx_handle), TAG,
                       "channel enable failed");
-  ESP_LOGI(TAG, "I2S initialized: Rate=%u, DMA_Desc=%d, DMA_Frame=%d (%u ms)",
-           (unsigned int)OUTPUT_RATE, I2S_DMA_DESC_NUM, I2S_DMA_FRAME_NUM,
-           (unsigned)(I2S_DMA_DESC_NUM * I2S_DMA_FRAME_NUM * 1000 / OUTPUT_RATE));
+  ESP_LOGI(
+      TAG, "I2S initialized: Rate=%u, DMA_Desc=%d, DMA_Frame=%d (%u ms)",
+      (unsigned int)OUTPUT_RATE, I2S_DMA_DESC_NUM, I2S_DMA_FRAME_NUM,
+      (unsigned)(I2S_DMA_DESC_NUM * I2S_DMA_FRAME_NUM * 1000 / OUTPUT_RATE));
 
   // MCLK/BCLK/LRCK are now running.  Some codecs need this edge to finish
   // their clock setup.
@@ -681,8 +682,9 @@ bool audio_output_get_pipeline_us(int64_t *now_us, uint32_t *pipeline_us) {
     // The held block is written AFTER the block being requested is
     // produced, so it sits between "now" and the requested block's first
     // sample exactly like the DMA queue does.
-    *pipeline_us = (uint32_t)(((uint64_t)(queued + s_held_frames) * 1000000ULL) /
-                              OUTPUT_RATE);
+    *pipeline_us =
+        (uint32_t)(((uint64_t)(queued + s_held_frames) * 1000000ULL) /
+                   OUTPUT_RATE);
   }
   return true;
 }

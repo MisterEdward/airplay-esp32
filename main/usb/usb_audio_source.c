@@ -16,7 +16,7 @@
 
 static const char *TAG = "usb_audio";
 
-#define OUTPUT_RATE CONFIG_OUTPUT_SAMPLE_RATE_HZ
+#define OUTPUT_RATE     CONFIG_OUTPUT_SAMPLE_RATE_HZ
 #define BYTES_PER_FRAME 4 // stereo int16
 
 // Ring: 24 KB = 6144 frames = 128 ms at 48 kHz.  Internal RAM so the 1 ms
@@ -30,7 +30,7 @@ static const char *TAG = "usb_audio";
 #define ADAPTER_ENGAGE_FRAMES  (OUTPUT_RATE / 250) // 4 ms
 #define ADAPTER_RELEASE_FRAMES (OUTPUT_RATE / 500) // 2 ms
 // Depth filter: EMA with 1/32 weight per pull (~0.25 s at 7 ms blocks).
-#define DEPTH_FILTER_SHIFT 5
+#define DEPTH_FILTER_SHIFT   5
 #define STREAMING_TIMEOUT_US 500000
 
 static RingbufHandle_t s_ring;
@@ -346,7 +346,8 @@ void usb_audio_source_get_stats(usb_audio_stats_t *out) {
   out->host_state = s_host_state;
   out->remote_wakeup_armed = s_remote_wakeup_armed;
   out->muted = s_muted;
-  out->streaming = (esp_timer_get_time() - s_last_data_us) < STREAMING_TIMEOUT_US;
+  out->streaming =
+      (esp_timer_get_time() - s_last_data_us) < STREAMING_TIMEOUT_US;
 }
 
 esp_err_t usb_audio_source_wake_host(void) {

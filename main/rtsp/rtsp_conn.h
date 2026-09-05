@@ -28,7 +28,7 @@ struct rtsp_conn {
   // Stable identity of the sender (AirPlay 2 SETUP "deviceID", normalised),
   // used to remember its volume.  Empty until the sender identifies itself.
   char source_id[40];
-  char source_name[48];  // friendly name from SETUP, for logs/status
+  char source_name[48]; // friendly name from SETUP, for logs/status
   char source_model[32];
   bool volume_from_sender; // a volume was received on this session
   // Diagnostics: per-connection id and timestamps for the event log.

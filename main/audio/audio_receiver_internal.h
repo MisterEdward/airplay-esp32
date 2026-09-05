@@ -57,7 +57,7 @@ typedef struct {
   // Diagnostics
   uint32_t buffered_connections;
   uint32_t buffered_stall_timeouts;
-  uint32_t buffered_held_packets;    // packets held for an anchor (total)
+  uint32_t buffered_held_packets;     // packets held for an anchor (total)
   uint32_t buffered_generation_drops; // packets dropped as pre-seek
   int64_t buffered_last_packet_us;
   int64_t buffered_flush_us; // when the last seek flush happened

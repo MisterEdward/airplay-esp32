@@ -57,7 +57,7 @@ static void test_envelope_fade_in(void) {
     fill(pcm, 480, 32767);
     audio_envelope_apply(&e, pcm, 480, 32768);
     for (size_t i = 0; i < 480; i++) {
-      assert(pcm[2 * i] >= last);           // monotonic ramp
+      assert(pcm[2 * i] >= last);            // monotonic ramp
       assert(pcm[2 * i] == -pcm[2 * i + 1]); // L/R share the gain
       last = pcm[2 * i];
     }

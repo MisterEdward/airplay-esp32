@@ -112,7 +112,8 @@ cJSON *device_status_build_json(void) {
   audio_output_get_stats(&out);
   cJSON *output = cJSON_CreateObject();
   cJSON_AddStringToObject(output, "source", source_name(out.active_source));
-  cJSON_AddStringToObject(output, "envelope", envelope_name(out.envelope_state));
+  cJSON_AddStringToObject(output, "envelope",
+                          envelope_name(out.envelope_state));
   cJSON_AddBoolToObject(output, "pause_pending", out.pause_pending);
   cJSON_AddNumberToObject(output, "dma_underruns", out.dma_underruns);
   cJSON_AddNumberToObject(output, "source_starved", out.source_starved);
@@ -145,9 +146,9 @@ cJSON *device_status_build_json(void) {
     cJSON_AddBoolToObject(airplay, "stream_active", sess.stream_active);
     cJSON_AddBoolToObject(airplay, "paused", sess.stream_paused);
     cJSON_AddNumberToObject(airplay, "protocol", sess.protocol_version);
-    cJSON_AddNumberToObject(airplay, "connected_s",
-                            (double)((esp_timer_get_time() - sess.connected_us) /
-                                     1000000LL));
+    cJSON_AddNumberToObject(
+        airplay, "connected_s",
+        (double)((esp_timer_get_time() - sess.connected_us) / 1000000LL));
   } else {
     cJSON_AddBoolToObject(airplay, "connected", false);
   }
@@ -164,9 +165,9 @@ cJSON *device_status_build_json(void) {
       cJSON_AddStringToObject(np, "album", s_meta.album);
       cJSON_AddNumberToObject(np, "duration_s", s_meta.duration_secs);
       cJSON_AddNumberToObject(np, "position_s", s_meta.position_secs);
-      cJSON_AddNumberToObject(np, "age_s",
-                              (double)((esp_timer_get_time() - s_meta_us) /
-                                       1000000LL));
+      cJSON_AddNumberToObject(
+          np, "age_s",
+          (double)((esp_timer_get_time() - s_meta_us) / 1000000LL));
     }
     xSemaphoreGive(s_lock);
   }
@@ -180,7 +181,8 @@ cJSON *device_status_build_json(void) {
   cJSON_AddBoolToObject(timing, "anchor_valid", diag.anchor_valid);
   cJSON_AddBoolToObject(timing, "playing", diag.playing);
   cJSON_AddBoolToObject(timing, "acquired", diag.acquired);
-  cJSON_AddNumberToObject(timing, "acquire_err_us", (double)diag.acquire_err_us);
+  cJSON_AddNumberToObject(timing, "acquire_err_us",
+                          (double)diag.acquire_err_us);
   cJSON_AddNumberToObject(timing, "servo_err_us", (double)diag.servo_err_us);
   cJSON_AddBoolToObject(timing, "servo_engaged", diag.servo_engaged);
   cJSON_AddNumberToObject(timing, "servo_trims", diag.servo_trims);
@@ -202,9 +204,9 @@ cJSON *device_status_build_json(void) {
   cJSON_AddStringToObject(ptp, "clock", clk);
   cJSON_AddNumberToObject(ptp, "sync_count", ps.sync_count);
   cJSON_AddNumberToObject(ptp, "outliers", ps.outlier_count);
-  cJSON_AddNumberToObject(ptp, "gap_us",
-                          (double)((ps.last_offset_ns - ps.filtered_offset_ns) /
-                                   1000LL));
+  cJSON_AddNumberToObject(
+      ptp, "gap_us",
+      (double)((ps.last_offset_ns - ps.filtered_offset_ns) / 1000LL));
   cJSON_AddItemToObject(root, "ptp", ptp);
 
   // ---- USB / PC ---------------------------------------------------------
@@ -251,15 +253,17 @@ cJSON *device_status_build_json(void) {
   esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
   if (running && esp_ota_get_state_partition(running, &state) == ESP_OK) {
     cJSON_AddStringToObject(fw, "ota_state",
-                            state == ESP_OTA_IMG_PENDING_VERIFY ? "pending_verify"
-                            : state == ESP_OTA_IMG_VALID        ? "valid"
-                            : state == ESP_OTA_IMG_NEW          ? "new"
-                                                                : "undefined");
+                            state == ESP_OTA_IMG_PENDING_VERIFY
+                                ? "pending_verify"
+                            : state == ESP_OTA_IMG_VALID ? "valid"
+                            : state == ESP_OTA_IMG_NEW   ? "new"
+                                                         : "undefined");
     cJSON_AddStringToObject(fw, "partition", running->label);
   }
   cJSON_AddNumberToObject(fw, "uptime_s",
                           (double)(esp_timer_get_time() / 1000000LL));
-  cJSON_AddNumberToObject(fw, "log_journal_kb", log_stream_journal_used() / 1024);
+  cJSON_AddNumberToObject(fw, "log_journal_kb",
+                          log_stream_journal_used() / 1024);
   cJSON_AddItemToObject(root, "firmware", fw);
 
   cJSON_AddBoolToObject(root, "success", true);

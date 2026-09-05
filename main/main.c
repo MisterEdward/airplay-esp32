@@ -94,9 +94,11 @@ static void ota_verify_arm(void) {
   const esp_timer_create_args_t args = {.callback = ota_verify_timer_cb,
                                         .name = "ota_verify"};
   if (esp_timer_create(&args, &s_ota_timer) == ESP_OK) {
-    esp_timer_start_once(s_ota_timer, (uint64_t)OTA_VERIFY_TIMEOUT_S * 1000000ULL);
-    ESP_LOGW(TAG, "Image pending verification: must reach the network within "
-                  "%d s or it will be rolled back",
+    esp_timer_start_once(s_ota_timer,
+                         (uint64_t)OTA_VERIFY_TIMEOUT_S * 1000000ULL);
+    ESP_LOGW(TAG,
+             "Image pending verification: must reach the network within "
+             "%d s or it will be rolled back",
              OTA_VERIFY_TIMEOUT_S);
   }
 }

@@ -179,7 +179,8 @@ static void broadcast_task(void *arg) {
 
     int fds[CONFIG_LWIP_MAX_SOCKETS];
     size_t fd_count = CONFIG_LWIP_MAX_SOCKETS;
-    if (!s_server || httpd_get_client_list(s_server, &fd_count, fds) != ESP_OK) {
+    if (!s_server ||
+        httpd_get_client_list(s_server, &fd_count, fds) != ESP_OK) {
       continue;
     }
 
@@ -215,7 +216,8 @@ static void broadcast_task(void *arg) {
           if (!s_ws_clients[i].active) {
             client = &s_ws_clients[i];
             client->fd = fds[f];
-            client->cursor = end > WS_BACKLOG_BYTES ? end - WS_BACKLOG_BYTES : 0;
+            client->cursor =
+                end > WS_BACKLOG_BYTES ? end - WS_BACKLOG_BYTES : 0;
             client->active = true;
             break;
           }
@@ -228,8 +230,8 @@ static void broadcast_task(void *arg) {
       // slow client cannot monopolise the task.
       for (int chunk = 0; chunk < 8; chunk++) {
         uint64_t missed = 0;
-        size_t len = journal_read_locked(&client->cursor, buf, MAX_SEND_CHUNK,
-                                         &missed);
+        size_t len =
+            journal_read_locked(&client->cursor, buf, MAX_SEND_CHUNK, &missed);
         if (len == 0) {
           break;
         }
@@ -295,8 +297,7 @@ static esp_err_t logs_download_handler(httpd_req_t *req) {
     return ESP_FAIL;
   }
   char disp[80];
-  snprintf(disp, sizeof(disp),
-           "attachment; filename=\"fable-%08llx.log\"",
+  snprintf(disp, sizeof(disp), "attachment; filename=\"fable-%08llx.log\"",
            (unsigned long long)(s_boot_id & 0xFFFFFFFFULL));
   httpd_resp_set_hdr(req, "Content-Disposition", disp);
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -363,9 +364,9 @@ static bool level_from_name(const char *name, esp_log_level_t *level) {
 // Tags a diagnostician is most likely to raise to DEBUG.  Listed so the
 // WebUI can offer them without the user having to remember the strings.
 static const char *const s_known_tags[] = {
-    "*",          "audio_time",   "audio_recv", "audio_buf",  "audio_output",
-    "rtsp_server", "rtsp_handlers", "ptp_clock",  "usb_audio",  "pc_wake",
-    "source_vol", "wifi",         "log_stream",
+    "*",           "audio_time",    "audio_recv", "audio_buf", "audio_output",
+    "rtsp_server", "rtsp_handlers", "ptp_clock",  "usb_audio", "pc_wake",
+    "source_vol",  "wifi",          "log_stream",
 };
 
 static esp_err_t logs_level_get_handler(httpd_req_t *req) {
@@ -379,9 +380,11 @@ static esp_err_t logs_level_get_handler(httpd_req_t *req) {
     cJSON_AddItemToArray(tags, t);
   }
   cJSON_AddItemToObject(json, "tags", tags);
-  cJSON_AddStringToObject(json, "max_compiled",
-                          level_name((esp_log_level_t)CONFIG_LOG_MAXIMUM_LEVEL));
-  cJSON_AddNumberToObject(json, "journal_bytes", (double)log_stream_journal_used());
+  cJSON_AddStringToObject(
+      json, "max_compiled",
+      level_name((esp_log_level_t)CONFIG_LOG_MAXIMUM_LEVEL));
+  cJSON_AddNumberToObject(json, "journal_bytes",
+                          (double)log_stream_journal_used());
   cJSON_AddNumberToObject(json, "truncated_lines", (double)s_truncated_lines);
   cJSON_AddBoolToObject(json, "success", true);
   char *out = cJSON_PrintUnformatted(json);
@@ -430,7 +433,8 @@ static esp_err_t logs_level_post_handler(httpd_req_t *req) {
 esp_err_t log_stream_init(void) {
   char *storage = NULL;
 #ifdef CONFIG_SPIRAM
-  storage = heap_caps_malloc(LOG_JOURNAL_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  storage =
+      heap_caps_malloc(LOG_JOURNAL_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 #endif
   size_t size = LOG_JOURNAL_SIZE;
   if (!storage) {
@@ -462,16 +466,19 @@ esp_err_t log_stream_register(httpd_handle_t server) {
     ESP_LOGE(TAG, "Failed to register /ws/logs: %s", esp_err_to_name(err));
     return err;
   }
-  httpd_uri_t pull = {.uri = "/api/logs", .method = HTTP_GET,
-                      .handler = logs_pull_handler};
+  httpd_uri_t pull = {
+      .uri = "/api/logs", .method = HTTP_GET, .handler = logs_pull_handler};
   httpd_register_uri_handler(server, &pull);
-  httpd_uri_t dl = {.uri = "/api/logs/download", .method = HTTP_GET,
+  httpd_uri_t dl = {.uri = "/api/logs/download",
+                    .method = HTTP_GET,
                     .handler = logs_download_handler};
   httpd_register_uri_handler(server, &dl);
-  httpd_uri_t lvl_get = {.uri = "/api/logs/level", .method = HTTP_GET,
+  httpd_uri_t lvl_get = {.uri = "/api/logs/level",
+                         .method = HTTP_GET,
                          .handler = logs_level_get_handler};
   httpd_register_uri_handler(server, &lvl_get);
-  httpd_uri_t lvl_post = {.uri = "/api/logs/level", .method = HTTP_POST,
+  httpd_uri_t lvl_post = {.uri = "/api/logs/level",
+                          .method = HTTP_POST,
                           .handler = logs_level_post_handler};
   httpd_register_uri_handler(server, &lvl_post);
 

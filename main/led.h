@@ -20,6 +20,12 @@ typedef enum {
 void led_init(void);
 
 /**
+ * External (non-AirPlay) source playing, e.g. the USB speaker path.  Drives
+ * the PLAYING/STANDBY indication while no AirPlay session owns the LED.
+ */
+void led_set_external_playing(bool playing);
+
+/**
  * Feed audio samples for VU meter mode.
  * Call this from the audio path when playing.
  */

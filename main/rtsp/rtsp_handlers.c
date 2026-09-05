@@ -449,8 +449,9 @@ int rtsp_dispatch(int socket, rtsp_conn_t *conn, const uint8_t *raw_request,
     return -1;
   }
   conn->requests++;
-  ESP_LOGD(TAG, "sid=%" PRIu32 " #%" PRIu32 " %s %s cseq=%d body=%u "
-                "paused=%d active=%d",
+  ESP_LOGD(TAG,
+           "sid=%" PRIu32 " #%" PRIu32 " %s %s cseq=%d body=%u "
+           "paused=%d active=%d",
            conn->sid, conn->requests, req.method, req.path, req.cseq,
            (unsigned)req.body_len, conn->stream_paused, conn->stream_active);
 
@@ -1232,7 +1233,8 @@ static void handle_setup(int socket, rtsp_conn_t *conn,
       return;
     }
 
-    ESP_LOGI(TAG, "sid=%" PRIu32 " SETUP: initial connection setup (no streams)",
+    ESP_LOGI(TAG,
+             "sid=%" PRIu32 " SETUP: initial connection setup (no streams)",
              conn->sid);
 
     // The initial SETUP bplist carries the sender's identity: deviceID (a
@@ -1248,8 +1250,9 @@ static void handle_setup(int socket, rtsp_conn_t *conn,
                              sizeof(device_id))) {
         rtsp_conn_identify_source(conn, device_id, name, model);
       } else {
-        ESP_LOGI(TAG, "sid=%" PRIu32 " SETUP has no deviceID (name='%s' "
-                      "model='%s')",
+        ESP_LOGI(TAG,
+                 "sid=%" PRIu32 " SETUP has no deviceID (name='%s' "
+                 "model='%s')",
                  conn->sid, name, model);
       }
     }
@@ -1938,8 +1941,9 @@ static void handle_setrateanchortime(int socket, rtsp_conn_t *conn,
     rtsp_events_emit(RTSP_EVENT_PAUSED, NULL);
     conn->stream_paused = true;
   } else {
-    ESP_LOGI(TAG, "sid=%" PRIu32 " SETRATEANCHORTIME rate=%.1f -> PLAY "
-                  "(was_paused=%d)",
+    ESP_LOGI(TAG,
+             "sid=%" PRIu32 " SETRATEANCHORTIME rate=%.1f -> PLAY "
+             "(was_paused=%d)",
              conn->sid, rate, conn->stream_paused);
     conn->stream_paused = false;
     audio_output_resume();

@@ -22,7 +22,7 @@
 typedef struct {
   char *data;
   size_t capacity;
-  uint64_t end;    // absolute byte index one past the newest byte
+  uint64_t end;     // absolute byte index one past the newest byte
   uint64_t boot_id; // arbitrary value so a reader can detect a restart
 } log_journal_t;
 

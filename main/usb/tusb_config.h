@@ -20,7 +20,7 @@ extern "C" {
 
 #define CFG_TUSB_RHPORT0_MODE (OPT_MODE_DEVICE | OPT_MODE_FULL_SPEED)
 #define CFG_TUSB_OS           OPT_OS_FREERTOS
-#define CFG_TUSB_OS_INC_PATH  freertos/
+#define CFG_TUSB_OS_INC_PATH  freertos /
 #define CFG_TUSB_DEBUG        0
 #define ESP_PLATFORM          1
 

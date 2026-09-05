@@ -80,9 +80,9 @@ __attribute__((weak)) audio_source_t audio_output_active_source(void) {
   return AUDIO_SOURCE_AIRPLAY;
 }
 
-__attribute__((weak)) void
-audio_output_set_source_volume(audio_source_t source, int32_t volume_q15,
-                               bool immediate) {
+__attribute__((weak)) void audio_output_set_source_volume(audio_source_t source,
+                                                          int32_t volume_q15,
+                                                          bool immediate) {
   (void)source;
   (void)volume_q15;
   (void)immediate;

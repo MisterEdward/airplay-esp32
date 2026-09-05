@@ -46,7 +46,8 @@ uint8_t const *tud_descriptor_device_cb(void) {
   return (uint8_t const *)&s_device_descriptor;
 }
 
-static const uint8_t s_hid_report_descriptor[] = {TUD_HID_REPORT_DESC_KEYBOARD()};
+static const uint8_t s_hid_report_descriptor[] = {
+    TUD_HID_REPORT_DESC_KEYBOARD()};
 
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance) {
   (void)instance;
@@ -77,8 +78,9 @@ static const uint8_t s_configuration_descriptor[] = {
                          USB_EP_AUDIO_OUT, 0, USB_EP_AUDIO_FB),
     // HID keyboard (boot protocol) on its own interrupt IN endpoint, 5 ms.
     TUD_HID_DESCRIPTOR(USB_ITF_HID_WAKE, USB_STR_HID_WAKE,
-                       HID_ITF_PROTOCOL_KEYBOARD, sizeof(s_hid_report_descriptor),
-                       USB_EP_HID_IN, CFG_TUD_HID_EP_BUFSIZE, 5),
+                       HID_ITF_PROTOCOL_KEYBOARD,
+                       sizeof(s_hid_report_descriptor), USB_EP_HID_IN,
+                       CFG_TUD_HID_EP_BUFSIZE, 5),
 };
 
 _Static_assert(sizeof(s_configuration_descriptor) == USB_CONFIG_TOTAL_LEN,
