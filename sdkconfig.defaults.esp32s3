@@ -50,3 +50,24 @@ CONFIG_I2S_GND_IO=14
 # CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
 #
 # See components/display/README.md for full setup instructions.
+
+# --- Fable 5.1 personal-board profile (ESP32-S3 + PCM5102A) -----------------
+# Fixed 48 kHz output.  AirPlay's 44.1 kHz is resampled by the sinc resampler;
+# the USB speaker path runs natively at 48 kHz.  The I2S clock is configured
+# once at boot and never switched, so source changes cannot pop or skew the
+# timing engine's pipeline measurement.
+CONFIG_OUTPUT_SAMPLE_RATE_48000=y
+
+# Keep lwIP's TCP/IP task on core 0 with WiFi.  With no affinity it floats
+# onto core 1 and preempts the audio and USB tasks in bursts.
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
+
+# OTA rollback: a new image must call esp_ota_mark_app_valid_cancel_rollback()
+# once the network and AirPlay stack are up, otherwise the bootloader reverts
+# to the previous image on the next reset.  NOTE: this only takes effect after
+# the bootloader itself is reflashed over the COM port once.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Compile DEBUG-level logs in (but keep INFO as the default) so the WebUI can
+# raise the level of individual tags at runtime for diagnostics.
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
