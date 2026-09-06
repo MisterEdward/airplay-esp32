@@ -25,6 +25,9 @@
  */
 #define AUDIO_PLAYBACK_TASK_PRIORITY 9
 
+/** Nominal render block and maximum request to the external pull source. */
+#define AUDIO_OUTPUT_BLOCK_FRAMES 352
+
 /**
  * Output channel mode. LEFT/RIGHT route the chosen source channel to both
  * speakers; MONO plays the (L+R)/2 downmix on both speakers; STEREO (default)

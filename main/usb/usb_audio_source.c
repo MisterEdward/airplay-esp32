@@ -270,6 +270,9 @@ static size_t usb_pull(int16_t *pcm, size_t max_frames, void *ctx) {
   // fewer when duplicating, so the output block length stays what the
   // render task asked for.
   size_t want_out = max_frames;
+  if (want_out > AUDIO_OUTPUT_BLOCK_FRAMES) {
+    want_out = AUDIO_OUTPUT_BLOCK_FRAMES;
+  }
   if (depth < want_out) {
     want_out = depth;
   }
@@ -281,16 +284,12 @@ static size_t usb_pull(int16_t *pcm, size_t max_frames, void *ctx) {
   }
 
   // The ring may hand the request back in two pieces (wrap-around).  Static
-  // scratch: 4 KB would not fit on the render task's stack, and only the
-  // render task ever calls this.
-  static int16_t tmp[2 * 1026];
-  if (want_in > 1025) {
-    want_in = 1025;
-    want_out = s_adapter_dir < 0 ? 1024 : (s_adapter_dir > 0 ? 1026 : 1025);
-    if (want_out > max_frames) {
-      want_out = max_frames;
-    }
-  }
+  // scratch holds one render block plus the adapter's extra input frame.
+  // Only the render task ever calls this. Clamp the request above so a
+  // future larger caller remains safe too.
+  _Static_assert(AUDIO_OUTPUT_BLOCK_FRAMES == 352,
+                 "Recheck the USB scratch RAM budget if render blocks change");
+  static int16_t tmp[2 * (AUDIO_OUTPUT_BLOCK_FRAMES + 1)];
   size_t got_bytes = 0;
   size_t need = want_in * BYTES_PER_FRAME;
   while (got_bytes < need) {
@@ -375,7 +374,7 @@ static void usb_state_poll_cb(void *arg) {
              "speed=%s packets=%" PRIu32 " fifo=%u ring=%" PRIu32
              " under=%" PRIu32 " over=%" PRIu32,
              !!(now & 1), !!(now & 2), !!(now & 4), !!(now & 8),
-             tud_speed_get() == TUSB_SPEED_HIGH ? "high"
+             tud_speed_get() == TUSB_SPEED_HIGH   ? "high"
              : tud_speed_get() == TUSB_SPEED_FULL ? "full"
                                                   : "none",
              s_stats.packets, (unsigned)tud_audio_n_available(0),

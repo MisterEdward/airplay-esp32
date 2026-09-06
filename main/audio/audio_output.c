@@ -74,7 +74,7 @@
 
 // Nominal block the sources produce (one AAC/ALAC chunk).  A silence block
 // written on source starvation has this length at the OUTPUT rate.
-#define FRAME_SAMPLES 352
+#define FRAME_SAMPLES AUDIO_OUTPUT_BLOCK_FRAMES
 // Maximum frames one pull may return: the timing engine may hand back up to
 // this much alignment silence in one call, or one chunk plus a servo sample.
 #define READ_CAPACITY_FRAMES 1025
