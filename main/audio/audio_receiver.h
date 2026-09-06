@@ -151,15 +151,13 @@ void audio_receiver_flush(void);
  */
 void audio_receiver_seek_flush(void);
 
+/** Mark any FLUSHBUFFERED request for reader packet diagnostics. */
+void audio_receiver_note_flushbuffered(void);
+
 /**
- * Arm a deferred flush for AirPlay 2 FLUSHBUFFERED with flushFromSeq.
- *
- * Instead of discarding the buffer immediately, audio_timing_read will
- * continue playing normally until it encounters a frame whose rtp_timestamp
- * >= flush_until_ts, at which point it bulk-flushes the remainder and sets
- * post_flush so the next track starts without delay.
- *
- * @param flush_until_ts  RTP timestamp boundary from flushUntilTS plist key.
+ * Arm a deferred flush for [flush_from_ts, flush_until_ts).
+ * Playout preserves the anchor unless a backwards timeline jump or a
+ * 2-second media stall requires an unscheduled quick-start recovery.
  */
 void audio_receiver_set_deferred_flush(uint32_t flush_from_ts,
                                        uint32_t flush_until_ts);

@@ -488,9 +488,8 @@ int rtsp_dispatch(int socket, rtsp_conn_t *conn, const uint8_t *raw_request,
       // A slow reply is invisible to the sender except as a timeout: in a
       // multiroom group the phone drops a speaker that answers late.
       if (took_us > 200000) {
-        ESP_LOGW(TAG, "sid=%" PRIu32 " #%" PRIu32 " %s took %lld ms",
-                 conn->sid, conn->requests, req.method,
-                 (long long)(took_us / 1000));
+        ESP_LOGW(TAG, "sid=%" PRIu32 " #%" PRIu32 " %s took %lld ms", conn->sid,
+                 conn->requests, req.method, (long long)(took_us / 1000));
       } else if (strcmp(req.method, "SETRATEANCHORTIME") == 0 ||
                  strcmp(req.method, "FLUSHBUFFERED") == 0 ||
                  strcmp(req.method, "FLUSH") == 0) {
@@ -1788,16 +1787,15 @@ static void handle_flushbuffered(int socket, rtsp_conn_t *conn,
   const uint8_t *body = req->body;
   size_t body_len = req->body_len;
 
+  audio_receiver_note_flushbuffered();
+
   // AirPlay 2 FLUSHBUFFERED carries an optional bplist with:
   //   flushFromSeq / flushFromTS  — first sequence/timestamp to discard
   //   flushUntilSeq / flushUntilTS — last sequence/timestamp to discard
   //
-  // If flushFromSeq is absent → immediate flush (stop and discard everything).
-  // If flushFromSeq is present → deferred flush: keep playing existing buffered
-  //   content until flushUntilTS is reached, then discard and start fresh.
-  //   The phone simultaneously starts streaming the new track, which fills the
-  //   buffer beyond flushUntilTS; audio_timing_read detects the boundary and
-  //   triggers the bulk-flush at the right moment.
+  // Without flushFromSeq this is immediate. Otherwise playout skips the
+  // declared [from, until) range, with recovery if crossfade changes the
+  // timeline or the sender never reaches until.
   bool has_deferred = false;
   if (body && body_len >= 8 && memcmp(body, "bplist00", 8) == 0) {
     int64_t flush_from_seq = 0, flush_from_ts = 0;

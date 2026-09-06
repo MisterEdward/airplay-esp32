@@ -21,10 +21,9 @@
  * queue and released to the RTP gates once the anchor is known.  v0.2.0
  * discarded them (discard_all_until_anchor), which cost ~0.5 s per seek.
  *
- * Stall handling: the sender normally streams continuously (it pre-buffers
- * seconds ahead).  If no bytes arrive for BUFFERED_STALL_TIMEOUT_S while we
- * are playing, only the data connection is closed; the listener stays up so
- * the sender can reconnect without a new RTSP session.
+ * Idle handling: buffered senders transmit in bursts and may stay quiet
+ * even with an empty PCM ring. A receive timeout never closes a live
+ * session's data socket; only peer EOF, a real error or stop does.
  */
 
 #include <arpa/inet.h>
@@ -63,10 +62,7 @@
 #define BUFFERED_SLOT_PAYLOAD    2048
 #define BUFFERED_SLOT_COUNT      384
 #define BUFFERED_STALL_TIMEOUT_S 8
-// PCM ring depth (frames of ~7-8 ms) below which an idle data socket counts
-// as a stall.  Above it the sender is simply ahead and quiet.
-#define BUFFERED_STALL_MIN_FRAMES 130
-#define BUFFERED_HOLD_POLL_MS     2
+#define BUFFERED_HOLD_POLL_MS    2
 
 #if CONFIG_FREERTOS_UNICORE
 #define BUFFERED_DECODER_CORE 0
@@ -90,14 +86,14 @@ static inline buffered_slot_t *slot_at(audio_receiver_state_t *state,
   return &((buffered_slot_t *)state->buffered_packet_pool)[index];
 }
 
-// Read exactly `len` bytes.  Returns bytes read, 0 = peer closed, -1 = error
-// or stall.  While paused the timeout is not a stall: the sender has nothing
-// to send, so keep waiting.
+// Preserve partial framing across receive timeouts. stream->running stays
+// true for the RTSP session, including pauses; stop shuts down the socket.
+// Returns bytes read, 0 = peer closed, -1 = real error or stopped.
 static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
                           int sock, uint8_t *buf, size_t len) {
   size_t total = 0;
   int64_t started_us = esp_timer_get_time();
-  bool idle_logged = false;
+  int64_t last_warn_us = started_us;
   while (total < len && stream->running) {
     ssize_t n = recv(sock, buf + total, len - total, 0);
     if (n > 0) {
@@ -111,33 +107,21 @@ static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
           vTaskDelay(pdMS_TO_TICKS(100));
           continue;
         }
-        // A sender that runs far ahead (up to ~20 s after a track skip)
-        // sends in bursts with idle gaps longer than the socket timeout.
-        // While the PCM ring still holds audio the quiet socket is not a
-        // stall; closing it here made the phone tear the session down.
-        int buffered = audio_buffer_get_frame_count(&state->buffer);
-        if (buffered > BUFFERED_STALL_MIN_FRAMES) {
-          if (!idle_logged) {
-            idle_logged = true;
-            ESP_LOGD(TAG,
-                     "Data socket idle %lld ms with %d frames buffered; "
-                     "waiting",
-                     (long long)((esp_timer_get_time() - started_us) / 1000LL),
-                     buffered);
-          }
-          continue;
-        }
         int64_t now_us = esp_timer_get_time();
-        state->buffered_stall_timeouts++;
-        ESP_LOGW(
-            TAG,
-            "Buffered audio stalled while playing: waited=%lld ms "
-            "last_packet=%lld ms ago partial=%u/%u — reopening data "
-            "connection (listener stays up)",
-            (long long)((now_us - started_us) / 1000LL),
-            (long long)((now_us - state->buffered_last_packet_us) / 1000LL),
-            (unsigned)total, (unsigned)len);
-        return -1;
+        if (now_us - last_warn_us >= BUFFERED_STALL_TIMEOUT_S * 1000000LL) {
+          last_warn_us = now_us;
+          state->buffered_stall_timeouts++;
+          ESP_LOGW(
+              TAG,
+              "Buffered audio idle while playing: waited=%lld ms "
+              "last_packet=%lld ms ago partial=%u/%u buffered=%d; "
+              "keeping data connection open",
+              (long long)((now_us - started_us) / 1000LL),
+              (long long)((now_us - state->buffered_last_packet_us) / 1000LL),
+              (unsigned)total, (unsigned)len,
+              audio_buffer_get_frame_count(&state->buffer));
+        }
+        continue;
       }
       if (stream->running) {
         ESP_LOGE(TAG, "Buffered audio recv error: %d", errno);
@@ -298,6 +282,9 @@ static void buffered_audio_task(void *pvParameters) {
   audio_stream_t *stream = (audio_stream_t *)pvParameters;
   audio_receiver_state_t *state = audio_stream_state(stream);
 
+  uint32_t logged_flush_serial = 0;
+  unsigned post_flush_packets = 3;
+
   while (stream->running) {
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
@@ -380,6 +367,31 @@ static void buffered_audio_task(void *pvParameters) {
       uint32_t seq_no = (packet[1] << 16) | (packet[2] << 8) | packet[3];
       uint32_t timestamp =
           (packet[4] << 24) | (packet[5] << 16) | (packet[6] << 8) | packet[7];
+
+      uint32_t flush_serial =
+          __atomic_load_n(&state->buffered_flush_serial, __ATOMIC_RELAXED);
+      if (flush_serial != logged_flush_serial) {
+        logged_flush_serial = flush_serial;
+        post_flush_packets = 0;
+      }
+      if (post_flush_packets < 3) {
+        post_flush_packets++;
+        ESP_LOGI(TAG,
+                 "After FLUSHBUFFERED #%" PRIu32 " packet %u/3: rtp=%" PRIu32
+                 " seq=%" PRIu32,
+                 flush_serial, post_flush_packets, timestamp, seq_no);
+      }
+      int32_t step = (int32_t)(timestamp - state->buffered_last_rx_ts);
+      int64_t spf =
+          stream->format.frame_size > 0 ? stream->format.frame_size : 1024;
+      if (state->buffered_last_rx_ts_valid &&
+          ((int64_t)step > 4 * spf || (int64_t)step < -4 * spf)) {
+        ESP_LOGI(TAG,
+                 "Buffered RTP jump: rtp=%" PRIu32 " seq=%" PRIu32
+                 " previous=%" PRIu32 " step=%" PRId32 " flush=%" PRIu32,
+                 timestamp, seq_no, state->buffered_last_rx_ts, step,
+                 flush_serial);
+      }
 
       // Take a free slot; while the decoder is holding/back-pressured the
       // reader waits here, which closes the TCP window towards the sender.

@@ -55,6 +55,7 @@ typedef struct {
   QueueHandle_t buffered_ready_queue;
   volatile uint32_t buffered_generation;
   // Diagnostics
+  uint32_t buffered_flush_serial; // atomic counter, every FLUSHBUFFERED
   uint32_t buffered_connections;
   uint32_t buffered_stall_timeouts;
   uint32_t buffered_held_packets;     // packets held for an anchor (total)

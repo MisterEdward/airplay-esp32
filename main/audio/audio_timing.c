@@ -299,6 +299,8 @@ void audio_timing_restart_on_anchor(audio_timing_t *timing) {
   timing->late_drop_active = false;
   timing->deferred_flush_pending = false;
   timing->deferred_dropped = 0;
+  timing->deferred_boundary_reached = false;
+  timing->deferred_no_media_since_us = 0;
   timing->read_has_media = false;
 }
 
@@ -321,6 +323,8 @@ void audio_timing_reset(audio_timing_t *timing) {
   timing->flush_until_ts = 0;
   timing->flush_from_ts = 0;
   timing->deferred_dropped = 0;
+  timing->deferred_boundary_reached = false;
+  timing->deferred_no_media_since_us = 0;
   timing->late_drop_count = 0;
   timing->late_drop_active = false;
   timing->servo_trims = 0;
@@ -441,6 +445,7 @@ void audio_timing_set_playing(audio_timing_t *timing, bool playing) {
 
   timing->playing = playing;
   if (!playing) {
+    timing->deferred_no_media_since_us = 0;
     // Discard any partially-pending frame so resume starts cleanly from
     // the oldest frame in the sorted buffer, and re-acquire exactly under
     // the resume anchor.
@@ -596,20 +601,61 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       frame_samples = samples;
     }
 
-    // Deferred flush (AirPlay 2 FLUSHBUFFERED with flushFrom/flushUntil):
-    // the sender declares, often tens of seconds ahead, a stretch of its
-    // timeline [from, until) that must not be played (a trimmed track tail
-    // at a transition).  Skip exactly those frames; everything else stays
-    // on the same anchor.  (Emptying the whole buffer here — as this used
-    // to — also threw away the ~7 s of the next track the sender had
-    // already delivered: 7 s of silence, then the track from 0:07.)
+    size_t prefix_trim = 0;
+    // The deferred range is [from, until). Crossfade can instead introduce a
+    // lower RTP timeline, or never send a frame at until. Do not let that
+    // interpretation suppress all media indefinitely.
     if (timing->deferred_flush_pending) {
+      int64_t now_us = esp_timer_get_time();
+      if (timing->deferred_no_media_since_us == 0) {
+        timing->deferred_no_media_since_us = now_us;
+      }
       int32_t past_from = (int32_t)(hdr->rtp_timestamp - timing->flush_from_ts);
       int32_t past_until =
           (int32_t)(hdr->rtp_timestamp - timing->flush_until_ts);
+      bool new_timeline = timing->deferred_boundary_reached &&
+                          format->sample_rate > 0 &&
+                          (int64_t)past_from < -(int64_t)format->sample_rate;
+      int64_t silent_us = now_us - timing->deferred_no_media_since_us;
+      bool stalled =
+          silent_us > 2000000LL && (!from_pending || buffered_frames > 0);
+      if (new_timeline || stalled) {
+        ESP_LOGW(TAG,
+                 "Deferred flush cancelled: %s rtp=%" PRIu32 " from=%" PRIu32
+                 " until=%" PRIu32 " dropped=%" PRIu32
+                 " no_media=%lld ms; flushing PCM, quick-start unscheduled",
+                 new_timeline ? "new timeline" : "no media for >2 s",
+                 hdr->rtp_timestamp, timing->flush_from_ts,
+                 timing->flush_until_ts, timing->deferred_dropped,
+                 (long long)(silent_us / 1000LL));
+        // The checked-out frame survives audio_buffer_flush(). Keep it so
+        // recovery works even if the sender goes quiet after this packet.
+        audio_buffer_flush(buffer);
+        audio_timing_restart_on_anchor(timing);
+        timing->anchor_valid = false;
+        timing->acquire_err_us = 0;
+        timing->align_silence = 0;
+        timing->align_trimmed = 0;
+        goto play_frame;
+      }
+      // A PCM chunk may end exactly at, or straddle, the boundary.
+      if (past_from >= 0 ||
+          (int32_t)(hdr->rtp_timestamp + hdr->samples_per_channel -
+                    timing->flush_from_ts) >= 0) {
+        timing->deferred_boundary_reached = true;
+      }
       if (past_from >= 0 && past_until < 0) {
-        release_item(timing, buffer, item, from_pending);
         timing->deferred_dropped++;
+        if (timing->deferred_dropped == 1 ||
+            timing->deferred_dropped % 100 == 0) {
+          // PCM chunks no longer carry the compressed packet sequence.
+          ESP_LOGI(TAG,
+                   "Deferred flush drop: rtp=%" PRIu32 " count=%" PRIu32
+                   " from=%" PRIu32 " until=%" PRIu32,
+                   hdr->rtp_timestamp, timing->deferred_dropped,
+                   timing->flush_from_ts, timing->flush_until_ts);
+        }
+        release_item(timing, buffer, item, from_pending);
         continue;
       }
       if (past_until >= 0) {
@@ -620,6 +666,8 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
                  timing->flush_until_ts, hdr->rtp_timestamp);
         timing->deferred_flush_pending = false;
         timing->deferred_dropped = 0;
+        timing->deferred_boundary_reached = false;
+        timing->deferred_no_media_since_us = 0;
       }
     }
 
@@ -673,7 +721,6 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       }
     }
 
-    size_t prefix_trim = 0;
     if (timing->anchor_valid && format->sample_rate > 0) {
       int64_t early_us = 0;
       if (compute_early_us(timing, format, hdr->rtp_timestamp, sync_mode,
@@ -755,6 +802,14 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
               dropped_late = true;
               timing->late_drop_count++;
               timing->late_drop_active = true;
+              if (timing->late_drop_count == 1 ||
+                  timing->late_drop_count % 100 == 0) {
+                ESP_LOGI(TAG,
+                         "Late-frame drop: rtp=%" PRIu32 " count=%" PRIu32
+                         " late=%lld us deferred=%d",
+                         hdr->rtp_timestamp, timing->late_drop_count,
+                         (long long)-early_us, timing->deferred_flush_pending);
+              }
               uint32_t drop_next =
                   hdr->rtp_timestamp + hdr->samples_per_channel;
               if (!timing->expected_rtp_valid ||
@@ -801,6 +856,14 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
             dropped_late = true;
             timing->late_drop_count++;
             timing->late_drop_active = true;
+            if (timing->late_drop_count == 1 ||
+                timing->late_drop_count % 100 == 0) {
+              ESP_LOGI(TAG,
+                       "Late-frame drop: rtp=%" PRIu32 " count=%" PRIu32
+                       " late=%lld us deferred=%d",
+                       hdr->rtp_timestamp, timing->late_drop_count,
+                       (long long)-early_us, timing->deferred_flush_pending);
+            }
             uint32_t drop_next = hdr->rtp_timestamp + hdr->samples_per_channel;
             if (!timing->expected_rtp_valid ||
                 (int32_t)(drop_next - timing->expected_rtp) > 0) {
@@ -973,6 +1036,9 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
                timing->anchor_valid ? "" : " (no anchor)");
     }
 
+    if (timing->deferred_flush_pending) {
+      timing->deferred_no_media_since_us = esp_timer_get_time();
+    }
     timing->read_has_media = true;
     return out_samples;
   }

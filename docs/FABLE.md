@@ -14,7 +14,7 @@ pairing and the generic web UI.
 | Post-seek alignment | whole-frame early/late gate, 710 ppm servo (~20 s to remove 15 ms) | exact: ceil(early) frames of silence or trim of expired samples, first sample within one sample period of schedule |
 | Drift servo | single 710 ppm rate | tiered 710 / 1420 / 2841 ppm by error size, quietest-sample trims, hysteresis |
 | Pipeline measurement | whole DMA descriptors (0..5 ms sawtooth) | interpolated inside the current descriptor + held block |
-| Buffered TCP stream | one task: recv + decrypt + decode | reader → 48-slot PSRAM queue → decoder; post-seek packets held until anchor instead of discarded; stall reopen 8 s |
+| Buffered TCP stream | one task: recv + decrypt + decode | reader → 384-slot PSRAM queue → decoder; post-seek packets held until anchor; idle TCP kept open (WARN every 8 s) |
 | PTP | anchor reset the lock on every session | tracks the first source, keeps the lock when the anchor names it |
 | Volume | one global level | remembered per sender (deviceID from SETUP), ramped, snapped at session start |
 | Client hand-over | new session raced old session's teardown | new task waits (≤2.5 s) for the old session to release audio |
@@ -34,8 +34,8 @@ The project directory must not contain spaces (PlatformIO refuses).  The
 generated `sdkconfig.esp32s3` is git-ignored; delete it after changing any
 `sdkconfig.defaults*` file so the new defaults apply.
 
-Host unit tests for the pure modules (envelope, alignment, log journal,
-per-source volume):
+Host tests for the pure modules (envelope, alignment, log journal,
+per-source volume) and the production timing loop with fake PCM/clock input:
 
 ```bash
 tests/host/run.sh
@@ -122,6 +122,12 @@ AirPlay is serving.  If it never reaches the network it restarts after
   - `Acquired: rtp=… err=+123 us silence=… trimmed=…` — how exactly the
     first sample after start/seek/resume landed (target: |err| < 1 sample).
   - `Playout: err=… filt=… servo=on/off …` — every ~1 s during playback.
+  - `After FLUSHBUFFERED #N packet 1/3: rtp=… seq=…` — first three received
+    packets after each request; `Buffered RTP jump` reports steps over four frames.
+  - `Deferred flush drop` / `Late-frame drop` — first drop and every 100th.
+  - `Deferred flush cancelled` — recovery after 2 s without media despite
+    available frames, or an RTP jump more than 1 s below `from` after the
+    boundary. Clears PCM and the old anchor; plays immediately until re-anchored.
   - `First frame queued for generation N … since_flush=… ms` — seek latency
     from FLUSHBUFFERED to the first decoded frame of the new position.
   - `Hand-over: old session released audio after … ms` — device switch.

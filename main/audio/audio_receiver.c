@@ -738,6 +738,10 @@ void audio_receiver_seek_flush(void) {
   receiver.discard_all_until_anchor = true;
 }
 
+void audio_receiver_note_flushbuffered(void) {
+  __atomic_add_fetch(&receiver.buffered_flush_serial, 1, __ATOMIC_RELAXED);
+}
+
 void audio_receiver_set_deferred_flush(uint32_t flush_from_ts,
                                        uint32_t flush_until_ts) {
   if (!receiver.stream) {
@@ -748,6 +752,8 @@ void audio_receiver_set_deferred_flush(uint32_t flush_from_ts,
   receiver.timing.flush_from_ts = flush_from_ts;
   receiver.timing.flush_until_ts = flush_until_ts;
   receiver.timing.deferred_dropped = 0;
+  receiver.timing.deferred_boundary_reached = false;
+  receiver.timing.deferred_no_media_since_us = 0;
   receiver.timing.deferred_flush_pending = true;
   ESP_LOGI(TAG,
            "Deferred flush armed: skip [%" PRIu32 ", %" PRIu32 ") = %ld ms",
