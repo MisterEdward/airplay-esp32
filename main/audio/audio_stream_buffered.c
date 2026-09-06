@@ -51,10 +51,17 @@
 #define AUDIO_BUFFERED_STACK_SIZE  4096
 #define AUDIO_DECODER_STACK_SIZE   6144
 // Slot payload: AAC-LC at Apple Music's 256 kbps is ~750 bytes per 1024
-// samples; 2048 leaves headroom for ALAC-over-TCP or higher rates.  48 slots
-// ≈ 1.1 s of audio, comfortably more than the sender's post-seek burst.
+// samples; 2048 leaves headroom for ALAC-over-TCP or higher rates.
+//
+// Slot count: after FLUSHBUFFERED the decoder holds every packet until the
+// new anchor arrives, and while the free queue is empty the reader stops
+// taking from TCP, which closes the window towards the sender.  The sender
+// does not anchor until its post-seek burst has been accepted (observed:
+// 6.3 s of audio pushed before the first anchor), so 48 slots (1.1 s) was a
+// deadlock: the phone waited for window, we waited for the anchor, and the
+// session went silent for good.  384 slots ≈ 8.9 s of AAC, ~800 KB PSRAM.
 #define BUFFERED_SLOT_PAYLOAD    2048
-#define BUFFERED_SLOT_COUNT      48
+#define BUFFERED_SLOT_COUNT      384
 #define BUFFERED_STALL_TIMEOUT_S 8
 #define BUFFERED_HOLD_POLL_MS    2
 
@@ -76,7 +83,7 @@ typedef struct {
 static const char *TAG = "audio_buf";
 
 static inline buffered_slot_t *slot_at(audio_receiver_state_t *state,
-                                       uint8_t index) {
+                                       uint16_t index) {
   return &((buffered_slot_t *)state->buffered_packet_pool)[index];
 }
 
@@ -131,7 +138,7 @@ static void buffered_decoder_task(void *pvParameters) {
   uint32_t logged_generation = UINT32_MAX;
 
   while (stream->running) {
-    uint8_t index = 0;
+    uint16_t index = 0;
     if (xQueueReceive(state->buffered_ready_queue, &index, pdMS_TO_TICKS(20)) !=
         pdTRUE) {
       continue;
@@ -330,12 +337,49 @@ static void buffered_audio_task(void *pvParameters) {
 
       // Take a free slot; while the decoder is holding/back-pressured the
       // reader waits here, which closes the TCP window towards the sender.
-      uint8_t index = 0;
-      while (stream->running &&
-             xQueueReceive(state->buffered_free_queue, &index,
-                           pdMS_TO_TICKS(20)) != pdTRUE) {
+      uint16_t index = 0;
+      int64_t wait_started_us = esp_timer_get_time();
+      bool wait_logged = false;
+      bool got_slot = false;
+      while (stream->running) {
+        if (xQueueReceive(state->buffered_free_queue, &index,
+                          pdMS_TO_TICKS(20)) == pdTRUE) {
+          got_slot = true;
+          break;
+        }
+        int64_t waited_us = esp_timer_get_time() - wait_started_us;
+        // Waiting for the anchor: never close the TCP window.  The sender
+        // does not anchor until its whole post-flush burst has been
+        // accepted (with a queued next track that burst exceeded 8.9 s), so
+        // stalling it here is a deadlock: it waits for window, we wait for
+        // the anchor.  Recycle the oldest queued packet instead — the
+        // anchor sits at the END of the burst, so the newest packets are
+        // the ones the RTP gate will want.
+        if (state->discard_all_until_anchor && waited_us > 200000) {
+          uint16_t victim = 0;
+          if (xQueueReceive(state->buffered_ready_queue, &victim, 0) ==
+              pdTRUE) {
+            state->buffered_pre_anchor_drops++;
+            if (!wait_logged) {
+              wait_logged = true;
+              ESP_LOGW(TAG,
+                       "Hold queue full before anchor: recycling oldest "
+                       "packets so the sender can finish its burst");
+            }
+            index = victim;
+            got_slot = true;
+            break;
+          }
+        }
+        if (!wait_logged && waited_us > 1000000) {
+          wait_logged = true;
+          ESP_LOGW(TAG,
+                   "Reader out of packet slots for 1 s (held=%" PRIu32
+                   "); sender's TCP window is closed",
+                   state->buffered_held_packets);
+        }
       }
-      if (!stream->running) {
+      if (!stream->running || !got_slot) {
         break;
       }
       buffered_slot_t *slot = slot_at(state, index);
@@ -396,15 +440,15 @@ static esp_err_t buffered_init_queues(audio_receiver_state_t *state) {
       heap_caps_calloc(BUFFERED_SLOT_COUNT, sizeof(buffered_slot_t),
                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   state->buffered_free_queue =
-      xQueueCreate(BUFFERED_SLOT_COUNT, sizeof(uint8_t));
+      xQueueCreate(BUFFERED_SLOT_COUNT, sizeof(uint16_t));
   state->buffered_ready_queue =
-      xQueueCreate(BUFFERED_SLOT_COUNT, sizeof(uint8_t));
+      xQueueCreate(BUFFERED_SLOT_COUNT, sizeof(uint16_t));
   if (!state->buffered_packet_pool || !state->buffered_free_queue ||
       !state->buffered_ready_queue) {
     buffered_free_queues(state);
     return ESP_ERR_NO_MEM;
   }
-  for (uint8_t i = 0; i < BUFFERED_SLOT_COUNT; i++) {
+  for (uint16_t i = 0; i < BUFFERED_SLOT_COUNT; i++) {
     xQueueSend(state->buffered_free_queue, &i, 0);
   }
   ESP_LOGI(TAG, "Compressed packet queue: %u slots x %u bytes in PSRAM",
@@ -445,6 +489,7 @@ static esp_err_t buffered_start(audio_stream_t *stream, uint16_t port) {
   state->buffered_stall_timeouts = 0;
   state->buffered_held_packets = 0;
   state->buffered_generation_drops = 0;
+  state->buffered_pre_anchor_drops = 0;
   stream->running = true;
 
   state->buffered_task_handle = NULL;
@@ -510,9 +555,11 @@ static void buffered_stop(audio_stream_t *stream) {
   state->buffered_port = 0;
   ESP_LOGI(TAG,
            "Buffered stream stopped: connections=%" PRIu32 " stalls=%" PRIu32
-           " held=%" PRIu32 " pre_seek_drops=%" PRIu32,
+           " held=%" PRIu32 " pre_seek_drops=%" PRIu32
+           " pre_anchor_drops=%" PRIu32,
            state->buffered_connections, state->buffered_stall_timeouts,
-           state->buffered_held_packets, state->buffered_generation_drops);
+           state->buffered_held_packets, state->buffered_generation_drops,
+           state->buffered_pre_anchor_drops);
 }
 
 static uint16_t buffered_get_port(audio_stream_t *stream) {

@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
@@ -214,6 +215,9 @@ int rtsp_send_response(int socket, rtsp_conn_t *conn, int status_code,
   int result;
   if (conn && conn->encrypted_mode) {
     result = rtsp_crypto_write_frame(socket, conn, response, total_len);
+    if (result < 0) {
+      ESP_LOGE(TAG, "Failed to send encrypted response (errno=%d)", errno);
+    }
   } else {
     result = (send_all(socket, response, total_len) < 0) ? -1 : 0;
     if (result < 0) {
@@ -259,6 +263,9 @@ int rtsp_send_http_response(int socket, rtsp_conn_t *conn, int status_code,
   int result;
   if (conn && conn->encrypted_mode) {
     result = rtsp_crypto_write_frame(socket, conn, response, total_len);
+    if (result < 0) {
+      ESP_LOGE(TAG, "Failed to send encrypted response (errno=%d)", errno);
+    }
   } else {
     result = (send_all(socket, response, total_len) < 0) ? -1 : 0;
     if (result < 0) {

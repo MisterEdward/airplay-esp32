@@ -491,6 +491,11 @@ int rtsp_dispatch(int socket, rtsp_conn_t *conn, const uint8_t *raw_request,
         ESP_LOGW(TAG, "sid=%" PRIu32 " #%" PRIu32 " %s took %lld ms",
                  conn->sid, conn->requests, req.method,
                  (long long)(took_us / 1000));
+      } else if (strcmp(req.method, "SETRATEANCHORTIME") == 0 ||
+                 strcmp(req.method, "FLUSHBUFFERED") == 0 ||
+                 strcmp(req.method, "FLUSH") == 0) {
+        ESP_LOGI(TAG, "sid=%" PRIu32 " #%" PRIu32 " %s done in %lld us",
+                 conn->sid, conn->requests, req.method, (long long)took_us);
       } else {
         ESP_LOGD(TAG, "sid=%" PRIu32 " #%" PRIu32 " %s done in %lld us",
                  conn->sid, conn->requests, req.method, (long long)took_us);
@@ -1825,9 +1830,14 @@ static void handle_flushbuffered(int socket, rtsp_conn_t *conn,
     // Immediate flush: discard everything and reset now.
     audio_receiver_seek_flush();
     audio_output_flush();
+    ESP_LOGI(TAG, "sid=%" PRIu32 " flush done, replying", conn->sid);
   }
 
-  rtsp_send_ok(socket, conn, req->cseq);
+  int sent = rtsp_send_ok(socket, conn, req->cseq);
+  if (!has_deferred) {
+    ESP_LOGI(TAG, "sid=%" PRIu32 " FLUSHBUFFERED reply %s", conn->sid,
+             sent == 0 ? "sent" : "FAILED");
+  }
 }
 
 static void handle_teardown(int socket, rtsp_conn_t *conn,

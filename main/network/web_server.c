@@ -930,6 +930,47 @@ static const char *reset_reason_str(esp_reset_reason_t r) {
   }
 }
 
+// FreeRTOS task table: name, state, priority, core, stack high-water mark.
+// The state column is the point: a task that should be idle in recv() but
+// shows Blocked on something else, or Ready/Running while it ought to be
+// waiting, tells where a hang lives without a debugger.
+static esp_err_t tasks_handler(httpd_req_t *req) {
+  UBaseType_t n = uxTaskGetNumberOfTasks();
+  TaskStatus_t *tab = calloc(n + 4, sizeof(TaskStatus_t));
+  if (!tab) {
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
+    return ESP_FAIL;
+  }
+  n = uxTaskGetSystemState(tab, n + 4, NULL);
+  cJSON *root = cJSON_CreateObject();
+  cJSON *arr = cJSON_CreateArray();
+  static const char *const states[] = {"running", "ready",   "blocked",
+                                       "suspended", "deleted", "invalid"};
+  for (UBaseType_t i = 0; i < n; i++) {
+    cJSON *t = cJSON_CreateObject();
+    cJSON_AddStringToObject(t, "name", tab[i].pcTaskName);
+    unsigned st = (unsigned)tab[i].eCurrentState;
+    cJSON_AddStringToObject(t, "state", st < 6 ? states[st] : "?");
+    cJSON_AddNumberToObject(t, "prio", (double)tab[i].uxCurrentPriority);
+#if CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID
+    cJSON_AddNumberToObject(t, "core", (double)(int)tab[i].xCoreID);
+#endif
+    cJSON_AddNumberToObject(t, "stack_free",
+                            (double)tab[i].usStackHighWaterMark);
+    cJSON_AddItemToArray(arr, t);
+  }
+  free(tab);
+  cJSON_AddItemToObject(root, "tasks", arr);
+  cJSON_AddNumberToObject(root, "uptime_s",
+                          (double)(esp_timer_get_time() / 1000000LL));
+  char *out = cJSON_PrintUnformatted(root);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
+  free(out);
+  cJSON_Delete(root);
+  return ESP_OK;
+}
+
 static esp_err_t system_info_handler(httpd_req_t *req) {
   cJSON *json = cJSON_CreateObject();
   cJSON *info = cJSON_CreateObject();
@@ -1545,6 +1586,11 @@ esp_err_t web_server_start(uint16_t port) {
                          .method = HTTP_POST,
                          .handler = ota_update_handler};
   httpd_register_uri_handler(s_server, &ota_uri);
+
+  httpd_uri_t tasks_uri = {.uri = "/api/tasks",
+                           .method = HTTP_GET,
+                           .handler = tasks_handler};
+  httpd_register_uri_handler(s_server, &tasks_uri);
 
   httpd_uri_t system_info_uri = {.uri = "/api/system/info",
                                  .method = HTTP_GET,
