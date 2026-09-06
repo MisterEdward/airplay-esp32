@@ -54,7 +54,9 @@ static uint32_t s_truncated_lines;
 static uint64_t s_boot_id;
 
 static httpd_handle_t s_server;
+#if !CONFIG_ESP_CONSOLE_NONE || !CONFIG_ESP_CONSOLE_SECONDARY_NONE
 static vprintf_like_t s_orig_vprintf;
+#endif
 
 /* Per-WebSocket-client cursors.  Indexed by socket fd; a fd that vanishes
  * from httpd's client list is forgotten, so a reused fd starts fresh. */
@@ -112,17 +114,23 @@ static void pin_noisy_tags(void) {
 }
 
 static int log_vprintf_hook(const char *fmt, va_list args) {
-  va_list uart_args;
   va_list journal_args;
-  va_copy(uart_args, args);
   va_copy(journal_args, args);
 
+#if !CONFIG_ESP_CONSOLE_NONE || !CONFIG_ESP_CONSOLE_SECONDARY_NONE
+  va_list uart_args;
+  va_copy(uart_args, args);
   int ret = s_orig_vprintf ? s_orig_vprintf(fmt, uart_args) : 0;
   va_end(uart_args);
+#endif
 
   char buf[LOG_LINE_MAX];
   int len = vsnprintf(buf, sizeof(buf), fmt, journal_args);
   va_end(journal_args);
+#if CONFIG_ESP_CONSOLE_NONE && CONFIG_ESP_CONSOLE_SECONDARY_NONE
+  // Preserve printf's would-have-written count, before journal truncation.
+  int ret = len;
+#endif
 
   if (len > 0) {
     if ((size_t)len >= sizeof(buf)) {
@@ -464,7 +472,11 @@ esp_err_t log_stream_init(void) {
   }
   s_boot_id = ((uint64_t)esp_random() << 32) | esp_random();
   log_journal_init(&s_journal, storage, size, s_boot_id);
+#if !CONFIG_ESP_CONSOLE_NONE || !CONFIG_ESP_CONSOLE_SECONDARY_NONE
   s_orig_vprintf = esp_log_set_vprintf(log_vprintf_hook);
+#else
+  esp_log_set_vprintf(log_vprintf_hook);
+#endif
   pin_noisy_tags();
   ESP_LOGI(TAG, "Journal %u bytes, boot=%016llx", (unsigned)size,
            (unsigned long long)s_boot_id);
