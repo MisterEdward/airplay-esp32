@@ -94,6 +94,23 @@ static uint64_t journal_end(void) {
 /*  Log hook                                                           */
 /* ------------------------------------------------------------------ */
 
+// Tags that log on every socket send.  With a WebSocket viewer attached,
+// each journal line pushed to the browser makes httpd/event emit ~4 DEBUG
+// lines of their own, which land in the journal, which get pushed... The
+// feedback loop saturates the httpd task within seconds (observed: HTTP
+// dead, ping alive).  These stay at INFO whatever the viewer asks for.
+static const char *const s_pinned_tags[] = {
+    "httpd_txrx", "httpd_parse", "httpd_sess", "httpd_uri",
+    "httpd_ws",   "httpd",       "event",      "esp-tls",
+};
+
+static void pin_noisy_tags(void) {
+  for (size_t i = 0; i < sizeof(s_pinned_tags) / sizeof(s_pinned_tags[0]);
+       i++) {
+    esp_log_level_set(s_pinned_tags[i], ESP_LOG_INFO);
+  }
+}
+
 static int log_vprintf_hook(const char *fmt, va_list args) {
   va_list uart_args;
   va_list journal_args;
@@ -418,6 +435,7 @@ static esp_err_t logs_level_post_handler(httpd_req_t *req) {
     level = (esp_log_level_t)CONFIG_LOG_MAXIMUM_LEVEL;
   }
   esp_log_level_set(tag->valuestring, level);
+  pin_noisy_tags(); // '*' would otherwise drag httpd/event up with it
   ESP_LOGI(TAG, "Log level for '%s' set to %s", tag->valuestring,
            level_name(level));
   cJSON_Delete(json);
@@ -447,6 +465,7 @@ esp_err_t log_stream_init(void) {
   s_boot_id = ((uint64_t)esp_random() << 32) | esp_random();
   log_journal_init(&s_journal, storage, size, s_boot_id);
   s_orig_vprintf = esp_log_set_vprintf(log_vprintf_hook);
+  pin_noisy_tags();
   ESP_LOGI(TAG, "Journal %u bytes, boot=%016llx", (unsigned)size,
            (unsigned long long)s_boot_id);
   return ESP_OK;

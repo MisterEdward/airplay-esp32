@@ -274,8 +274,6 @@ static void on_airplay_client_event(rtsp_event_t event,
 #endif
 
 void app_main(void) {
-  ESP_LOGW(TAG, "Boot: reset reason %d", (int)esp_reset_reason());
-
   // Initialize NVS
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
@@ -333,6 +331,8 @@ void app_main(void) {
 #endif
   spiffs_storage_init();
   log_stream_init();
+  // After the journal exists, so the reason survives to the web viewer.
+  ESP_LOGW(TAG, "Boot: reset reason %d", (int)esp_reset_reason());
   ota_verify_arm();
   ESP_ERROR_CHECK(playback_control_init());
   led_init();

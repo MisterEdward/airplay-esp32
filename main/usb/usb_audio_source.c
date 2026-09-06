@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 #include "tusb.h"
 
+#include <inttypes.h>
 #include <math.h>
 #include <string.h>
 
@@ -84,6 +85,7 @@ void tud_resume_cb(void) {
 static esp_err_t uac_output_cb(uint8_t *buf, size_t len, void *ctx) {
   (void)ctx;
   s_last_data_us = esp_timer_get_time();
+  s_stats.packets++;
   if (!s_active) {
     s_stats.discarded_bytes += (uint32_t)len;
     return ESP_OK;
@@ -289,14 +291,21 @@ static esp_timer_handle_t s_state_timer;
 static void usb_state_poll_cb(void *arg) {
   (void)arg;
   static int last = -1;
+  bool streaming =
+      (esp_timer_get_time() - s_last_data_us) < STREAMING_TIMEOUT_US;
   int now = (tud_connected() ? 1 : 0) | (tud_mounted() ? 2 : 0) |
-            (tud_suspended() ? 4 : 0);
+            (tud_suspended() ? 4 : 0) | (streaming ? 8 : 0);
   if (now != last) {
-    ESP_LOGI(TAG, "Bus: connected=%d mounted=%d suspended=%d speed=%s",
-             !!(now & 1), !!(now & 2), !!(now & 4),
+    ESP_LOGI(TAG,
+             "Bus: connected=%d mounted=%d suspended=%d streaming=%d "
+             "speed=%s packets=%" PRIu32 " ring=%" PRIu32 " under=%" PRIu32
+             " over=%" PRIu32,
+             !!(now & 1), !!(now & 2), !!(now & 4), !!(now & 8),
              tud_speed_get() == TUSB_SPEED_HIGH ? "high"
              : tud_speed_get() == TUSB_SPEED_FULL ? "full"
-                                                  : "none");
+                                                  : "none",
+             s_stats.packets, s_stats.ring_frames, s_stats.underruns,
+             s_stats.overruns);
     last = now;
   }
 }

@@ -232,6 +232,7 @@ cJSON *device_status_build_json(void) {
   cJSON_AddNumberToObject(usb, "underruns", us.underruns);
   cJSON_AddNumberToObject(usb, "overruns", us.overruns);
   cJSON_AddNumberToObject(usb, "trims", us.trims);
+  cJSON_AddNumberToObject(usb, "packets", us.packets);
   cJSON_AddNumberToObject(usb, "discarded_kb", us.discarded_bytes / 1024);
   cJSON_AddNumberToObject(usb, "volume_q15", us.volume_q15);
   cJSON_AddBoolToObject(usb, "muted", us.muted);

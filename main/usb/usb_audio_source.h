@@ -40,6 +40,7 @@ typedef struct {
   uint32_t underruns;       // pull found the ring empty while streaming
   uint32_t overruns;        // output_cb found the ring full
   uint32_t discarded_bytes; // bytes dropped while USB was not the source
+  uint32_t packets;         // output_cb calls (host audio packets received)
   uint32_t trims;           // clock-adapter one-sample corrections
   int32_t volume_q15;
   bool muted;
