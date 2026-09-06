@@ -80,3 +80,74 @@ listening before proceeding to stage 2.
   OPTIONS request returned `RTSP/1.0 200 OK`.
 - After recovery, CPU sum was 199.98770%; internal RAM 130,527 bytes free,
   largest block 57,344. User playback/listening validation is pending.
+
+## 2026-09-07, overnight — root cause found, and stage 2/3/4
+
+### The crashes were the power supply, not the firmware
+
+Playback died with `int_wdt` after eight to ten seconds, on both AirPlay
+paths, and `cannot connect` from the phone was the same failure seen from
+the other end.  `/api/system/info` then reported `reset_reason: brownout`,
+and a firmware OTA failed mid-upload with `ESP_ERR_INVALID_STATE` — a flash
+write is the largest current peak in the firmware, so it was the first thing
+to fall over.  The board was drawing from a sleeping PC's USB port.  Moved to
+a charger, playback ran with `under=0`, `gaps=0` and a playout error around
++100 to +300 us.
+
+Two corrections to earlier conclusions.  The invalid-image OTA test recorded
+above did not prove graceful rejection; the board was resetting during the
+write.  And the `int_wdt` resets attributed to the original firmware were the
+same supply problem, so no code in `078b719` is implicated.
+
+The journal is in PSRAM and dies with the reset, so every crash erased its
+own evidence.  The only way to see anything was to stream `/ws/logs` to a
+laptop and read what arrived before the board went quiet.  That is what
+stage 2 is for, and it is why it moved to the front of the queue.
+
+### Done
+
+- **Retained diagnostics** (`main/network/crash_log.c`).  The last 3 KiB of
+  the journal is mirrored into RTC memory, which survives a core reset, and
+  replayed into the new journal at boot under a `previous boot` banner.
+  Reset reasons are tallied across boots and published as `boots` in
+  `/api/system/info`, so `brownout: 7` states the problem instead of a
+  single reason that describes only the last restart.  RTC memory does not
+  survive a power cut; `boots` back at 1 is itself the signal that it
+  happened.
+- **Stage 4.1 and 4.2** (`audio_envelope.c`).  Constant-gain fast path, with
+  a true bypass at unity — the old code ran every sample through
+  `(x * 32768) / 32768`.  Rounding plus TPDF dither on the attenuating path,
+  which matters here because the PCM5102A has no hardware volume.  Dither is
+  confined to constant gain: during a fade the gain already moves every
+  sample, and the existing tests require fades to stay monotonic and
+  channel-symmetric.  Digital silence passes through untouched.
+- **Host coverage for `audio_buffer`**, which had none, followed by
+  **stage 3's O(1) consume**.  `sorted[]` is now a ring with a head, so
+  taking a frame no longer memmoves up to 2 KB under the spinlock 136 times
+  a second.  Insertion shifts the shorter side.  Tests: ordering, RTP
+  wraparound, overflow eviction, flush, slot accounting, contiguous-run
+  detection, plus 60k randomised operations under ASan/UBSan asserting the
+  invariants after every step.
+
+### Deliberately not done
+
+- Nothing was flashed.  The envelope and ring changes need a listening test
+  and the user was asleep; the board still runs the stage 1 image.
+- The counting semaphore is still there.  Replacing it with a task
+  notification changes the consumer's blocking contract and deserves its own
+  change with hardware behind it.
+- Stage 2.1 (coredump partition) and 2.4 (real flash size) both need a
+  serial flash in download mode, which needs the user.
+- Stage 2.3 (task watchdog panic) is pointless before coredump exists.
+- Stages 5 and 6 are untouched, as planned.
+
+### Next session
+
+1. Flash and listen.  `pio run -e esp32s3` then OTA; confirm `ota_state`
+   reaches `valid`, then play for fifteen minutes.  What to listen for: the
+   noise floor on quiet passages at low volume should be cleaner, fades in
+   and out unchanged, no clicks at track changes.  Watch `under=0` and
+   `gaps=0` in the playout line — the ring rewrite would show up there first.
+2. Confirm the supply fix holds: `boots.by_reason` must gain no new
+   `brownout` after a long session.
+3. Then the coredump partition, which needs the serial flash anyway.
