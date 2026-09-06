@@ -635,8 +635,32 @@ void audio_receiver_flush(void) {
   receiver.discard_above_rtp_valid = false;
   receiver.arm_gate_on_next_anchor = false;
   receiver.discard_all_until_anchor = false;
+  receiver.live_flush_pending = false;
   receiver.paused_rtp_valid = false;
   receiver.blocks_read_in_sequence = 1;
+}
+
+void audio_receiver_live_flush(void) {
+  receiver.buffered_generation++;
+  receiver.buffered_flush_us = esp_timer_get_time();
+  audio_buffer_flush(&receiver.buffer);
+  audio_receiver_reset_resend_state();
+  receiver.discard_before_rtp_valid = false;
+  receiver.discard_above_rtp_valid = false;
+  receiver.arm_gate_on_next_anchor = false;
+  receiver.discard_all_until_anchor = false;
+  receiver.paused_rtp_valid = false;
+  receiver.blocks_read_in_sequence = 1;
+  // Reference for the in-flight filter: the newest packet the reader had
+  // taken from TCP.  Old material still queued in the socket continues
+  // from here; the new segment starts with a jump.
+  receiver.live_flush_ref_valid = receiver.buffered_last_rx_ts_valid;
+  receiver.live_flush_last_ts = receiver.buffered_last_rx_ts;
+  receiver.live_flush_drops = 0;
+  receiver.live_flush_pending = true;
+  audio_timing_restart_on_anchor(&receiver.timing);
+  ESP_LOGI(TAG, "Live flush: anchor kept, waiting for the new segment (last rx rtp=%" PRIu32 ")",
+           receiver.buffered_last_rx_ts);
 }
 
 void audio_receiver_seek_flush(void) {
@@ -663,16 +687,23 @@ void audio_receiver_seek_flush(void) {
   receiver.discard_all_until_anchor = true;
 }
 
-void audio_receiver_set_deferred_flush(uint32_t flush_until_ts) {
+void audio_receiver_set_deferred_flush(uint32_t flush_from_ts,
+                                       uint32_t flush_until_ts) {
   if (!receiver.stream) {
     return;
   }
-  // Write flush_until_ts before arming the flag so audio_timing_read never
-  // sees deferred_flush_pending=true with a stale timestamp.
+  // Write the range before arming the flag so audio_timing_read never sees
+  // deferred_flush_pending=true with stale timestamps.
+  receiver.timing.flush_from_ts = flush_from_ts;
   receiver.timing.flush_until_ts = flush_until_ts;
+  receiver.timing.deferred_dropped = 0;
   receiver.timing.deferred_flush_pending = true;
-  ESP_LOGI(TAG, "Deferred flush armed: flush_until_ts=%" PRIu32,
-           flush_until_ts);
+  ESP_LOGI(TAG, "Deferred flush armed: skip [%" PRIu32 ", %" PRIu32 ") = %ld ms",
+           flush_from_ts, flush_until_ts,
+           (long)((int32_t)(flush_until_ts - flush_from_ts) * 1000LL /
+                  (receiver.stream->format.sample_rate > 0
+                       ? receiver.stream->format.sample_rate
+                       : 44100)));
 }
 
 void audio_receiver_pause(void) {

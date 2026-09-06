@@ -108,6 +108,16 @@ typedef struct {
   // ring buffer between FLUSHBUFFERED and the anchor, causing a second flush
   // and doubling the startup delay.
   bool discard_all_until_anchor;
+  // Live flush (FLUSHBUFFERED while playing, no anchor to follow): drop
+  // packets that continue the pre-flush timestamps (old material still in
+  // the socket), accept from the first discontinuity.
+  volatile bool live_flush_pending;
+  bool live_flush_ref_valid;
+  uint32_t live_flush_last_ts;
+  uint32_t live_flush_drops;
+  // Newest packet timestamp the reader took from TCP (any generation).
+  volatile uint32_t buffered_last_rx_ts;
+  volatile bool buffered_last_rx_ts_valid;
 
   // Snapshot of the expected RTP position taken the moment the sender signals
   // PAUSE (SETRATEANCHORTIME rate=0).  Path B in audio_receiver_set_anchor_time

@@ -283,6 +283,25 @@ void audio_timing_reset_continuity(audio_timing_t *timing) {
   timing->servo_interval = POS_SERVO_INTERVAL_SLOW;
 }
 
+void audio_timing_restart_on_anchor(audio_timing_t *timing) {
+  if (!timing) {
+    return;
+  }
+  audio_timing_reset_continuity(timing);
+  timing->playout_started = false;
+  timing->pending_valid = false;
+  timing->pending_frame_len = 0;
+  timing->ready_time_us = 0;
+  timing->consecutive_early_frames = 0;
+  timing->quick_start = true;
+  timing->acquired = false;
+  timing->late_drop_count = 0;
+  timing->late_drop_active = false;
+  timing->deferred_flush_pending = false;
+  timing->deferred_dropped = 0;
+  timing->read_has_media = false;
+}
+
 void audio_timing_reset(audio_timing_t *timing) {
   if (!timing) {
     return;
@@ -300,6 +319,8 @@ void audio_timing_reset(audio_timing_t *timing) {
   timing->quick_start = false;
   timing->deferred_flush_pending = false;
   timing->flush_until_ts = 0;
+  timing->flush_from_ts = 0;
+  timing->deferred_dropped = 0;
   timing->late_drop_count = 0;
   timing->late_drop_active = false;
   timing->servo_trims = 0;
@@ -575,22 +596,30 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       frame_samples = samples;
     }
 
-    // Deferred flush (AirPlay 2 FLUSHBUFFERED with flushFromSeq): play up to
-    // the boundary, then discard the rest and start the next track fresh.
+    // Deferred flush (AirPlay 2 FLUSHBUFFERED with flushFrom/flushUntil):
+    // the sender declares, often tens of seconds ahead, a stretch of its
+    // timeline [from, until) that must not be played (a trimmed track tail
+    // at a transition).  Skip exactly those frames; everything else stays
+    // on the same anchor.  (Emptying the whole buffer here — as this used
+    // to — also threw away the ~7 s of the next track the sender had
+    // already delivered: 7 s of silence, then the track from 0:07.)
     if (timing->deferred_flush_pending) {
-      if ((int32_t)(hdr->rtp_timestamp - timing->flush_until_ts) >= 0) {
-        ESP_LOGI(TAG, "Deferred flush at ts=%" PRIu32 " (until_ts=%" PRIu32 ")",
-                 hdr->rtp_timestamp, timing->flush_until_ts);
+      int32_t past_from = (int32_t)(hdr->rtp_timestamp - timing->flush_from_ts);
+      int32_t past_until =
+          (int32_t)(hdr->rtp_timestamp - timing->flush_until_ts);
+      if (past_from >= 0 && past_until < 0) {
         release_item(timing, buffer, item, from_pending);
-        audio_buffer_flush(buffer);
+        timing->deferred_dropped++;
+        continue;
+      }
+      if (past_until >= 0) {
+        ESP_LOGI(TAG,
+                 "Deferred flush done: skipped %" PRIu32 " frames in [%" PRIu32
+                 ", %" PRIu32 "), continuing at rtp=%" PRIu32,
+                 timing->deferred_dropped, timing->flush_from_ts,
+                 timing->flush_until_ts, hdr->rtp_timestamp);
         timing->deferred_flush_pending = false;
-        audio_timing_reset_continuity(timing);
-        timing->playout_started = false;
-        timing->ready_time_us = 0;
-        timing->consecutive_early_frames = 0;
-        timing->quick_start = true;
-        timing->acquired = false;
-        return 0;
+        timing->deferred_dropped = 0;
       }
     }
 

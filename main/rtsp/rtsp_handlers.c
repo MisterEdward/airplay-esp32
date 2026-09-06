@@ -1819,7 +1819,8 @@ static void handle_flushbuffered(int socket, rtsp_conn_t *conn,
                flush_from_seq, flush_from_ts, flush_until_seq, flush_until_ts);
       // Arm the deferred flush.  Do NOT flush the audio output immediately —
       // let it drain naturally to the boundary so the current track finishes.
-      audio_receiver_set_deferred_flush((uint32_t)flush_until_ts);
+      audio_receiver_set_deferred_flush((uint32_t)flush_from_ts,
+                                        (uint32_t)flush_until_ts);
     } else {
       ESP_LOGI(TAG, "sid=%" PRIu32 " FLUSHBUFFERED immediate (no from/until)",
                conn->sid);
@@ -1827,10 +1828,22 @@ static void handle_flushbuffered(int socket, rtsp_conn_t *conn,
   }
 
   if (!has_deferred) {
-    // Immediate flush: discard everything and reset now.
-    audio_receiver_seek_flush();
+    // Immediate flush.  Two very different sender behaviours hide behind
+    // the same message:
+    //  - after SETRATEANCHORTIME rate=0 (seek/pause): the sender will send
+    //    a fresh anchor; hold everything until it arrives.
+    //  - while playing (track skip): the sender keeps its anchor and just
+    //    continues the timeline with the new material — no anchor follows,
+    //    waiting for one means silence for the rest of the track.
+    if (conn->stream_paused) {
+      audio_receiver_seek_flush();
+    } else {
+      audio_receiver_live_flush();
+    }
     audio_output_flush();
-    ESP_LOGI(TAG, "sid=%" PRIu32 " flush done, replying", conn->sid);
+    ESP_LOGI(TAG, "sid=%" PRIu32 " flush done (%s), replying", conn->sid,
+             conn->stream_paused ? "seek: awaiting anchor"
+                                 : "live: anchor kept");
   }
 
   int sent = rtsp_send_ok(socket, conn, req->cseq);

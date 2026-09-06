@@ -92,6 +92,8 @@ typedef struct {
   // mutex (write flush_until_ts first, arm bool second; read bool first).
   bool deferred_flush_pending;
   uint32_t flush_until_ts;
+  uint32_t flush_from_ts;   // frames in [from, until) are skipped at playout
+  uint32_t deferred_dropped; // frames skipped by the current deferred flush
 
   // Persistent statistics for a late-frame drain episode.  Kept in the timing
   // state so repeated playout callbacks produce one summary log instead of
@@ -106,6 +108,14 @@ void audio_timing_reset(audio_timing_t *timing);
 // re-lock (flush/seek/track-change), else a stale expected_rtp or servo bias
 // survives into the new segment.
 void audio_timing_reset_continuity(audio_timing_t *timing);
+
+/**
+ * Keep the anchor (the sender's timeline is unchanged) but restart playout:
+ * the PCM buffer was just emptied, the next frame is judged against the
+ * anchor and acquired sample-exactly.  Used for FLUSHBUFFERED while playing
+ * (track skip) where no new SETRATEANCHORTIME follows.
+ */
+void audio_timing_restart_on_anchor(audio_timing_t *timing);
 void audio_timing_set_format(audio_timing_t *timing,
                              const audio_format_t *format);
 void audio_timing_set_output_latency(audio_timing_t *timing,

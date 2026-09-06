@@ -161,7 +161,18 @@ void audio_receiver_seek_flush(void);
  *
  * @param flush_until_ts  RTP timestamp boundary from flushUntilTS plist key.
  */
-void audio_receiver_set_deferred_flush(uint32_t flush_until_ts);
+void audio_receiver_set_deferred_flush(uint32_t flush_from_ts,
+                                       uint32_t flush_until_ts);
+
+/**
+ * Immediate FLUSHBUFFERED while the stream is playing (track skip): the
+ * sender keeps its anchor and simply continues on the same timeline with
+ * the new material, so no SETRATEANCHORTIME follows.  Drops what is
+ * buffered, then drops the old material still in flight on the TCP
+ * connection (recognised because it continues the timestamps we already
+ * had) and plays from the first discontinuous packet.
+ */
+void audio_receiver_live_flush(void);
 
 /**
  * Pause playback while preserving the timing anchor.

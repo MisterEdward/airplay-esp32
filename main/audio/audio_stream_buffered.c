@@ -183,6 +183,31 @@ static void buffered_decoder_task(void *pvParameters) {
       continue;
     }
 
+    // Live flush: the sender kept its anchor; what still arrives from the
+    // old segment continues the timestamps we already had, the new segment
+    // starts with a jump (it is timed near the playhead, the old tail was
+    // up to ~16 s ahead of it).
+    if (state->live_flush_pending) {
+      int32_t step = state->live_flush_ref_valid
+                         ? (int32_t)(slot->timestamp - state->live_flush_last_ts)
+                         : INT32_MAX;
+      int32_t spf = stream->format.frame_size > 0 ? stream->format.frame_size
+                                                  : 1024;
+      if (state->live_flush_ref_valid && step > 0 && step <= 4 * spf) {
+        state->live_flush_last_ts = slot->timestamp;
+        state->live_flush_drops++;
+        state->stats.packets_dropped++;
+        xQueueSend(state->buffered_free_queue, &index, 0);
+        continue;
+      }
+      state->live_flush_pending = false;
+      ESP_LOGI(TAG,
+               "Live flush: new segment at rtp=%" PRIu32 " seq=%" PRIu32
+               " after dropping %" PRIu32 " in-flight packets (step=%ld)",
+               slot->timestamp, slot->seq_no, state->live_flush_drops,
+               (long)step);
+    }
+
     // RTP gates, in decode order, before any crypto/decoder work.
     if (!audio_stream_accept_timestamp(state, slot->timestamp)) {
       state->stats.packets_dropped++;
@@ -371,7 +396,10 @@ static void buffered_audio_task(void *pvParameters) {
             break;
           }
         }
-        if (!wait_logged && waited_us > 1000000) {
+        // Steady state (PCM ring and hold queue both full) is normal
+        // back-pressure; only worth a line while an anchor is awaited.
+        if (!wait_logged && waited_us > 1000000 &&
+            (state->discard_all_until_anchor || state->live_flush_pending)) {
           wait_logged = true;
           ESP_LOGW(TAG,
                    "Reader out of packet slots for 1 s (held=%" PRIu32
@@ -383,6 +411,8 @@ static void buffered_audio_task(void *pvParameters) {
         break;
       }
       buffered_slot_t *slot = slot_at(state, index);
+      state->buffered_last_rx_ts = timestamp;
+      state->buffered_last_rx_ts_valid = true;
       slot->seq_no = seq_no;
       slot->timestamp = timestamp;
       slot->generation = state->buffered_generation;
