@@ -17,6 +17,8 @@
  */
 
 #include "log_stream.h"
+
+#include "crash_log.h"
 #include "log_journal.h"
 #include "spiram_task.h"
 
@@ -24,6 +26,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "esp_http_server.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -74,6 +77,9 @@ static ws_client_t s_ws_clients[CONFIG_LWIP_MAX_SOCKETS];
 static void journal_append_locked(const char *data, size_t len) {
   portENTER_CRITICAL(&s_journal_lock);
   log_journal_append(&s_journal, data, len);
+  /* Same writer, same lock: the retained tail can never disagree with the
+   * journal about what the last lines were. */
+  crash_log_write(data, len);
   portEXIT_CRITICAL(&s_journal_lock);
 }
 
@@ -456,7 +462,35 @@ static esp_err_t logs_level_post_handler(httpd_req_t *req) {
 /*  Public API                                                         */
 /* ------------------------------------------------------------------ */
 
+/* Put whatever the last boot managed to say at the top of this boot's
+ * journal, so /api/logs/download opens on the crash instead of on the
+ * startup banner that replaced it. */
+static void replay_previous_boot(void) {
+  size_t len = 0;
+  const char *prev = crash_log_previous(&len);
+  if (!prev || len == 0) {
+    return;
+  }
+
+  crash_log_stats_t st;
+  crash_log_get_stats(&st);
+  char banner[160];
+  int n = snprintf(banner, sizeof(banner),
+                   "--- previous boot (%s), %u bytes retained; %u boots, "
+                   "%u abnormal ---\n",
+                   crash_log_reason_name((int)esp_reset_reason()),
+                   (unsigned)len, (unsigned)st.boots, (unsigned)st.abnormal);
+  if (n > 0) {
+    journal_append_locked(banner, (size_t)n);
+  }
+  journal_append_locked(prev, len);
+  static const char kEnd[] = "--- end of previous boot ---\n";
+  journal_append_locked(kEnd, sizeof(kEnd) - 1);
+  crash_log_forget_previous();
+}
+
 esp_err_t log_stream_init(void) {
+  crash_log_init();
   char *storage = NULL;
 #ifdef CONFIG_SPIRAM
   storage =
@@ -472,6 +506,7 @@ esp_err_t log_stream_init(void) {
   }
   s_boot_id = ((uint64_t)esp_random() << 32) | esp_random();
   log_journal_init(&s_journal, storage, size, s_boot_id);
+  replay_previous_boot();
 #if !CONFIG_ESP_CONSOLE_NONE || !CONFIG_ESP_CONSOLE_SECONDARY_NONE
   s_orig_vprintf = esp_log_set_vprintf(log_vprintf_hook);
 #else

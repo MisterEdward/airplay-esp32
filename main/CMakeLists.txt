@@ -42,6 +42,7 @@ set( SRC_FILES
     "network/dns_server.c"
     "network/log_stream.c"
     "network/log_journal.c"
+    "network/crash_log.c"
     "network/pc_wake.c"
     "device_status.c"
     "audio/audio_arbiter.c"

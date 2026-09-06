@@ -18,6 +18,7 @@
 #include "wifi.h"
 #include "ethernet.h"
 #include "ota.h"
+#include "crash_log.h"
 #include "log_stream.h"
 #include "device_status.h"
 #include "pc_wake.h"
@@ -910,33 +911,6 @@ static esp_err_t ota_update_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
-static const char *reset_reason_str(esp_reset_reason_t r) {
-  switch (r) {
-  case ESP_RST_POWERON:
-    return "poweron";
-  case ESP_RST_EXT:
-    return "external";
-  case ESP_RST_SW:
-    return "software";
-  case ESP_RST_PANIC:
-    return "panic";
-  case ESP_RST_INT_WDT:
-    return "int_wdt";
-  case ESP_RST_TASK_WDT:
-    return "task_wdt";
-  case ESP_RST_WDT:
-    return "other_wdt";
-  case ESP_RST_DEEPSLEEP:
-    return "deepsleep";
-  case ESP_RST_BROWNOUT:
-    return "brownout";
-  case ESP_RST_SDIO:
-    return "sdio";
-  default:
-    return "unknown";
-  }
-}
-
 // FreeRTOS task table: name, state, priority, core, stack high-water mark.
 // The state column is the point: a task that should be idle in recv() but
 // shows Blocked on something else, or Ready/Running while it ought to be
@@ -1106,7 +1080,30 @@ static esp_err_t system_info_handler(httpd_req_t *req) {
   const esp_app_desc_t *app_desc = esp_app_get_description();
   cJSON_AddStringToObject(info, "firmware_version", app_desc->version);
   cJSON_AddStringToObject(info, "reset_reason",
-                          reset_reason_str(esp_reset_reason()));
+                          crash_log_reason_name((int)esp_reset_reason()));
+
+  /* One reset reason only ever describes the last boot.  A board that is
+   * browning out under load looks exactly like a board that rebooted once,
+   * until someone watches it for ten minutes — so publish the tally too. */
+  crash_log_stats_t boots;
+  crash_log_get_stats(&boots);
+  cJSON *bootj = cJSON_CreateObject();
+  cJSON_AddNumberToObject(bootj, "total", boots.boots);
+  cJSON_AddNumberToObject(bootj, "abnormal", boots.abnormal);
+  cJSON_AddNumberToObject(bootj, "since_abnormal", boots.since_abnormal);
+  cJSON_AddStringToObject(bootj, "last_abnormal",
+                          boots.last_abnormal
+                              ? crash_log_reason_name(boots.last_abnormal)
+                              : "none");
+  cJSON *byreason = cJSON_CreateObject();
+  for (int r = 0; r < CRASH_LOG_REASONS; r++) {
+    if (boots.by_reason[r]) {
+      cJSON_AddNumberToObject(byreason, crash_log_reason_name(r),
+                              boots.by_reason[r]);
+    }
+  }
+  cJSON_AddItemToObject(bootj, "by_reason", byreason);
+  cJSON_AddItemToObject(info, "boots", bootj);
   cJSON_AddNumberToObject(info, "uptime_s",
                           (double)(esp_timer_get_time() / 1000000));
 #ifdef CONFIG_DAC_TAS58XX
