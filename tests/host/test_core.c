@@ -147,6 +147,73 @@ static void test_envelope_volume_slew(void) {
   assert(memcmp(p, q, sizeof(p)) == 0);
 }
 
+// The steady-state path: fade open, volume at target, so the gain is a
+// constant for the whole block.  This is where playback actually lives.
+static void test_envelope_steady_gain(void) {
+  audio_envelope_t e;
+  audio_envelope_init(&e, 48000, 1, 1);
+  audio_envelope_fade_in(&e);
+  int16_t pcm[2 * 480];
+
+  // Finish the (2 frame) fade and snap the volume, so we land on OPEN with
+  // volume == target.
+  fill(pcm, 480, 16384);
+  audio_envelope_apply(&e, pcm, 480, 32768);
+  assert(audio_envelope_state(&e) == ENVELOPE_OPEN);
+
+  // Unity gain must be bit-perfect: not one sample may move.
+  int16_t before[2 * 480];
+  fill(pcm, 480, 12345);
+  memcpy(before, pcm, sizeof(pcm));
+  assert(audio_envelope_apply(&e, pcm, 480, 32768));
+  assert(memcmp(before, pcm, sizeof(pcm)) == 0);
+
+  // Digital silence stays digitally silent at unity...
+  memset(pcm, 0, sizeof(pcm));
+  assert(!audio_envelope_apply(&e, pcm, 480, 32768));
+
+  // ...and at an attenuating gain, where the dither must not leak onto it.
+  audio_envelope_apply(&e, pcm, 480, 16384); // one block of slew
+  for (int b = 0; b < 40; b++) {
+    memset(pcm, 0, sizeof(pcm));
+    audio_envelope_apply(&e, pcm, 480, 16384);
+  }
+  assert(e.volume_q15 == 16384); // slew has converged
+  memset(pcm, 0, sizeof(pcm));
+  assert(!audio_envelope_apply(&e, pcm, 480, 16384));
+  for (size_t i = 0; i < 2 * 480; i++) {
+    assert(pcm[i] == 0);
+  }
+
+  // Half gain on a constant input: every sample within one LSB of the ideal
+  // 8192, and the dither zero-mean so the average lands on it.
+  long sum = 0;
+  for (int b = 0; b < 20; b++) {
+    fill(pcm, 480, 16384);
+    assert(audio_envelope_apply(&e, pcm, 480, 16384));
+    for (size_t i = 0; i < 480; i++) {
+      assert(pcm[2 * i] >= 8191 && pcm[2 * i] <= 8193);
+      sum += pcm[2 * i];
+    }
+  }
+  double mean = (double)sum / (20.0 * 480.0);
+  assert(mean > 8191.9 && mean < 8192.1);
+
+  // Splitting a block must still give identical samples: the dither
+  // generator advances per sample, not per call.
+  audio_envelope_t a, b2;
+  fill(pcm, 480, 16384);
+  a = e;
+  b2 = e;
+  int16_t p[2 * 480], q[2 * 480];
+  fill(p, 480, 20000);
+  fill(q, 480, 20000);
+  audio_envelope_apply(&a, p, 480, 16384);
+  audio_envelope_apply(&b2, q, 111, 16384);
+  audio_envelope_apply(&b2, q + 222, 369, 16384);
+  assert(memcmp(p, q, sizeof(p)) == 0);
+}
+
 static void test_align(void) {
   assert(audio_align_silence_frames(0, 44100, 352) == 0);
   assert(audio_align_silence_frames(-100, 44100, 352) == 0);
@@ -247,6 +314,7 @@ int main(void) {
   test_envelope_fade_in();
   test_envelope_fade_out_and_reverse();
   test_envelope_volume_slew();
+  test_envelope_steady_gain();
   test_align();
   test_journal();
   test_source_volume();

@@ -57,6 +57,7 @@ void audio_envelope_init(audio_envelope_t *env, uint32_t sample_rate,
   env->step_q23 = 0;
   env->state = ENVELOPE_SILENT;
   env->volume_q15 = -1;
+  env->dither_state = 0x9E3779B9u;
 }
 
 void audio_envelope_fade_in(audio_envelope_t *env) {
@@ -98,6 +99,51 @@ void audio_envelope_set_volume_now(audio_envelope_t *env, int32_t volume_q15) {
   env->volume_q15 = volume_q15;
 }
 
+/* xorshift32.  Cheap, and its period is irrelevant here: the point is a
+ * signal-independent noise floor, not cryptography. */
+static inline uint32_t dither_next(uint32_t *state) {
+  uint32_t x = *state;
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  *state = x;
+  return x;
+}
+
+/*
+ * Apply a constant gain and round to 16 bits with TPDF dither.
+ *
+ * Without dither, truncating the product turns the quantisation error into a
+ * function of the signal, which is harmonic distortion rather than noise —
+ * clearly audible on quiet material.  Two independent uniform draws summed
+ * give a triangular distribution of +-1 LSB, which decorrelates the error
+ * from the signal at the cost of a noise floor around -90 dBFS.  This board
+ * needs it: the PCM5102A has no hardware volume, so every dB of attenuation
+ * is taken here, and at the usual -20 dB setting three bits of the sixteen
+ * are gone.
+ *
+ * Digital silence is passed through untouched.  Dithering zero would put a
+ * permanent +-1 LSB hiss on pauses and gaps, which is worse than the
+ * distortion it removes.
+ */
+static inline int16_t scale_dithered(int32_t sample, int32_t gain,
+                                     uint32_t *dither) {
+  if (sample == 0) {
+    return 0;
+  }
+  int32_t scaled = sample * gain;
+  int32_t noise = (int32_t)(dither_next(dither) >> 17) -
+                  (int32_t)(dither_next(dither) >> 17);
+  int32_t out = (scaled + noise + (1 << 14)) >> 15;
+  if (out > 32767) {
+    out = 32767;
+  }
+  if (out < -32768) {
+    out = -32768;
+  }
+  return (int16_t)out;
+}
+
 bool audio_envelope_apply(audio_envelope_t *env, int16_t *pcm, size_t frames,
                           int32_t volume_target_q15) {
   if (volume_target_q15 < 0) {
@@ -114,6 +160,44 @@ bool audio_envelope_apply(audio_envelope_t *env, int16_t *pcm, size_t frames,
   if (env->state == ENVELOPE_SILENT) {
     memset(pcm, 0, frames * 2 * sizeof(int16_t));
     return false;
+  }
+
+  /*
+   * Steady state: the fade is open and the volume has reached its target, so
+   * the gain is the same for every frame in the block.  This is where
+   * playback spends well over 99% of its time, and the general loop below
+   * was paying for it — a smoothstep evaluation with two 64-bit multiplies,
+   * plus a 64-bit multiply and two divisions, per frame, 48000 times a
+   * second, to arrive at a constant.
+   */
+  if (env->state == ENVELOPE_OPEN && env->step_q23 == 0 &&
+      env->volume_q15 == volume_target_q15) {
+    const int32_t gain = env->volume_q15;
+    if (gain == Q15_ONE) {
+      /* Unity: the only path that can be bit-perfect, so take it.  The old
+       * code still ran every sample through (x * 32768) / 32768. */
+      for (size_t i = 0; i < frames * 2; i++) {
+        if (pcm[i] != 0) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (gain == 0) {
+      memset(pcm, 0, frames * 2 * sizeof(int16_t));
+      return false;
+    }
+    bool steady_audible = false;
+    for (size_t i = 0; i < frames; i++) {
+      int16_t l = scale_dithered(pcm[2 * i], gain, &env->dither_state);
+      int16_t r = scale_dithered(pcm[2 * i + 1], gain, &env->dither_state);
+      pcm[2 * i] = l;
+      pcm[2 * i + 1] = r;
+      if (l != 0 || r != 0) {
+        steady_audible = true;
+      }
+    }
+    return steady_audible;
   }
 
   bool audible = false;

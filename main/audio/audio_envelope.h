@@ -48,6 +48,9 @@ typedef struct {
   envelope_state_t state;
   // Volume slew state.  -1 = uninitialised (first call snaps to target).
   int32_t volume_q15;
+  // Dither generator state.  Seeded to a fixed value so a block split in
+  // two produces the same samples as one whole block.
+  uint32_t dither_state;
 } audio_envelope_t;
 
 /** Initialise with the output sample rate and the two fade lengths. */
