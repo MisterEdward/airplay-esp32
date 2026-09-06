@@ -280,6 +280,27 @@ static size_t usb_pull(int16_t *pcm, size_t max_frames, void *ctx) {
 /*  Public API                                                         */
 /* ------------------------------------------------------------------ */
 
+// Log every change of the bus-level state.  tud_connected() flips as soon as
+// the host sends its first SETUP packet, long before tud_mount_cb(): if it
+// never flips, the host is not talking to this port at all (cable, wrong
+// port, PHY); if it flips but mount never follows, the descriptors are being
+// rejected.
+static esp_timer_handle_t s_state_timer;
+static void usb_state_poll_cb(void *arg) {
+  (void)arg;
+  static int last = -1;
+  int now = (tud_connected() ? 1 : 0) | (tud_mounted() ? 2 : 0) |
+            (tud_suspended() ? 4 : 0);
+  if (now != last) {
+    ESP_LOGI(TAG, "Bus: connected=%d mounted=%d suspended=%d speed=%s",
+             !!(now & 1), !!(now & 2), !!(now & 4),
+             tud_speed_get() == TUSB_SPEED_HIGH ? "high"
+             : tud_speed_get() == TUSB_SPEED_FULL ? "full"
+                                                  : "none");
+    last = now;
+  }
+}
+
 esp_err_t usb_audio_source_init(void) {
   if (s_ring) {
     return ESP_OK;
@@ -307,6 +328,11 @@ esp_err_t usb_audio_source_init(void) {
     return err;
   }
   audio_output_register_external_source(usb_pull, NULL);
+  const esp_timer_create_args_t poll = {.callback = usb_state_poll_cb,
+                                        .name = "usb_state"};
+  if (esp_timer_create(&poll, &s_state_timer) == ESP_OK) {
+    esp_timer_start_periodic(s_state_timer, 500000);
+  }
   ESP_LOGI(TAG,
            "USB speaker ready: UAC2 %d Hz stereo 16-bit + HID wake, ring=%d ms "
            "target=%d ms",
@@ -344,6 +370,8 @@ void usb_audio_source_get_stats(usb_audio_stats_t *out) {
   }
   *out = s_stats;
   out->host_state = s_host_state;
+  out->bus_connected = tud_connected();
+  out->mounted = tud_mounted();
   out->remote_wakeup_armed = s_remote_wakeup_armed;
   out->muted = s_muted;
   out->streaming =

@@ -83,3 +83,13 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # Compile DEBUG-level logs in (but keep INFO as the default) so the WebUI can
 # raise the level of individual tags at runtime for diagnostics.
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+
+# No serial console at all.  Nobody reads UART0 on this board, yet every log
+# line still blocked the calling task for ~13 ms at 115200 baud — three lines
+# from the render task at a seek were enough to run the 42 ms DMA ring dry
+# (observed: an underrun and a -15 ms jump on every seek).  The secondary
+# USB-Serial-JTAG console must also go: it shares the PHY with the OTG
+# speaker device.  All logs are captured by log_stream into the PSRAM
+# journal and served over WiFi.
+CONFIG_ESP_CONSOLE_NONE=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

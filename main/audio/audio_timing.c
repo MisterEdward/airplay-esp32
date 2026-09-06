@@ -921,28 +921,27 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
 
     release_item(timing, buffer, item, from_pending);
 
-    if (!timing->acquired) {
-      timing->acquired = true;
+    // One log line for the whole acquisition.  This runs on the render task;
+    // every line here is time the DMA ring is not being fed.
+    bool first_acquire = !timing->acquired;
+    bool first_playout = !timing->playout_started;
+    bool was_quick = timing->quick_start;
+    uint32_t drained = timing->late_drop_active ? timing->late_drop_count : 0;
+    timing->acquired = true;
+    timing->playout_started = true;
+    timing->quick_start = false;
+    timing->late_drop_count = 0;
+    timing->late_drop_active = false;
+    if (first_acquire || first_playout || drained) {
       ESP_LOGI(TAG,
                "Acquired: rtp=%" PRIu32 " err=%+lld us silence=%" PRIu32
-               " trimmed=%" PRIu32 " domain=%s%s",
+               " trimmed=%" PRIu32 " dropped=%" PRIu32 " domain=%s%s%s",
                played_rtp_timestamp, (long long)timing->acquire_err_us,
-               timing->align_silence, timing->align_trimmed,
+               timing->align_silence, timing->align_trimmed, drained,
                audio_timing_sync_mode_name(timing),
+               first_playout ? (was_quick ? " start=quick" : " start=normal")
+                             : " re-acquire",
                timing->anchor_valid ? "" : " (no anchor)");
-    }
-    if (!timing->playout_started) {
-      timing->playout_started = true;
-      bool was_quick = timing->quick_start;
-      timing->quick_start = false;
-      ESP_LOGI(TAG, "Playout started%s: rtp=%" PRIu32,
-               was_quick ? " (quick_start)" : "", played_rtp_timestamp);
-    }
-    if (timing->late_drop_active) {
-      ESP_LOGW(TAG, "Late-frame drain complete: dropped=%" PRIu32,
-               timing->late_drop_count);
-      timing->late_drop_count = 0;
-      timing->late_drop_active = false;
     }
 
     timing->read_has_media = true;

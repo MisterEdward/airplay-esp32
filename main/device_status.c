@@ -219,6 +219,8 @@ cJSON *device_status_build_json(void) {
                           us.host_state == USB_HOST_ACTIVE      ? "on"
                           : us.host_state == USB_HOST_SUSPENDED ? "asleep"
                                                                 : "off");
+  cJSON_AddBoolToObject(usb, "bus_connected", us.bus_connected);
+  cJSON_AddBoolToObject(usb, "mounted", us.mounted);
   cJSON_AddBoolToObject(usb, "streaming", us.streaming);
   cJSON_AddBoolToObject(usb, "remote_wakeup_armed", us.remote_wakeup_armed);
   cJSON_AddNumberToObject(usb, "ring_ms",

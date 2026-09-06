@@ -31,6 +31,8 @@ typedef enum {
 
 typedef struct {
   usb_host_state_t host_state;
+  bool bus_connected;       // host has talked to us (SETUP seen) since attach
+  bool mounted;             // host completed SET_CONFIGURATION
   bool streaming;           // audio data received within the last 500 ms
   bool remote_wakeup_armed; // host allowed remote wakeup when it suspended
   uint32_t ring_frames;     // frames currently buffered
