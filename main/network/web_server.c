@@ -892,6 +892,12 @@ static esp_err_t ota_update_handler(httpd_req_t *req) {
   if (err != ESP_OK) {
     httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                         esp_err_to_name(err));
+    // RTSP was stopped above. Restart the intact running image so all
+    // service flags and client tasks are rebuilt together, even when a
+    // failed upload left a partially torn-down AirPlay session.
+    ESP_LOGW(TAG, "OTA failed; restarting the current firmware");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
     return ESP_FAIL;
   }
 
@@ -944,7 +950,7 @@ static esp_err_t tasks_handler(httpd_req_t *req) {
   n = uxTaskGetSystemState(tab, n + 4, NULL);
   cJSON *root = cJSON_CreateObject();
   cJSON *arr = cJSON_CreateArray();
-  static const char *const states[] = {"running", "ready",   "blocked",
+  static const char *const states[] = {"running",   "ready",   "blocked",
                                        "suspended", "deleted", "invalid"};
   for (UBaseType_t i = 0; i < n; i++) {
     cJSON *t = cJSON_CreateObject();
@@ -1587,9 +1593,8 @@ esp_err_t web_server_start(uint16_t port) {
                          .handler = ota_update_handler};
   httpd_register_uri_handler(s_server, &ota_uri);
 
-  httpd_uri_t tasks_uri = {.uri = "/api/tasks",
-                           .method = HTTP_GET,
-                           .handler = tasks_handler};
+  httpd_uri_t tasks_uri = {
+      .uri = "/api/tasks", .method = HTTP_GET, .handler = tasks_handler};
   httpd_register_uri_handler(s_server, &tasks_uri);
 
   httpd_uri_t system_info_uri = {.uri = "/api/system/info",
