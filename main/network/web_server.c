@@ -947,9 +947,41 @@ static esp_err_t tasks_handler(httpd_req_t *req) {
     httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
     return ESP_FAIL;
   }
-  n = uxTaskGetSystemState(tab, n + 4, NULL);
+  configRUN_TIME_COUNTER_TYPE total = 0;
+  n = uxTaskGetSystemState(tab, n + 4, &total);
+  if (n == 0) {
+    free(tab);
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    httpd_resp_sendstr(req, "Task table changed; retry");
+    return ESP_FAIL;
+  }
   cJSON *root = cJSON_CreateObject();
   cJSON *arr = cJSON_CreateArray();
+  if (!root || !arr) {
+    cJSON_Delete(root);
+    cJSON_Delete(arr);
+    free(tab);
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
+    return ESP_FAIL;
+  }
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+  // HTTP handlers run serially. Keep the last successful table; only handle,
+  // task number and counters are read later (task-name pointers may expire).
+  static TaskStatus_t *previous;
+  static UBaseType_t previous_n;
+  static configRUN_TIME_COUNTER_TYPE previous_total;
+  configRUN_TIME_COUNTER_TYPE interval = total - previous_total;
+  bool sampled = previous != NULL && interval > 0;
+  cJSON_AddBoolToObject(root, "cpu_sample_valid", sampled);
+  cJSON_AddNumberToObject(root, "cpu_cores", configNUMBER_OF_CORES);
+  if (sampled) {
+    cJSON_AddNumberToObject(root, "cpu_interval_us", (double)interval);
+  } else {
+    cJSON_AddNullToObject(root, "cpu_interval_us");
+  }
+#else
+  cJSON_AddBoolToObject(root, "cpu_sample_valid", false);
+#endif
   static const char *const states[] = {"running",   "ready",   "blocked",
                                        "suspended", "deleted", "invalid"};
   for (UBaseType_t i = 0; i < n; i++) {
@@ -963,9 +995,37 @@ static esp_err_t tasks_handler(httpd_req_t *req) {
 #endif
     cJSON_AddNumberToObject(t, "stack_free",
                             (double)tab[i].usStackHighWaterMark);
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+    cJSON_AddNumberToObject(t, "runtime_us", (double)tab[i].ulRunTimeCounter);
+    if (sampled) {
+      configRUN_TIME_COUNTER_TYPE before = 0;
+      for (UBaseType_t j = 0; j < previous_n; j++) {
+        // Task numbers distinguish a new task that reused a deleted handle.
+        if (previous[j].xHandle == tab[i].xHandle &&
+            previous[j].xTaskNumber == tab[i].xTaskNumber) {
+          before = previous[j].ulRunTimeCounter;
+          break;
+        }
+      }
+      configRUN_TIME_COUNTER_TYPE delta = tab[i].ulRunTimeCounter - before;
+      // One busy core is 100%; idle tasks are included, so two cores sum
+      // to approximately 200%. Deleted tasks may leave a small shortfall.
+      cJSON_AddNumberToObject(t, "cpu_percent",
+                              100.0 * (double)delta / (double)interval);
+    } else {
+      cJSON_AddNullToObject(t, "cpu_percent");
+    }
+#endif
     cJSON_AddItemToArray(arr, t);
   }
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+  free(previous);
+  previous = tab;
+  previous_n = n;
+  previous_total = total;
+#else
   free(tab);
+#endif
   cJSON_AddItemToObject(root, "tasks", arr);
   cJSON_AddNumberToObject(root, "uptime_s",
                           (double)(esp_timer_get_time() / 1000000LL));
