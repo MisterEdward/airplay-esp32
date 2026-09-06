@@ -255,10 +255,16 @@ static void client_task(void *pvParameters) {
         int block_len = rtsp_crypto_read_block(
             slot->socket, conn, buffer + buf_len, buf_capacity - buf_len);
         if (block_len <= 0) {
-          if (slot->should_stop || (errno != EAGAIN && errno != EWOULDBLOCK)) {
-            goto cleanup;
-          }
-          continue;
+          // The block reader absorbs receive timeouts itself; anything it
+          // hands back as <= 0 is final: peer closed, socket shut down for
+          // stop, or a decrypt/framing error.  (Earlier code re-checked
+          // errno here and, since a peer close leaves the stale EAGAIN from
+          // the last timeout in place, spun forever on the dead socket: no
+          // "disconnected" log, the session and the audio output never
+          // released, and the sender unable to come back.)
+          ESP_LOGI(TAG, "sid=%" PRIu32 " encrypted read ended (%d, errno=%d)",
+                   conn->sid, block_len, errno);
+          goto cleanup;
         }
 
         buf_len += (size_t)block_len;

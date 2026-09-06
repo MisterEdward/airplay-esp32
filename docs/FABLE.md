@@ -87,6 +87,18 @@ AirPlay is serving.  If it never reaches the network it restarts after
 - Select it as the output device in Windows only when you want the PC to be
   the source; the arbiter does not look at USB activity.
 - Host volume/mute are honoured (ramped, not stepped).
+- **Feedback-endpoint format.** A full-speed device reports its rate to the
+  host through the feedback endpoint; the USB spec says 10.14 in three
+  bytes, macOS insists on exactly that, the Windows UAC2 class driver wants
+  16.16 in four bytes, and the wrong one makes the host stop the stream
+  after ~60 ms (macOS) or play garbage (Windows).  The format is chosen when
+  the host opens the stream: *auto* (default) uses the Windows format when
+  the host has asked for the Microsoft OS string descriptor (index 0xEE,
+  which only Windows does) and the spec format otherwise.  Override in the
+  web UI (PC card) or `POST /api/pc/config {"usb_feedback":"windows"|"mac"|"auto"}`;
+  `/api/status` → `pc.feedback_format` shows what is in use.
+  Note: Windows caches the 0xEE answer per VID/PID after the first plug-in,
+  so if auto-detection ever misses, pick *Windows* explicitly.
 - Windows must allow the device to wake the computer (Device Manager →
   the HID keyboard → Power Management) for USB wake from sleep.  From fully
   off only Wake-on-LAN works: enter the PC's Ethernet MAC in the web UI.
@@ -94,7 +106,14 @@ AirPlay is serving.  If it never reaches the network it restarts after
 ## Diagnostics
 
 - `/logs` — live WebSocket viewer with backlog, filter, pause, copy, download
-  of the whole journal, and per-tag runtime log level (up to DEBUG).
+  of the whole journal, and per-tag runtime log level (up to DEBUG).  The
+  `httpd*`, `event` and `esp-tls` tags are pinned at INFO whatever level
+  the viewer asks for: at DEBUG every line pushed to the browser made the
+  HTTP server log four more, which fed back until httpd stopped answering.
+- TinyUSB's own messages (class requests, interface open/close, rejected
+  requests) appear under the `tinyusb` tag.
+- `sid=N #k METHOD took 312 ms` — an RTSP handler that answered slowly; a
+  multiroom sender drops a speaker that replies late.
 - `/api/status` — JSON: active source, AirPlay session (sender, volume,
   paused), now playing, timing (domain, acquisition error, servo state),
   PTP, USB/PC state, firmware/OTA state.

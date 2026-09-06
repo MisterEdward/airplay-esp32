@@ -45,7 +45,8 @@ int rtsp_crypto_read_block(int socket, rtsp_conn_t *conn, uint8_t *buffer,
       continue;
     }
     if (r == 0) {
-      return -1; // peer closed
+      errno = ECONNRESET; // peer closed: never leave a stale EAGAIN behind
+      return 0;
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
       continue;
@@ -78,7 +79,8 @@ int rtsp_crypto_read_block(int socket, rtsp_conn_t *conn, uint8_t *buffer,
     }
     if (r == 0) {
       free(encrypted);
-      return -1; // peer closed
+      errno = ECONNRESET;
+      return 0; // peer closed
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
       continue;

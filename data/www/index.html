@@ -79,7 +79,10 @@ input:focus{outline:none;border-color:#e94560}
 <div id='wake-msg'></div>
 <div class='form-group' style='margin-top:14px'><label>Wake-on-LAN MAC (PC Ethernet)</label><input type='text' id='wol-mac' placeholder='aa:bb:cc:dd:ee:ff'></div>
 <button class='btn btn-secondary' onclick='saveWol()'>Save MAC</button>
-<div id='wol-msg'></div></div>
+<div id='wol-msg'></div>
+<div class='form-group' style='margin-top:14px'><label>USB feedback format (host OS)</label>
+<select id='usb-fb' onchange='saveUsbFb()'><option value='auto'>Auto (Windows detected, else spec/macOS)</option><option value='windows'>Windows (16.16)</option><option value='mac'>macOS / Linux (10.14)</option></select></div>
+<div id='usb-fb-msg'></div></div>
 <div class='card'><h2>WiFi Network</h2>
 <button class='btn btn-secondary' onclick='scanWiFi()'>Scan Networks</button>
 <div id='wifi-list' class='wifi-list'></div>
@@ -302,12 +305,19 @@ async function loadStatus(){
     if(pc.available){document.getElementById('pc-card').style.display='';
       var st=pc.pc_state==='on'?'On':pc.pc_state==='asleep'?'Asleep':'Off / disconnected';
       document.getElementById('pc-state').textContent=st+(pc.pc_state==='asleep'?(pc.remote_wakeup_armed?' (USB wake armed)':' (USB wake not allowed)'):'');
-      document.getElementById('pc-usb').textContent=pc.streaming?'streaming · buffer '+Math.round(pc.ring_ms)+' ms':'idle';
+      document.getElementById('pc-usb').textContent=(pc.streaming?'streaming · buffer '+Math.round(pc.ring_ms)+' ms':'idle')+(pc.feedback_format?' · fb '+pc.feedback_format+(pc.host_is_windows?' (Windows)':''):'');
+      if(!fbLoaded&&pc.feedback_mode){fbLoaded=true;document.getElementById('usb-fb').value=pc.feedback_mode;}
     }
     if(!wolLoaded&&pc.wol_mac!==undefined){wolLoaded=true;document.getElementById('wol-mac').value=pc.wol_mac||'';}
   }catch(e){}
 }
-var wolLoaded=false;
+var wolLoaded=false,fbLoaded=false;
+async function saveUsbFb(){
+  var v=document.getElementById('usb-fb').value;
+  try{var r=await fetch('/api/pc/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({usb_feedback:v})});
+    var d=await r.json();msg('usb-fb-msg',d.success?'Saved: takes effect when the PC next starts playing':'Error',d.success?'ok':'err');}
+  catch(e){msg('usb-fb-msg','Error','err');}
+}
 async function wakePC(){
   var b=document.getElementById('wake-btn');b.disabled=true;msg('wake-msg','Sending wake…','info');
   try{var r=await fetch('/api/pc/wake',{method:'POST'});var d=await r.json();
