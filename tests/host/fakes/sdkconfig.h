@@ -1,0 +1,3 @@
+#pragma once
+#define CONFIG_OUTPUT_SAMPLE_RATE_HZ 48000
+#define CONFIG_RESAMPLER_TAPS        32
