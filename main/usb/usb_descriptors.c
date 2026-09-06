@@ -8,6 +8,7 @@
  */
 
 #include "usb_descriptors.h"
+#include "usb_audio_source.h"
 
 #include "esp_mac.h"
 #include "tusb.h"
@@ -111,6 +112,12 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
     s_desc_str[1] = 0x0409; // English (US)
     count = 1;
   } else {
+    if (index == 0xEE) {
+      // Microsoft OS string descriptor: only Windows asks for it.  We have
+      // none (STALL), but the request itself identifies the host.
+      usb_audio_source_note_windows_host();
+      return NULL;
+    }
     if (index >= USB_STR_COUNT) {
       return NULL;
     }

@@ -35,6 +35,9 @@ typedef struct {
   bool mounted;             // host completed SET_CONFIGURATION
   bool streaming;           // audio data received within the last 500 ms
   bool remote_wakeup_armed; // host allowed remote wakeup when it suspended
+  bool host_is_windows;     // host asked for the MS OS string (index 0xEE)
+  char feedback_mode[8];    // "auto" | "windows" | "mac"
+  bool feedback_10_14;      // format actually chosen at the last stream open
   uint32_t ring_frames;     // frames currently buffered
   uint32_t ring_target;     // target depth
   uint32_t underruns;       // pull found the ring empty while streaming
@@ -65,3 +68,15 @@ void usb_audio_source_get_stats(usb_audio_stats_t *out);
  * remote wakeup.
  */
 esp_err_t usb_audio_source_wake_host(void);
+
+/**
+ * Feedback-endpoint format.  The USB spec says a full-speed device reports
+ * Ff as 10.14 in three bytes; macOS insists on exactly that, while the
+ * Windows UAC2 class driver wants 16.16 in four bytes.  "auto" picks
+ * Windows when the host requested the Microsoft OS string descriptor
+ * (index 0xEE, which only Windows does) and the spec format otherwise.
+ * Takes effect the next time the host opens the streaming interface.
+ */
+esp_err_t usb_audio_source_set_feedback_mode(const char *mode);
+/** Called from the string-descriptor callback when index 0xEE is seen. */
+void usb_audio_source_note_windows_host(void);

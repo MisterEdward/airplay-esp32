@@ -233,6 +233,10 @@ cJSON *device_status_build_json(void) {
   cJSON_AddNumberToObject(usb, "overruns", us.overruns);
   cJSON_AddNumberToObject(usb, "trims", us.trims);
   cJSON_AddNumberToObject(usb, "packets", us.packets);
+  cJSON_AddBoolToObject(usb, "host_is_windows", us.host_is_windows);
+  cJSON_AddStringToObject(usb, "feedback_mode", us.feedback_mode);
+  cJSON_AddStringToObject(usb, "feedback_format",
+                          us.feedback_10_14 ? "10.14" : "16.16");
   cJSON_AddNumberToObject(usb, "discarded_kb", us.discarded_bytes / 1024);
   cJSON_AddNumberToObject(usb, "volume_q15", us.volume_q15);
   cJSON_AddBoolToObject(usb, "muted", us.muted);

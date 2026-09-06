@@ -23,7 +23,10 @@ extern "C" {
 // clang-format off
 #define CFG_TUSB_OS_INC_PATH  freertos/
 // clang-format on
-#define CFG_TUSB_DEBUG        0
+// TinyUSB's own diagnostics (level 1: errors, class request rejections,
+// interface open/close) go to the wireless journal via usb_tusb_printf().
+#define CFG_TUSB_DEBUG        1
+#define CFG_TUSB_DEBUG_PRINTF usb_tusb_printf
 #define ESP_PLATFORM          1
 
 #define CFG_TUD_ENABLED        1

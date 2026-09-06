@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
@@ -481,7 +482,19 @@ int rtsp_dispatch(int socket, rtsp_conn_t *conn, const uint8_t *raw_request,
   // Find handler in dispatch table
   for (const rtsp_method_handler_t *h = method_handlers; h->method; h++) {
     if (strcasecmp(req.method, h->method) == 0) {
+      int64_t t0 = esp_timer_get_time();
       h->handler(socket, conn, &req, raw_request, raw_len);
+      int64_t took_us = esp_timer_get_time() - t0;
+      // A slow reply is invisible to the sender except as a timeout: in a
+      // multiroom group the phone drops a speaker that answers late.
+      if (took_us > 200000) {
+        ESP_LOGW(TAG, "sid=%" PRIu32 " #%" PRIu32 " %s took %lld ms",
+                 conn->sid, conn->requests, req.method,
+                 (long long)(took_us / 1000));
+      } else {
+        ESP_LOGD(TAG, "sid=%" PRIu32 " #%" PRIu32 " %s done in %lld us",
+                 conn->sid, conn->requests, req.method, (long long)took_us);
+      }
       return 0;
     }
   }

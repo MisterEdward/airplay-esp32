@@ -129,6 +129,13 @@ esp_err_t settings_get_wol_mac(char *mac, size_t len);
 /** Save the Wake-on-LAN target MAC (validated text form). */
 esp_err_t settings_set_wol_mac(const char *mac);
 
+/**
+ * USB speaker feedback-endpoint format: "auto" (default), "windows" or
+ * "mac".  See usb_audio_source.h for what each means.
+ */
+esp_err_t settings_get_usb_feedback(char *mode, size_t len);
+esp_err_t settings_set_usb_feedback(const char *mode);
+
 // ---- LED settings ----
 
 /**

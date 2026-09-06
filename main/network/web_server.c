@@ -20,6 +20,9 @@
 #include "log_stream.h"
 #include "device_status.h"
 #include "pc_wake.h"
+#if CONFIG_USB_AUDIO_SOURCE
+#include "usb_audio_source.h"
+#endif
 #include "rtsp_server.h"
 #include "audio_output.h"
 #include "esp_app_desc.h"
@@ -1055,6 +1058,9 @@ static esp_err_t pc_config_get_handler(httpd_req_t *req) {
   cJSON *json = cJSON_CreateObject();
   cJSON_AddBoolToObject(json, "success", true);
   cJSON_AddStringToObject(json, "wol_mac", have ? mac : "");
+  char fb[8] = "auto";
+  settings_get_usb_feedback(fb, sizeof(fb));
+  cJSON_AddStringToObject(json, "usb_feedback", fb);
   char *json_str = cJSON_PrintUnformatted(json);
   httpd_resp_set_type(req, "application/json");
   httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
@@ -1073,20 +1079,51 @@ static esp_err_t pc_config_post_handler(httpd_req_t *req) {
   buf[len] = '\0';
   cJSON *json = cJSON_Parse(buf);
   const cJSON *mac = json ? cJSON_GetObjectItem(json, "wol_mac") : NULL;
-  uint8_t bytes[6];
-  if (!cJSON_IsString(mac) || !pc_wake_parse_mac(mac->valuestring, bytes)) {
+  const cJSON *fb = json ? cJSON_GetObjectItem(json, "usb_feedback") : NULL;
+  if (!cJSON_IsString(mac) && !cJSON_IsString(fb)) {
     cJSON_Delete(json);
     httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                        "wol_mac must be aa:bb:cc:dd:ee:ff");
+                        "expected wol_mac and/or usb_feedback");
     return ESP_FAIL;
   }
-  char canonical[18];
-  pc_wake_format_mac(bytes, canonical, sizeof(canonical));
-  esp_err_t err = settings_set_wol_mac(canonical);
+  esp_err_t err = ESP_OK;
+  char canonical[18] = "";
+  if (cJSON_IsString(mac)) {
+    uint8_t bytes[6];
+    if (!pc_wake_parse_mac(mac->valuestring, bytes)) {
+      cJSON_Delete(json);
+      httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                          "wol_mac must be aa:bb:cc:dd:ee:ff");
+      return ESP_FAIL;
+    }
+    pc_wake_format_mac(bytes, canonical, sizeof(canonical));
+    err = settings_set_wol_mac(canonical);
+  }
+  char fb_mode[8] = "";
+  if (cJSON_IsString(fb)) {
+#if CONFIG_USB_AUDIO_SOURCE
+    if (usb_audio_source_set_feedback_mode(fb->valuestring) != ESP_OK) {
+      cJSON_Delete(json);
+      httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                          "usb_feedback must be auto, windows or mac");
+      return ESP_FAIL;
+    }
+#endif
+    strlcpy(fb_mode, fb->valuestring, sizeof(fb_mode));
+    esp_err_t e2 = settings_set_usb_feedback(fb_mode);
+    if (e2 != ESP_OK) {
+      err = e2;
+    }
+  }
   cJSON_Delete(json);
   cJSON *resp = cJSON_CreateObject();
   cJSON_AddBoolToObject(resp, "success", err == ESP_OK);
-  cJSON_AddStringToObject(resp, "wol_mac", canonical);
+  if (canonical[0]) {
+    cJSON_AddStringToObject(resp, "wol_mac", canonical);
+  }
+  if (fb_mode[0]) {
+    cJSON_AddStringToObject(resp, "usb_feedback", fb_mode);
+  }
   char *json_str = cJSON_PrintUnformatted(resp);
   httpd_resp_set_type(req, "application/json");
   httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);

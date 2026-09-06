@@ -1,6 +1,7 @@
 #include "usb_audio_source.h"
 
 #include "audio_output.h"
+#include "settings.h"
 #include "usb_descriptors.h"
 #include "usb_device_uac.h"
 
@@ -13,9 +14,33 @@
 
 #include <inttypes.h>
 #include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "usb_audio";
+
+// TinyUSB's tu_printf (CFG_TUSB_DEBUG_PRINTF): there is no serial console,
+// so its messages would otherwise vanish.  Lines are short and rare at
+// debug level 1.
+int usb_tusb_printf(const char *fmt, ...) {
+  char line[160];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(line, sizeof(line), fmt, ap);
+  va_end(ap);
+  if (n <= 0) {
+    return n;
+  }
+  size_t len = (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1;
+  while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+    line[--len] = '\0';
+  }
+  if (len > 0) {
+    ESP_LOGW("tinyusb", "%s", line);
+  }
+  return n;
+}
 
 #define OUTPUT_RATE     CONFIG_OUTPUT_SAMPLE_RATE_HZ
 #define BYTES_PER_FRAME 4 // stereo int16
@@ -44,6 +69,52 @@ static volatile bool s_muted;
 static usb_audio_stats_t s_stats;
 static int32_t s_depth_filtered; // frames, Q0
 static int s_adapter_dir;        // 0 idle, +1 duplicate (ring low), -1 drop
+static volatile bool s_host_is_windows;
+static char s_feedback_mode[8] = "auto";
+static volatile bool s_feedback_10_14 = true;
+
+/* ------------------------------------------------------------------ */
+/*  Feedback endpoint format (see usb_audio_source.h)                  */
+/* ------------------------------------------------------------------ */
+
+void usb_audio_source_note_windows_host(void) {
+  if (!s_host_is_windows) {
+    s_host_is_windows = true;
+    ESP_LOGI(TAG, "Host requested MS OS string descriptor: Windows");
+  }
+}
+
+esp_err_t usb_audio_source_set_feedback_mode(const char *mode) {
+  if (!mode || (strcmp(mode, "auto") != 0 && strcmp(mode, "windows") != 0 &&
+                strcmp(mode, "mac") != 0)) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  strlcpy(s_feedback_mode, mode, sizeof(s_feedback_mode));
+  return ESP_OK;
+}
+
+// TinyUSB asks this each time the host opens the streaming interface.
+// true = 10.14 in three bytes (USB spec, macOS/Linux), false = 16.16 in
+// four bytes (Windows).
+bool tud_audio_feedback_format_correction_cb(uint8_t func_id) {
+  (void)func_id;
+  bool spec_format;
+  const char *why;
+  if (strcmp(s_feedback_mode, "mac") == 0) {
+    spec_format = true;
+    why = "setting";
+  } else if (strcmp(s_feedback_mode, "windows") == 0) {
+    spec_format = false;
+    why = "setting";
+  } else {
+    spec_format = !s_host_is_windows;
+    why = s_host_is_windows ? "auto: MS OS string seen" : "auto";
+  }
+  s_feedback_10_14 = spec_format;
+  ESP_LOGI(TAG, "Stream open: feedback format %s (%s)",
+           spec_format ? "10.14/3 bytes" : "16.16/4 bytes", why);
+  return spec_format;
+}
 
 /* ------------------------------------------------------------------ */
 /*  TinyUSB device callbacks (ours, because CONFIG_USB_DEVICE_UAC_AS_PART) */
@@ -296,16 +367,19 @@ static void usb_state_poll_cb(void *arg) {
   int now = (tud_connected() ? 1 : 0) | (tud_mounted() ? 2 : 0) |
             (tud_suspended() ? 4 : 0) | (streaming ? 8 : 0);
   if (now != last) {
+    // fifo = bytes sitting in TinyUSB's EP OUT FIFO.  Full (~2 KB) after
+    // the host went quiet means the class driver stopped re-arming the
+    // endpoint; empty means the host itself stopped sending.
     ESP_LOGI(TAG,
              "Bus: connected=%d mounted=%d suspended=%d streaming=%d "
-             "speed=%s packets=%" PRIu32 " ring=%" PRIu32 " under=%" PRIu32
-             " over=%" PRIu32,
+             "speed=%s packets=%" PRIu32 " fifo=%u ring=%" PRIu32
+             " under=%" PRIu32 " over=%" PRIu32,
              !!(now & 1), !!(now & 2), !!(now & 4), !!(now & 8),
              tud_speed_get() == TUSB_SPEED_HIGH ? "high"
              : tud_speed_get() == TUSB_SPEED_FULL ? "full"
                                                   : "none",
-             s_stats.packets, s_stats.ring_frames, s_stats.underruns,
-             s_stats.overruns);
+             s_stats.packets, (unsigned)tud_audio_n_available(0),
+             s_stats.ring_frames, s_stats.underruns, s_stats.overruns);
     last = now;
   }
 }
@@ -320,6 +394,10 @@ esp_err_t usb_audio_source_init(void) {
   }
   s_stats.ring_target = RING_TARGET_FRAMES;
   s_stats.volume_q15 = s_volume_q15;
+  char mode[8];
+  if (settings_get_usb_feedback(mode, sizeof(mode)) == ESP_OK) {
+    usb_audio_source_set_feedback_mode(mode);
+  }
 
   uac_device_config_t config = {
       .skip_tinyusb_init = false, // the component brings up the PHY + stack
@@ -382,6 +460,9 @@ void usb_audio_source_get_stats(usb_audio_stats_t *out) {
   out->bus_connected = tud_connected();
   out->mounted = tud_mounted();
   out->remote_wakeup_armed = s_remote_wakeup_armed;
+  out->host_is_windows = s_host_is_windows;
+  strlcpy(out->feedback_mode, s_feedback_mode, sizeof(out->feedback_mode));
+  out->feedback_10_14 = s_feedback_10_14;
   out->muted = s_muted;
   out->streaming =
       (esp_timer_get_time() - s_last_data_us) < STREAMING_TIMEOUT_US;

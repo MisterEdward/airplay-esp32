@@ -28,6 +28,7 @@ static const char *TAG = "settings";
 #define NVS_KEY_BIAMP_EQ       "ba_eq"
 #define NVS_KEY_DUAL_MODE      "dual_mode"
 #define NVS_KEY_WOL_MAC        "wol_mac"
+#define NVS_KEY_USB_FEEDBACK   "usb_fb"
 
 #define MAX_WIFI_SSID_LEN     32
 #define MAX_WIFI_PASSWORD_LEN 64
@@ -871,6 +872,42 @@ settings_set_biamp_eq(const float gains_db[2][2][SETTINGS_WAY_BANDS]) {
     ESP_LOGI(TAG, "Saved bi-amp EQ gains");
   } else {
     ESP_LOGE(TAG, "Failed to save bi-amp EQ: %s", esp_err_to_name(err));
+  }
+  return err;
+}
+
+esp_err_t settings_get_usb_feedback(char *mode, size_t len) {
+  if (!mode || len < 8) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs);
+  if (err != ESP_OK) {
+    return ESP_ERR_NOT_FOUND;
+  }
+  size_t required = len;
+  err = nvs_get_str(nvs, NVS_KEY_USB_FEEDBACK, mode, &required);
+  nvs_close(nvs);
+  return err == ESP_OK ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t settings_set_usb_feedback(const char *mode) {
+  if (!mode || (strcmp(mode, "auto") != 0 && strcmp(mode, "windows") != 0 &&
+                strcmp(mode, "mac") != 0)) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+  if (err != ESP_OK) {
+    return err;
+  }
+  err = nvs_set_str(nvs, NVS_KEY_USB_FEEDBACK, mode);
+  if (err == ESP_OK) {
+    err = nvs_commit(nvs);
+  }
+  nvs_close(nvs);
+  if (err == ESP_OK) {
+    ESP_LOGI(TAG, "Saved USB feedback mode: %s", mode);
   }
   return err;
 }
