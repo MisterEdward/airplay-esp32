@@ -35,6 +35,7 @@ typedef struct {
   uint16_t *sorted;             // Slot indices sorted by RTP timestamp
   uint16_t *free_stack;         // Stack of free slot indices
   int count;                    // Frames currently in buffer
+  int head;                     // Ring: physical index of the oldest frame
   int free_top;                 // Top of free stack (next free slot)
   int capacity;                 // Max frames
   size_t slot_size;             // BYTES_PER_FRAME

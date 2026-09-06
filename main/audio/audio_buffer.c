@@ -24,13 +24,57 @@ static inline int32_t ts_cmp(uint32_t a, uint32_t b) {
   return (int32_t)(a - b);
 }
 
-/* Binary search: find the index in sorted[] where a frame with `timestamp`
-   should be inserted to keep ascending order. */
+/* sorted[] is a ring: `head` is the physical index of the oldest frame and
+   logical position 0.  Consuming a frame is then a head step instead of a
+   memmove of the whole array — which used to run under the spinlock, up to
+   2 KB of it, on every block the render task pulled. */
+static inline int ring_index(const audio_buffer_t *b, int logical) {
+  int i = b->head + logical;
+  return i >= b->capacity ? i - b->capacity : i;
+}
+
+static inline uint16_t ring_get(const audio_buffer_t *b, int logical) {
+  return b->sorted[ring_index(b, logical)];
+}
+
+static inline void ring_set(audio_buffer_t *b, int logical, uint16_t slot) {
+  b->sorted[ring_index(b, logical)] = slot;
+}
+
+/* Insert at a logical position, shifting whichever side is shorter.  Packets
+   almost always arrive in order, so `pos == count` (append, no shift) is the
+   overwhelmingly common case, and a late packet lands near the end. */
+static void ring_insert(audio_buffer_t *b, int pos, uint16_t slot) {
+  if (pos <= b->count - pos) {
+    b->head = b->head == 0 ? b->capacity - 1 : b->head - 1;
+    b->count++;
+    for (int i = 0; i < pos; i++) {
+      ring_set(b, i, ring_get(b, i + 1));
+    }
+  } else {
+    b->count++;
+    for (int i = b->count - 1; i > pos; i--) {
+      ring_set(b, i, ring_get(b, i - 1));
+    }
+  }
+  ring_set(b, pos, slot);
+}
+
+/* Drop the oldest frame and hand its slot back.  O(1). */
+static uint16_t ring_pop_oldest(audio_buffer_t *b) {
+  uint16_t slot = ring_get(b, 0);
+  b->head = ring_index(b, 1);
+  b->count--;
+  return slot;
+}
+
+/* Binary search: the logical position where a frame with `timestamp` keeps
+   the ring in ascending order. */
 static int sorted_insert_pos(audio_buffer_t *b, uint32_t timestamp) {
   int lo = 0, hi = b->count;
   while (lo < hi) {
     int mid = lo + (hi - lo) / 2;
-    if (ts_cmp(slot_timestamp(b, b->sorted[mid]), timestamp) < 0) {
+    if (ts_cmp(slot_timestamp(b, ring_get(b, mid)), timestamp) < 0) {
       lo = mid + 1;
     } else {
       hi = mid;
@@ -53,11 +97,7 @@ static bool audio_buffer_queue_chunk(audio_buffer_t *buffer,
 
   /* Overflow protection: drain oldest frames if at capacity */
   while (buffer->count >= buffer->capacity && buffer->count > 0) {
-    uint16_t victim = buffer->sorted[0];
-    memmove(&buffer->sorted[0], &buffer->sorted[1],
-            (buffer->count - 1) * sizeof(uint16_t));
-    buffer->count--;
-    buffer->free_stack[buffer->free_top++] = victim;
+    buffer->free_stack[buffer->free_top++] = ring_pop_oldest(buffer);
     /* Take one token from the semaphore to keep it in sync */
     xSemaphoreTakeFromISR(buffer->data_ready, NULL);
   }
@@ -86,14 +126,7 @@ static bool audio_buffer_queue_chunk(audio_buffer_t *buffer,
 
   /* Binary search for insertion position */
   int pos = sorted_insert_pos(buffer, timestamp);
-
-  /* Shift indices to make room */
-  if (pos < buffer->count) {
-    memmove(&buffer->sorted[pos + 1], &buffer->sorted[pos],
-            (buffer->count - pos) * sizeof(uint16_t));
-  }
-  buffer->sorted[pos] = slot;
-  buffer->count++;
+  ring_insert(buffer, pos, slot);
 
   portEXIT_CRITICAL(&buffer->lock);
 
@@ -120,6 +153,7 @@ esp_err_t audio_buffer_init(audio_buffer_t *buffer) {
   buffer->capacity = MAX_RING_BUFFER_FRAMES;
   buffer->slot_size = BYTES_PER_FRAME;
   buffer->count = 0;
+  buffer->head = 0;
 
   /* Pool in PSRAM */
   buffer->pool =
@@ -200,6 +234,7 @@ void audio_buffer_deinit(audio_buffer_t *buffer) {
   }
 
   buffer->count = 0;
+  buffer->head = 0;
   buffer->free_top = 0;
 }
 
@@ -214,9 +249,10 @@ void audio_buffer_flush(audio_buffer_t *buffer) {
 
   /* Return all active slots to free stack */
   for (int i = 0; i < buffer->count; i++) {
-    buffer->free_stack[buffer->free_top++] = buffer->sorted[i];
+    buffer->free_stack[buffer->free_top++] = ring_get(buffer, i);
   }
   buffer->count = 0;
+  buffer->head = 0;
 
   portEXIT_CRITICAL(&buffer->lock);
 
@@ -249,8 +285,8 @@ bool audio_buffer_peek_newest_rtp(audio_buffer_t *buffer, uint32_t *rtp_out) {
   bool found = false;
   portENTER_CRITICAL(&buffer->lock);
   if (buffer->count > 0) {
-    /* sorted[] is ordered by RTP timestamp, so the last entry is newest. */
-    uint16_t slot = buffer->sorted[buffer->count - 1];
+    /* The ring is ordered by RTP timestamp, so the last entry is newest. */
+    uint16_t slot = ring_get(buffer, buffer->count - 1);
     const audio_frame_header_t *hdr =
         (const audio_frame_header_t *)(buffer->pool +
                                        (size_t)slot * buffer->slot_size);
@@ -275,13 +311,13 @@ bool audio_buffer_bulk_start_rtp(audio_buffer_t *buffer, uint32_t *rtp_out) {
      * result is the first frame of the contiguous region that includes
      * the newest data — the "real" stream head, as opposed to stale
      * islands (e.g. late pre-flush retransmissions) stranded below it. */
-    uint16_t slot = buffer->sorted[buffer->count - 1];
+    uint16_t slot = ring_get(buffer, buffer->count - 1);
     const audio_frame_header_t *cur =
         (const audio_frame_header_t *)(buffer->pool +
                                        (size_t)slot * buffer->slot_size);
     uint32_t bulk = cur->rtp_timestamp;
     for (int i = buffer->count - 1; i > 0; i--) {
-      uint16_t pslot = buffer->sorted[i - 1];
+      uint16_t pslot = ring_get(buffer, i - 1);
       const audio_frame_header_t *prev =
           (const audio_frame_header_t *)(buffer->pool +
                                          (size_t)pslot * buffer->slot_size);
@@ -334,14 +370,7 @@ bool audio_buffer_take(audio_buffer_t *buffer, void **item, size_t *item_size,
     return false;
   }
 
-  uint16_t slot = buffer->sorted[0];
-
-  /* Shift remaining indices left */
-  if (buffer->count > 1) {
-    memmove(&buffer->sorted[0], &buffer->sorted[1],
-            (buffer->count - 1) * sizeof(uint16_t));
-  }
-  buffer->count--;
+  uint16_t slot = ring_pop_oldest(buffer);
 
   portEXIT_CRITICAL(&buffer->lock);
 
@@ -397,7 +426,7 @@ bool audio_buffer_oldest_timestamp(audio_buffer_t *buffer,
     portEXIT_CRITICAL(&buffer->lock);
     return false;
   }
-  *timestamp = slot_timestamp(buffer, buffer->sorted[0]);
+  *timestamp = slot_timestamp(buffer, ring_get(buffer, 0));
   portEXIT_CRITICAL(&buffer->lock);
   return true;
 }
