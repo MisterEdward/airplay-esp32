@@ -4,6 +4,10 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 CONFIG_SPIRAM_MODE_OCT=y
 
+# Dedicated cache SRAM: give flash code and PSRAM data more cache space.
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+
 # USB speaker source (PC -> DAC) + HID wake.  Composite mode: the app owns
 # tusb_config.h / descriptors.  Speaker only: the microphone direction is
 # the upstream AUDIO_OUTPUT_USB feature and is not built here.  48 kHz is
