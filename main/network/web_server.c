@@ -1,6 +1,7 @@
 #include "web_server.h"
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_system.h"
 #include "cJSON.h"
@@ -1063,6 +1064,12 @@ static esp_err_t system_info_handler(httpd_req_t *req) {
   cJSON_AddBoolToObject(info, "wifi_connected", wifi_connected);
   cJSON_AddBoolToObject(info, "eth_connected", eth_connected);
   cJSON_AddNumberToObject(info, "free_heap", esp_get_free_heap_size());
+  cJSON_AddNumberToObject(
+      info, "free_internal_heap",
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  cJSON_AddNumberToObject(
+      info, "largest_internal_block",
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
   // WiFi link diagnostics (only meaningful when associated as STA)
   if (wifi_connected) {
