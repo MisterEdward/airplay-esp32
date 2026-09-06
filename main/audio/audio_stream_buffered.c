@@ -53,16 +53,22 @@
 // samples; 2048 leaves headroom for ALAC-over-TCP or higher rates.
 //
 // Slot count: after FLUSHBUFFERED the decoder holds every packet until the
-// new anchor arrives, and while the free queue is empty the reader stops
-// taking from TCP, which closes the window towards the sender.  The sender
-// does not anchor until its post-seek burst has been accepted (observed:
-// 6.3 s of audio pushed before the first anchor), so 48 slots (1.1 s) was a
-// deadlock: the phone waited for window, we waited for the anchor, and the
-// session went silent for good.  384 slots ≈ 8.9 s of AAC, ~800 KB PSRAM.
+// new anchor arrives.  The sender does not anchor until its whole post-flush
+// burst has been written to us, and that burst is its full lead (~20 s), so
+// the hold has to be able to swallow it.  900 slots ~ 20.9 s of AAC, ~1.9 MB
+// PSRAM.  Whatever does not fit is dropped at the READER, never waited on:
+// closing the TCP window while waiting for an anchor that only comes after
+// the burst is a deadlock, and it cost a 100 s silence followed by the phone
+// tearing the session down.
 #define BUFFERED_SLOT_PAYLOAD    2048
-#define BUFFERED_SLOT_COUNT      384
+#define BUFFERED_SLOT_COUNT      900
 #define BUFFERED_STALL_TIMEOUT_S 8
 #define BUFFERED_HOLD_POLL_MS    2
+// Give up waiting for SETRATEANCHORTIME this long after a seek flush and play
+// what we hold unscheduled.  Some senders never anchor at all (observed after
+// PAUSE + immediate FLUSHBUFFERED on a track change); silence forever is the
+// worst possible answer.
+#define BUFFERED_ANCHOR_WAIT_US (10 * 1000 * 1000)
 
 #if CONFIG_FREERTOS_UNICORE
 #define BUFFERED_DECODER_CORE 0
@@ -166,6 +172,20 @@ static void buffered_decoder_task(void *pvParameters) {
       if (!held) {
         held = true;
         state->buffered_held_packets++;
+      }
+      int64_t waited_us = esp_timer_get_time() - state->buffered_flush_us;
+      if (state->buffered_flush_us && waited_us > BUFFERED_ANCHOR_WAIT_US) {
+        // No anchor is coming.  Release the hold and play what we have: the
+        // oldest held packets are the ones the sender started the new
+        // segment with, so this is the right audio, only unscheduled until
+        // an anchor (if any) arrives and the engine re-acquires under it.
+        state->discard_all_until_anchor = false;
+        state->timing.quick_start = true;
+        ESP_LOGW(TAG,
+                 "No anchor %lld ms after the flush: playing the held "
+                 "segment unscheduled (rtp=%" PRIu32 ")",
+                 (long long)(waited_us / 1000LL), slot->timestamp);
+        break;
       }
       vTaskDelay(pdMS_TO_TICKS(BUFFERED_HOLD_POLL_MS));
     }
@@ -284,6 +304,7 @@ static void buffered_audio_task(void *pvParameters) {
 
   uint32_t logged_flush_serial = 0;
   unsigned post_flush_packets = 3;
+  int64_t last_full_log_us = 0;
 
   while (stream->running) {
     struct sockaddr_in client_addr;
@@ -399,6 +420,7 @@ static void buffered_audio_task(void *pvParameters) {
       int64_t wait_started_us = esp_timer_get_time();
       bool wait_logged = false;
       bool got_slot = false;
+      bool drop_packet = false;
       while (stream->running) {
         if (xQueueReceive(state->buffered_free_queue, &index,
                           pdMS_TO_TICKS(20)) == pdTRUE) {
@@ -407,37 +429,40 @@ static void buffered_audio_task(void *pvParameters) {
         }
         int64_t waited_us = esp_timer_get_time() - wait_started_us;
         // Waiting for the anchor: never close the TCP window.  The sender
-        // does not anchor until its whole post-flush burst has been
-        // accepted (with a queued next track that burst exceeded 8.9 s), so
-        // stalling it here is a deadlock: it waits for window, we wait for
-        // the anchor.  Recycle the oldest queued packet instead — the
-        // anchor sits at the END of the burst, so the newest packets are
-        // the ones the RTP gate will want.
-        if (state->discard_all_until_anchor && waited_us > 200000) {
-          uint16_t victim = 0;
-          if (xQueueReceive(state->buffered_ready_queue, &victim, 0) ==
-              pdTRUE) {
-            state->buffered_pre_anchor_drops++;
-            if (!wait_logged) {
-              wait_logged = true;
-              ESP_LOGW(TAG, "Hold queue full before anchor: recycling oldest "
-                            "packets so the sender can finish its burst");
-            }
-            index = victim;
-            got_slot = true;
-            break;
-          }
+        // writes its whole post-flush burst before it sends
+        // SETRATEANCHORTIME, so a reader that stops taking from TCP here
+        // deadlocks: it waits for window, we wait for the anchor.  Drop this
+        // packet instead and keep reading.  Dropping the NEWEST keeps the
+        // oldest held frames, and those are the ones the anchor names: in
+        // every capture the anchor rtp sat at or just below the first packet
+        // of the burst.
+        if (state->discard_all_until_anchor) {
+          drop_packet = true;
+          break;
         }
         // Steady state (PCM ring and hold queue both full) is normal
-        // back-pressure; only worth a line while an anchor is awaited.
-        if (!wait_logged && waited_us > 1000000 &&
-            (state->discard_all_until_anchor || state->live_flush_pending)) {
+        // back-pressure; only worth a line while a live flush is pending.
+        if (!wait_logged && waited_us > 1000000 && state->live_flush_pending) {
           wait_logged = true;
           ESP_LOGW(TAG,
                    "Reader out of packet slots for 1 s (held=%" PRIu32
                    "); sender's TCP window is closed",
                    state->buffered_held_packets);
         }
+      }
+      if (drop_packet) {
+        state->buffered_pre_anchor_drops++;
+        state->stats.packets_dropped++;
+        int64_t now_us = esp_timer_get_time();
+        if (now_us - last_full_log_us > 2000000) {
+          last_full_log_us = now_us;
+          ESP_LOGW(TAG,
+                   "Hold queue full before anchor (%" PRIu32
+                   " dropped): still reading so the sender can finish its "
+                   "burst and anchor",
+                   state->buffered_pre_anchor_drops);
+        }
+        continue;
       }
       if (!stream->running || !got_slot) {
         break;
