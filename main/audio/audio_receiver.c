@@ -191,6 +191,16 @@ uint32_t audio_receiver_get_advertised_latency_us(void) {
   return audio_timing_get_advertised_latency(&receiver.timing);
 }
 
+// True when a buffered frame cannot belong to the timeline an anchor
+// describes: more than `threshold` samples before the anchor span or beyond
+// it.  The span runs from the anchor's rtp to the rtp the anchor implies for
+// the current instant (either may be the lower end).
+static bool buffer_outside_span(uint32_t rtp, uint32_t span_lo,
+                                uint32_t span_hi, int32_t threshold) {
+  return (int32_t)(rtp - span_lo) < -threshold ||
+         (int32_t)(rtp - span_hi) > threshold;
+}
+
 void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
                                     uint32_t rtp_time) {
   if (!receiver.stream) {
@@ -207,6 +217,33 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
   const uint32_t gate_window = (uint32_t)(10 * sample_rate);
   const int32_t seek_threshold = 5 * sample_rate;
 
+  // Where this anchor says the playhead is RIGHT NOW.  An anchor may
+  // describe the future (the usual 1-3 s pre-roll) or the past: after a
+  // live track skip the phone streams first and anchors seconds later, at
+  // the moment it started sending.  Buffered material is judged against
+  // the span between the anchor's own rtp and that projection — judging it
+  // against the raw anchor rtp mistook a correct 5 s-old buffer for a seek,
+  // flushed it and armed an upper gate (anchor + 10 s) the live stream had
+  // already passed, so every later packet was dropped.
+  uint32_t now_rtp = rtp_time;
+  bool locked_to_anchor =
+      clock_id != 0 ? ptp_clock_is_locked_to(clock_id) : ptp_clock_is_locked();
+  if (locked_to_anchor) {
+    int64_t now_ns = (int64_t)esp_timer_get_time() * 1000LL;
+    int64_t lead_ns =
+        (int64_t)network_time_ns - (ptp_clock_get_offset_ns() + now_ns);
+    if (lead_ns > 60000000000LL) {
+      lead_ns = 60000000000LL;
+    } else if (lead_ns < -60000000000LL) {
+      lead_ns = -60000000000LL;
+    }
+    now_rtp =
+        rtp_time - (uint32_t)(int32_t)((lead_ns * sample_rate) / 1000000000LL);
+  }
+  bool now_before_anchor = (int32_t)(now_rtp - rtp_time) < 0;
+  const uint32_t span_lo = now_before_anchor ? now_rtp : rtp_time;
+  const uint32_t span_hi = now_before_anchor ? rtp_time : now_rtp;
+
   // --- Phase 1: Arm RTP gates BEFORE opening the blanket gate -----------
   //
   // The blanket gate (discard_all_until_anchor) blocks ALL frames from the
@@ -220,14 +257,14 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
   // already empty when the flush happened (forward-seek).
   if (receiver.arm_gate_on_next_anchor) {
     receiver.arm_gate_on_next_anchor = false;
-    receiver.discard_before_rtp = rtp_time;
+    receiver.discard_before_rtp = span_lo;
     receiver.discard_before_rtp_valid = true;
-    receiver.discard_above_rtp = rtp_time + gate_window;
+    receiver.discard_above_rtp = span_hi + gate_window;
     receiver.discard_above_rtp_valid = true;
     gates_armed = true;
     ESP_LOGI(TAG,
              "RTP gates armed on anchor: discard_before=%lu discard_above=%lu",
-             (unsigned long)rtp_time, (unsigned long)(rtp_time + gate_window));
+             (unsigned long)span_lo, (unsigned long)(span_hi + gate_window));
   }
 
   // Path B: Anchor-change detection — the phone changed track with a
@@ -288,25 +325,33 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
     int32_t delta = (int32_t)(rtp_time - reference_rtp);
     int32_t abs_delta = delta < 0 ? -delta : delta;
     if (abs_delta > seek_threshold) {
+      uint32_t oldest = 0;
+      bool on_new_timeline =
+          audio_buffer_oldest_timestamp(&receiver.buffer, &oldest) &&
+          !buffer_outside_span(oldest, span_lo, span_hi, seek_threshold);
       ESP_LOGI(TAG,
                "Anchor change detected: ref_rtp=%lu new_rtp=%lu "
-               "delta=%ld samples (%.1f s) - flushing & arming gates",
+               "delta=%ld samples (%.1f s) - %s, arming gates",
                (unsigned long)reference_rtp, (unsigned long)rtp_time,
-               (long)delta, (float)delta / sample_rate);
-      audio_buffer_flush(&receiver.buffer);
-      receiver.timing.playout_started = false;
-      receiver.timing.acquired = false;
-      receiver.timing.pending_valid = false;
-      receiver.timing.pending_frame_len = 0;
-      receiver.timing.ready_time_us = 0;
-      receiver.timing.deferred_flush_pending = false;
-      audio_timing_reset_continuity(&receiver.timing);
-      receiver.blocks_read_in_sequence = 0;
-      receiver.discard_before_rtp = rtp_time;
+               (long)delta, (float)delta / sample_rate,
+               on_new_timeline ? "buffer already on the new timeline, kept"
+                               : "flushing");
+      if (!on_new_timeline) {
+        audio_buffer_flush(&receiver.buffer);
+        receiver.timing.playout_started = false;
+        receiver.timing.acquired = false;
+        receiver.timing.pending_valid = false;
+        receiver.timing.pending_frame_len = 0;
+        receiver.timing.ready_time_us = 0;
+        receiver.timing.deferred_flush_pending = false;
+        audio_timing_reset_continuity(&receiver.timing);
+        receiver.blocks_read_in_sequence = 0;
+        receiver.timing.quick_start = true;
+      }
+      receiver.discard_before_rtp = span_lo;
       receiver.discard_before_rtp_valid = true;
-      receiver.discard_above_rtp = rtp_time + gate_window;
+      receiver.discard_above_rtp = span_hi + gate_window;
       receiver.discard_above_rtp_valid = true;
-      receiver.timing.quick_start = true;
       gates_armed = true;
     } else {
       ESP_LOGD(TAG,
@@ -328,13 +373,13 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
   uint32_t oldest_rtp = 0;
   if (audio_buffer_oldest_timestamp(&receiver.buffer, &oldest_rtp)) {
     int32_t rtp_ahead = (int32_t)(oldest_rtp - rtp_time);
-    int32_t abs_ahead = rtp_ahead < 0 ? -rtp_ahead : rtp_ahead;
-    if (abs_ahead > seek_threshold) {
+    if (buffer_outside_span(oldest_rtp, span_lo, span_hi, seek_threshold)) {
       ESP_LOGI(TAG,
-               "Seek detected: oldest_rtp=%lu, new anchor rtp=%lu, "
+               "Seek detected: oldest_rtp=%lu, new anchor rtp=%lu (now=%lu), "
                "delta=%ld samples (%.1f s) — flushing stale buffer",
                (unsigned long)oldest_rtp, (unsigned long)rtp_time,
-               (long)rtp_ahead, (float)rtp_ahead / sample_rate);
+               (unsigned long)now_rtp, (long)rtp_ahead,
+               (float)rtp_ahead / sample_rate);
       audio_buffer_flush(&receiver.buffer);
       receiver.timing.playout_started = false;
       receiver.timing.acquired = false;
@@ -346,11 +391,15 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
       receiver.blocks_read_in_sequence = 0;
       receiver.timing.quick_start = true;
       if (!gates_armed) {
-        receiver.discard_before_rtp = rtp_time;
+        receiver.discard_before_rtp = span_lo;
         receiver.discard_before_rtp_valid = true;
-        receiver.discard_above_rtp = rtp_time + gate_window;
+        receiver.discard_above_rtp = span_hi + gate_window;
         receiver.discard_above_rtp_valid = true;
       }
+    } else {
+      ESP_LOGD(TAG, "Anchor: oldest buffered rtp=%lu within [%lu, %lu] — kept",
+               (unsigned long)oldest_rtp, (unsigned long)span_lo,
+               (unsigned long)span_hi);
     }
   }
 
@@ -659,7 +708,9 @@ void audio_receiver_live_flush(void) {
   receiver.live_flush_drops = 0;
   receiver.live_flush_pending = true;
   audio_timing_restart_on_anchor(&receiver.timing);
-  ESP_LOGI(TAG, "Live flush: anchor kept, waiting for the new segment (last rx rtp=%" PRIu32 ")",
+  ESP_LOGI(TAG,
+           "Live flush: anchor kept, waiting for the new segment (last rx "
+           "rtp=%" PRIu32 ")",
            receiver.buffered_last_rx_ts);
 }
 
@@ -698,7 +749,8 @@ void audio_receiver_set_deferred_flush(uint32_t flush_from_ts,
   receiver.timing.flush_until_ts = flush_until_ts;
   receiver.timing.deferred_dropped = 0;
   receiver.timing.deferred_flush_pending = true;
-  ESP_LOGI(TAG, "Deferred flush armed: skip [%" PRIu32 ", %" PRIu32 ") = %ld ms",
+  ESP_LOGI(TAG,
+           "Deferred flush armed: skip [%" PRIu32 ", %" PRIu32 ") = %ld ms",
            flush_from_ts, flush_until_ts,
            (long)((int32_t)(flush_until_ts - flush_from_ts) * 1000LL /
                   (receiver.stream->format.sample_rate > 0

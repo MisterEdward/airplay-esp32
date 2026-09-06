@@ -63,7 +63,10 @@
 #define BUFFERED_SLOT_PAYLOAD    2048
 #define BUFFERED_SLOT_COUNT      384
 #define BUFFERED_STALL_TIMEOUT_S 8
-#define BUFFERED_HOLD_POLL_MS    2
+// PCM ring depth (frames of ~7-8 ms) below which an idle data socket counts
+// as a stall.  Above it the sender is simply ahead and quiet.
+#define BUFFERED_STALL_MIN_FRAMES 130
+#define BUFFERED_HOLD_POLL_MS     2
 
 #if CONFIG_FREERTOS_UNICORE
 #define BUFFERED_DECODER_CORE 0
@@ -94,6 +97,7 @@ static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
                           int sock, uint8_t *buf, size_t len) {
   size_t total = 0;
   int64_t started_us = esp_timer_get_time();
+  bool idle_logged = false;
   while (total < len && stream->running) {
     ssize_t n = recv(sock, buf + total, len - total, 0);
     if (n > 0) {
@@ -105,6 +109,22 @@ static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         if (!state->timing.playing) {
           vTaskDelay(pdMS_TO_TICKS(100));
+          continue;
+        }
+        // A sender that runs far ahead (up to ~20 s after a track skip)
+        // sends in bursts with idle gaps longer than the socket timeout.
+        // While the PCM ring still holds audio the quiet socket is not a
+        // stall; closing it here made the phone tear the session down.
+        int buffered = audio_buffer_get_frame_count(&state->buffer);
+        if (buffered > BUFFERED_STALL_MIN_FRAMES) {
+          if (!idle_logged) {
+            idle_logged = true;
+            ESP_LOGD(TAG,
+                     "Data socket idle %lld ms with %d frames buffered; "
+                     "waiting",
+                     (long long)((esp_timer_get_time() - started_us) / 1000LL),
+                     buffered);
+          }
           continue;
         }
         int64_t now_us = esp_timer_get_time();
@@ -188,11 +208,12 @@ static void buffered_decoder_task(void *pvParameters) {
     // starts with a jump (it is timed near the playhead, the old tail was
     // up to ~16 s ahead of it).
     if (state->live_flush_pending) {
-      int32_t step = state->live_flush_ref_valid
-                         ? (int32_t)(slot->timestamp - state->live_flush_last_ts)
-                         : INT32_MAX;
-      int32_t spf = stream->format.frame_size > 0 ? stream->format.frame_size
-                                                  : 1024;
+      int32_t step =
+          state->live_flush_ref_valid
+              ? (int32_t)(slot->timestamp - state->live_flush_last_ts)
+              : INT32_MAX;
+      int32_t spf =
+          stream->format.frame_size > 0 ? stream->format.frame_size : 1024;
       if (state->live_flush_ref_valid && step > 0 && step <= 4 * spf) {
         state->live_flush_last_ts = slot->timestamp;
         state->live_flush_drops++;
@@ -387,9 +408,8 @@ static void buffered_audio_task(void *pvParameters) {
             state->buffered_pre_anchor_drops++;
             if (!wait_logged) {
               wait_logged = true;
-              ESP_LOGW(TAG,
-                       "Hold queue full before anchor: recycling oldest "
-                       "packets so the sender can finish its burst");
+              ESP_LOGW(TAG, "Hold queue full before anchor: recycling oldest "
+                            "packets so the sender can finish its burst");
             }
             index = victim;
             got_slot = true;
