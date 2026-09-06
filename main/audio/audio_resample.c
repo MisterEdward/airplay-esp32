@@ -7,6 +7,7 @@
 #include "resampler.h"
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include <stdlib.h>
 
 static const char *TAG = "audio_resample";
@@ -28,17 +29,26 @@ static float *float_out;
 static size_t float_in_cap; /* in samples (frames * channels) */
 static size_t float_out_cap;
 
-static void ensure_float_bufs(size_t in_samples, size_t out_samples) {
+static bool ensure_float_bufs(size_t in_samples, size_t out_samples) {
   if (in_samples > float_in_cap) {
-    free(float_in);
+    float *buf = heap_caps_realloc(float_in, in_samples * sizeof(float),
+                                   MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!buf) {
+      return false;
+    }
+    float_in = buf;
     float_in_cap = in_samples;
-    float_in = malloc(float_in_cap * sizeof(float));
   }
   if (out_samples > float_out_cap) {
-    free(float_out);
+    float *buf = heap_caps_realloc(float_out, out_samples * sizeof(float),
+                                   MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!buf) {
+      return false;
+    }
+    float_out = buf;
     float_out_cap = out_samples;
-    float_out = malloc(float_out_cap * sizeof(float));
   }
+  return true;
 }
 
 bool audio_resample_init(uint32_t input_rate, uint32_t output_rate,
@@ -87,9 +97,7 @@ bool audio_resample_init(uint32_t input_rate, uint32_t output_rate,
   /* Pre-allocate float buffers for typical frame size (352 + margin) */
   size_t typical_in = 400 * (size_t)channels;
   size_t typical_out = (size_t)(400.0 * fixed_ratio + 16) * (size_t)channels;
-  ensure_float_bufs(typical_in, typical_out);
-
-  if (!float_in || !float_out) {
+  if (!ensure_float_bufs(typical_in, typical_out)) {
     ESP_LOGE(TAG, "Failed to allocate conversion buffers");
     audio_resample_destroy();
     return false;
@@ -111,7 +119,10 @@ size_t audio_resample_process(const int16_t *in, size_t in_frames, int16_t *out,
 
   size_t in_samples = in_frames * (size_t)current_channels;
   size_t out_samples = out_capacity * (size_t)current_channels;
-  ensure_float_bufs(in_samples, out_samples);
+  if (!ensure_float_bufs(in_samples, out_samples)) {
+    // A failed growth must not dereference NULL or overrun the old buffer.
+    return 0;
+  }
 
   /* int16 → float [-1.0, 1.0) */
   for (size_t i = 0; i < in_samples; i++) {

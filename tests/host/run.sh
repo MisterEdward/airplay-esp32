@@ -16,3 +16,10 @@ if [ -f tests/host/test_timing.c ]; then
     tests/host/test_timing.c -lm -o "$out/test_timing"
   "$out/test_timing"
 fi
+# The vendored resampler has one existing signed/unsigned comparison.
+$CC $FLAGS -Wno-sign-compare -I components/audio-resampler -c \
+  components/audio-resampler/resampler.c -o "$out/resampler.o"
+$CC $FLAGS -I main/audio -I tests/host/fakes -I components/audio-resampler \
+  tests/host/test_resample.c main/audio/audio_resample.c \
+  "$out/resampler.o" -lm -o "$out/test_resample"
+"$out/test_resample"

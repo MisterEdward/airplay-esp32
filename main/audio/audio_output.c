@@ -40,6 +40,7 @@
 #include "driver/i2s_std.h"
 #include "esp_attr.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -289,9 +290,14 @@ static int32_t current_volume_target(audio_source_t src) {
 
 static void playback_task(void *arg) {
   (void)arg;
-  int16_t *pcm = malloc((size_t)READ_CAPACITY_FRAMES * 2 * sizeof(int16_t));
-  int16_t *resample_buf = malloc(MAX_RESAMPLE_FRAMES * 2 * sizeof(int16_t));
-  int16_t *held = malloc(MAX_RESAMPLE_FRAMES * 2 * sizeof(int16_t));
+  // Deadline-sensitive scratch stays off the shared PSRAM cache.
+  const unsigned caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  int16_t *pcm = heap_caps_malloc(
+      (size_t)READ_CAPACITY_FRAMES * 2 * sizeof(int16_t), caps);
+  int16_t *resample_buf =
+      heap_caps_malloc(MAX_RESAMPLE_FRAMES * 2 * sizeof(int16_t), caps);
+  int16_t *held =
+      heap_caps_malloc(MAX_RESAMPLE_FRAMES * 2 * sizeof(int16_t), caps);
   if (!pcm || !resample_buf || !held) {
     ESP_LOGE(TAG, "Failed to allocate render buffers");
     free(pcm);
