@@ -1,0 +1,12 @@
+# Incomplete baseline: original firmware repeatedly reset (int_wdt).
+W (825) main: Boot: reset reason 1
+I (6015) main: Boot baseline: free heap 150431 internal (largest block 77824), 6636576 SPIRAM
+W (827) main: Boot: reset reason 5
+I (5937) main: Boot baseline: free heap 150459 internal (largest block 77824), 6636576 SPIRAM
+I (34547) audio_time: Playout: err=+12 us filt=+0 us servo=off/4 trims=0 buffered=118 depth=913 ms ptp_gap=-593 us outliers=0 gaps=0 under=0 domain=ptp rtp=2487985890
+I (35517) audio_time: Playout: err=+39 us filt=+35 us servo=off/4 trims=0 buffered=188 depth=1455 ms ptp_gap=-561 us outliers=0 gaps=0 under=0 domain=ptp rtp=2488028546
+I (36487) audio_time: Playout: err=+82 us filt=+64 us servo=off/4 trims=0 buffered=327 depth=2530 ms ptp_gap=-1324 us outliers=0 gaps=0 under=0 domain=ptp rtp=2488071234
+I (38857) audio_time: Playout: err=-7 us filt=+61 us servo=off/4 trims=0 buffered=750 depth=5804 ms ptp_gap=-1080 us outliers=0 gaps=1 under=0 domain=ptp rtp=2488175682
+W (829) main: Boot: reset reason 5
+I (5629) main: Boot baseline: free heap 150623 internal (largest block 77824), 6636576 SPIRAM
+I (5389) main: Boot baseline: free heap 150451 internal (largest block 77824), 6636576 SPIRAM
