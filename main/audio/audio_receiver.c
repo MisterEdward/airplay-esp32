@@ -204,7 +204,35 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
   // Window size for the upper RTP gate: 10 s of samples.  Large enough that
   // a normal 2-4 s pre-buffer passes, but small enough to reject stale frames
   // left in the TCP socket buffer after a backward seek.
-  const uint32_t gate_window = (uint32_t)(10 * sample_rate);
+  /*
+   * The upper gate must cover where the stream is NOW, not where the anchor
+   * was.  A sender can describe a moment already in the past: measured on a
+   * seek, `lead=-11033 ms`, so by the time the anchor arrived the live
+   * stream sat 11 s beyond it — past a window of anchor + 10 s. Every
+   * arriving frame then failed the upper gate and was discarded forever:
+   * playing=true, envelope open, buffered=0, dropped climbing, silence.
+   *
+   * So extend the window by however far the anchor lags real time, and only
+   * ever extend it.
+   */
+  uint32_t gate_window = (uint32_t)(10 * sample_rate);
+  {
+    bool locked = clock_id != 0 ? ptp_clock_is_locked_to(clock_id)
+                                : ptp_clock_is_locked();
+    if (locked) {
+      int64_t now_ns = (int64_t)esp_timer_get_time() * 1000LL;
+      int64_t lag_ns =
+          (ptp_clock_get_offset_ns() + now_ns) - (int64_t)network_time_ns;
+      if (lag_ns > 0) {
+        if (lag_ns > 60000000000LL) {
+          lag_ns = 60000000000LL;
+        }
+        uint32_t lag_samples =
+            (uint32_t)((lag_ns * (int64_t)sample_rate) / 1000000000LL);
+        gate_window += lag_samples;
+      }
+    }
+  }
   const int32_t seek_threshold = 5 * sample_rate;
 
   // --- Phase 1: Arm RTP gates BEFORE opening the blanket gate -----------
