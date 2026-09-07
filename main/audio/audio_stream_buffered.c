@@ -419,6 +419,32 @@ static void buffered_audio_task(void *pvParameters) {
       uint32_t timestamp =
           (packet[4] << 24) | (packet[5] << 16) | (packet[6] << 8) | packet[7];
 
+      /*
+       * Waiting for the anchor: drop here, at the socket, before any slot is
+       * taken.  The backlog then drains at line rate, the sender finishes the
+       * burst it must finish before it will send SETRATEANCHORTIME, and it
+       * anchors within about a second.
+       *
+       * Holding these packets instead — the design this fork had — is what
+       * made seek unusable. The reader recycled a slot per free-queue poll,
+       * roughly fifty packets a second, while the sender kept producing
+       * forty-three a second of new audio: a net drain of about seven packets
+       * a second against a burst of twenty seconds. The backlog needed
+       * minutes, so the anchor arrived ten seconds late or not at all, and
+       * every mitigation aimed at the queue (384 -> 900 slots, immediate
+       * recycling, an eight-second deadline) treated a symptom.
+       *
+       * Holding bought roughly half a second at resume, because the held
+       * segment could start playing the moment the anchor landed. That is not
+       * worth it. The reference implementation drops, and its seek costs
+       * about a second of silence and always works.
+       */
+      if (state->discard_all_until_anchor) {
+        state->buffered_pre_anchor_drops++;
+        state->stats.packets_dropped++;
+        continue;
+      }
+
       // Take a free slot; while the decoder is holding/back-pressured the
       // reader waits here, which closes the TCP window towards the sender.
       uint16_t index = 0;
