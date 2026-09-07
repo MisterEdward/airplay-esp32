@@ -108,6 +108,7 @@ static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
   size_t total = 0;
   int64_t started_us = esp_timer_get_time();
   bool idle_logged = false;
+  bool stall_logged = false;
   while (total < len && stream->running) {
     ssize_t n = recv(sock, buf + total, len - total, 0);
     if (n > 0) {
@@ -141,15 +142,30 @@ static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
         }
         int64_t now_us = esp_timer_get_time();
         state->buffered_stall_timeouts++;
-        ESP_LOGW(
-            TAG,
-            "Buffered audio stalled while playing: waited=%lld ms "
-            "last_packet=%lld ms ago partial=%u/%u — reopening data "
-            "connection (listener stays up)",
-            (long long)((now_us - started_us) / 1000LL),
-            (long long)((now_us - state->buffered_last_packet_us) / 1000LL),
-            (unsigned)total, (unsigned)len);
-        return -1;
+        /*
+         * Do not close the socket.  Closing was meant as a recovery — drop
+         * the connection and let the sender reopen it — but the sender does
+         * not reopen: every capture of this path ends with
+         * `Buffered stream stopped: connections=1`, one connection for the
+         * whole session, and the speaker silent for good while the same
+         * stream keeps playing elsewhere.  So the "recovery" is what kills
+         * the session.
+         *
+         * Waiting costs nothing by comparison. If the sender resumes we
+         * resume with it; if it is really gone, the RTSP session tears down
+         * and that path stops the stream properly.
+         */
+        if (!stall_logged) {
+          stall_logged = true;
+          ESP_LOGW(
+              TAG,
+              "Data socket quiet %lld ms while playing (last packet "
+              "%lld ms ago, %d frames buffered) — waiting, not closing",
+              (long long)((now_us - started_us) / 1000LL),
+              (long long)((now_us - state->buffered_last_packet_us) / 1000LL),
+              audio_buffer_get_frame_count(&state->buffer));
+        }
+        continue;
       }
       if (stream->running) {
         ESP_LOGE(TAG, "Buffered audio recv error: %d", errno);
