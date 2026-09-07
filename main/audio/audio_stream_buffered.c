@@ -413,6 +413,14 @@ static void buffered_audio_task(void *pvParameters) {
                  timestamp, seq_no, state->buffered_last_rx_ts, step,
                  flush_serial);
       }
+      /* This tracks the last timestamp RECEIVED, not the last one stored, so
+       * it must advance even for a packet we are about to drop.  Leaving it
+       * behind meant that once the hold queue filled, every later packet was
+       * still compared against the timestamp from before the drops began and
+       * reported as a jump — tens of lines a second, from the one task that
+       * has to keep draining TCP for the sender to be able to anchor. */
+      state->buffered_last_rx_ts = timestamp;
+      state->buffered_last_rx_ts_valid = true;
 
       // Take a free slot; while the decoder is holding/back-pressured the
       // reader waits here, which closes the TCP window towards the sender.
@@ -468,8 +476,6 @@ static void buffered_audio_task(void *pvParameters) {
         break;
       }
       buffered_slot_t *slot = slot_at(state, index);
-      state->buffered_last_rx_ts = timestamp;
-      state->buffered_last_rx_ts_valid = true;
       slot->seq_no = seq_no;
       slot->timestamp = timestamp;
       slot->generation = state->buffered_generation;

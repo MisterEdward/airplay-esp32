@@ -227,6 +227,15 @@ static void client_task(void *pvParameters) {
   struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
   setsockopt(slot->socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+  // And a send timeout, because there was none: a sender that stops reading
+  // this socket parked the whole RTSP task in one write.  Observed on a
+  // pause-then-seek — a FLUSHBUFFERED reply took 10.7 s to leave, and until
+  // it did, nothing else from that sender could be answered.  Failing after
+  // 8 s is not worse than being stuck: by then the session is already lost,
+  // and at least the task comes back to notice it.
+  struct timeval snd_tv = {.tv_sec = 8, .tv_usec = 0};
+  setsockopt(slot->socket, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
+
   // Disable Nagle: RTSP control commands (volume, pause) are tiny and must
   // not wait for coalescing/delayed-ACK, which adds tens to hundreds of ms of
   // latency to every command on this connection.
