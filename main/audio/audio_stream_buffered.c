@@ -67,9 +67,12 @@
 // both sides wait forever — seek goes silent until the session is torn down.
 // 900 slots is 20.9 s, which covers the sender's full lead.  Costs 1.86 MB
 // of PSRAM, of which there is plenty (4.4 MB free with the stream running).
-#define BUFFERED_SLOT_COUNT      900
-#define BUFFERED_STALL_TIMEOUT_S 8
-#define BUFFERED_HOLD_POLL_MS    2
+#define BUFFERED_SLOT_COUNT 900
+// Frames in the PCM ring below which a silent data socket really is a stall
+// rather than the sender simply running ahead.  ~3 s at 352-frame blocks.
+#define BUFFERED_STALL_MIN_FRAMES 130
+#define BUFFERED_STALL_TIMEOUT_S  8
+#define BUFFERED_HOLD_POLL_MS     2
 
 #if CONFIG_FREERTOS_UNICORE
 #define BUFFERED_DECODER_CORE 0
@@ -100,6 +103,7 @@ static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
                           int sock, uint8_t *buf, size_t len) {
   size_t total = 0;
   int64_t started_us = esp_timer_get_time();
+  bool idle_logged = false;
   while (total < len && stream->running) {
     ssize_t n = recv(sock, buf + total, len - total, 0);
     if (n > 0) {
@@ -111,6 +115,24 @@ static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         if (!state->timing.playing) {
           vTaskDelay(pdMS_TO_TICKS(100));
+          continue;
+        }
+        // A sender that runs ~20 s ahead sends in bursts with idle gaps
+        // longer than this timeout.  While the PCM ring still holds audio
+        // the quiet socket is not a stall, and closing it here is what
+        // actually breaks the session: measured after a crossfade, the
+        // socket went quiet for 8 s with 899 frames (7 s) still buffered
+        // and playout error at +415 us — we closed the connection anyway
+        // and the phone answered with TEARDOWN 20 ms later.
+        int buffered_frames = audio_buffer_get_frame_count(&state->buffer);
+        if (buffered_frames > BUFFERED_STALL_MIN_FRAMES) {
+          if (!idle_logged) {
+            idle_logged = true;
+            ESP_LOGD(TAG,
+                     "Data socket idle with %d frames buffered; waiting "
+                     "rather than reopening",
+                     buffered_frames);
+          }
           continue;
         }
         int64_t now_us = esp_timer_get_time();
