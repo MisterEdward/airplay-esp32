@@ -227,6 +227,14 @@ static void client_task(void *pvParameters) {
   struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
   setsockopt(slot->socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+  // And a send timeout, so a sender that stops reading makes send() return
+  // instead of parking the whole RTSP task in one write.  send_all() retries
+  // — a half-written encrypted frame would desync the stream — but the
+  // timeout is what lets it notice, and tell the audio side, that the
+  // sender has gone deaf.
+  struct timeval snd_tv = {.tv_sec = 0, .tv_usec = 300000};
+  setsockopt(slot->socket, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
+
   // Disable Nagle: RTSP control commands (volume, pause) are tiny and must
   // not wait for coalescing/delayed-ACK, which adds tens to hundreds of ms of
   // latency to every command on this connection.

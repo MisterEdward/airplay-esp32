@@ -7,6 +7,7 @@
 #include <strings.h>
 #include <sys/socket.h>
 
+#include "audio_receiver.h"
 #include "esp_log.h"
 #include "rtsp_crypto.h"
 
@@ -146,12 +147,32 @@ int rtsp_request_parse(const uint8_t *data, size_t len, rtsp_request_t *req) {
 // Internal: send all data, handling partial sends
 static int send_all(int socket, const uint8_t *data, size_t len) {
   size_t sent = 0;
+  bool reported = false;
   while (sent < len) {
     ssize_t r = send(socket, data + sent, len - sent, 0);
-    if (r <= 0) {
-      return -1;
+    if (r > 0) {
+      sent += (size_t)r;
+      continue;
     }
-    sent += (size_t)r;
+    /*
+     * The socket carries a send timeout so this returns instead of parking
+     * the RTSP task forever.  Keep retrying rather than abandoning: half a
+     * frame written desynchronises the encrypted framing permanently.  But
+     * tell the audio side, because a sender whose receive window stays shut
+     * is not reading our reply and is not going to send SETRATEANCHORTIME
+     * either — measured repeatedly at 8-11 s of exactly this.
+     */
+    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      if (!reported) {
+        reported = true;
+        audio_receiver_note_sender_unresponsive();
+      }
+      continue;
+    }
+    return -1;
+  }
+  if (reported) {
+    audio_receiver_note_sender_responsive();
   }
   return 0;
 }

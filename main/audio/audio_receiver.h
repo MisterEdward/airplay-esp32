@@ -152,6 +152,16 @@ void audio_receiver_flush(void);
 void audio_receiver_seek_flush(void);
 
 /**
+ * The RTSP layer could not hand a reply to the sender: its receive window
+ * stayed shut past the socket's send timeout.  A sender that will not read
+ * our reply is not about to send SETRATEANCHORTIME either, so the decoder
+ * uses this to stop waiting for an anchor sooner than the blind deadline.
+ */
+void audio_receiver_note_sender_unresponsive(void);
+int64_t audio_receiver_sender_unresponsive_since(void);
+void audio_receiver_note_sender_responsive(void);
+
+/**
  * Arm a deferred flush for AirPlay 2 FLUSHBUFFERED with flushFromSeq.
  *
  * Instead of discarding the buffer immediately, audio_timing_read will

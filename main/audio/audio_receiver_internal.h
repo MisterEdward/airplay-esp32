@@ -108,6 +108,11 @@ typedef struct {
   // ring buffer between FLUSHBUFFERED and the anchor, causing a second flush
   // and doubling the startup delay.
   bool discard_all_until_anchor;
+  // Set when an RTSP reply could not be handed to the sender because its
+  // receive window stayed shut past the socket's send timeout.  Cleared as
+  // soon as it reads again.  A sender that will not read our reply is not
+  // about to anchor either.
+  volatile int64_t sender_unresponsive_us;
 
   // Snapshot of the expected RTP position taken the moment the sender signals
   // PAUSE (SETRATEANCHORTIME rate=0).  Path B in audio_receiver_set_anchor_time

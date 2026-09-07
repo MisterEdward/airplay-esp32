@@ -667,6 +667,20 @@ void audio_receiver_flush(void) {
   receiver.blocks_read_in_sequence = 1;
 }
 
+void audio_receiver_note_sender_unresponsive(void) {
+  if (receiver.sender_unresponsive_us == 0) {
+    receiver.sender_unresponsive_us = esp_timer_get_time();
+  }
+}
+
+int64_t audio_receiver_sender_unresponsive_since(void) {
+  return receiver.sender_unresponsive_us;
+}
+
+void audio_receiver_note_sender_responsive(void) {
+  receiver.sender_unresponsive_us = 0;
+}
+
 void audio_receiver_seek_flush(void) {
   // Mid-stream seek flush (FLUSH / immediate FLUSHBUFFERED).  Like
   // audio_receiver_flush() but sets timing.quick_start so audio_timing_read

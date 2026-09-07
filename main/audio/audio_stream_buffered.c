@@ -74,9 +74,14 @@
 // How long to hold a post-seek segment waiting for SETRATEANCHORTIME before
 // playing it unscheduled.  A healthy sender anchors in 350-500 ms, so this
 // only ever fires when the sender has decided not to anchor at all.
-#define BUFFERED_ANCHOR_WAIT_US  (8 * 1000 * 1000)
-#define BUFFERED_STALL_TIMEOUT_S 8
-#define BUFFERED_HOLD_POLL_MS    2
+#define BUFFERED_ANCHOR_WAIT_US (8 * 1000 * 1000)
+// Shorter deadline for the case where we KNOW the sender stopped reading
+// its RTSP socket: it will not anchor, so there is nothing left to wait
+// for.  A healthy sender's replies leave in microseconds, so this cannot
+// fire on the path that makes multiroom sync instant.
+#define BUFFERED_ANCHOR_WAIT_DEAF_US (1200 * 1000)
+#define BUFFERED_STALL_TIMEOUT_S     8
+#define BUFFERED_HOLD_POLL_MS        2
 
 #if CONFIG_FREERTOS_UNICORE
 #define BUFFERED_DECODER_CORE 0
@@ -227,13 +232,19 @@ static void buffered_decoder_task(void *pvParameters) {
        * on the path that makes multiroom sync instant — it only converts
        * permanent silence into a few seconds of it.
        */
-      if (esp_timer_get_time() - hold_started_us > BUFFERED_ANCHOR_WAIT_US) {
+      int64_t hold_us = esp_timer_get_time() - hold_started_us;
+      bool sender_deaf = audio_receiver_sender_unresponsive_since() != 0 &&
+                         hold_us > BUFFERED_ANCHOR_WAIT_DEAF_US;
+      if (sender_deaf || hold_us > BUFFERED_ANCHOR_WAIT_US) {
         state->discard_all_until_anchor = false;
         state->timing.quick_start = true;
         ESP_LOGW(TAG,
-                 "No anchor %d s after the flush: playing the held segment "
-                 "unscheduled (rtp=%" PRIu32 ")",
-                 (int)(BUFFERED_ANCHOR_WAIT_US / 1000000), slot->timestamp);
+                 "No anchor %lld ms after the flush%s: playing the held "
+                 "segment unscheduled (rtp=%" PRIu32 ")",
+                 (long long)(hold_us / 1000LL),
+                 sender_deaf ? " and the sender is not reading our replies"
+                             : "",
+                 slot->timestamp);
         break;
       }
       vTaskDelay(pdMS_TO_TICKS(BUFFERED_HOLD_POLL_MS));
