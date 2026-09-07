@@ -419,32 +419,6 @@ static void buffered_audio_task(void *pvParameters) {
       uint32_t timestamp =
           (packet[4] << 24) | (packet[5] << 16) | (packet[6] << 8) | packet[7];
 
-      /*
-       * Waiting for the anchor: drop here, at the socket, before any slot is
-       * taken.  The backlog then drains at line rate, the sender finishes the
-       * burst it must finish before it will send SETRATEANCHORTIME, and it
-       * anchors within about a second.
-       *
-       * Holding these packets instead — the design this fork had — is what
-       * made seek unusable. The reader recycled a slot per free-queue poll,
-       * roughly fifty packets a second, while the sender kept producing
-       * forty-three a second of new audio: a net drain of about seven packets
-       * a second against a burst of twenty seconds. The backlog needed
-       * minutes, so the anchor arrived ten seconds late or not at all, and
-       * every mitigation aimed at the queue (384 -> 900 slots, immediate
-       * recycling, an eight-second deadline) treated a symptom.
-       *
-       * Holding bought roughly half a second at resume, because the held
-       * segment could start playing the moment the anchor landed. That is not
-       * worth it. The reference implementation drops, and its seek costs
-       * about a second of silence and always works.
-       */
-      if (state->discard_all_until_anchor) {
-        state->buffered_pre_anchor_drops++;
-        state->stats.packets_dropped++;
-        continue;
-      }
-
       // Take a free slot; while the decoder is holding/back-pressured the
       // reader waits here, which closes the TCP window towards the sender.
       uint16_t index = 0;
@@ -455,7 +429,45 @@ static void buffered_audio_task(void *pvParameters) {
       int64_t wait_started_us = esp_timer_get_time();
       bool wait_logged = false;
       bool got_slot = false;
+      bool drop_packet = false;
+      /*
+       * Waiting for the anchor: never wait for a slot, and never throw the
+       * packet away.  Take a free one if there is one, otherwise evict the
+       * OLDEST held packet and reuse its slot, both with a zero timeout.
+       *
+       * The rate is the whole point.  The sender will not send
+       * SETRATEANCHORTIME until its post-flush burst — about twenty seconds
+       * of audio — has been written, so anything that drains the socket
+       * slower than the sender fills it postpones the anchor indefinitely.
+       * Waiting 20 ms per packet allows fifty a second while the sender
+       * produces forty-three, a net seven: minutes for that burst, which is
+       * why seek used to hang.  Draining at line rate makes it about a
+       * second.
+       *
+       * Dropping the packets outright also drains at line rate and also
+       * fixes the hang, but it throws away the sender's twenty-second lead,
+       * so playout restarts at the live edge with no cushion: measured, the
+       * ring sawtoothed from 540 frames down to 40 and punched a 23 ms hole
+       * every few seconds, twenty-five of them, which is audible as popping.
+       * Retaining the newest packets keeps the cushion and starts playout at
+       * the anchor instead of half a second past it.
+       */
       while (stream->running) {
+        if (state->discard_all_until_anchor) {
+          if (xQueueReceive(state->buffered_free_queue, &index, 0) != pdTRUE) {
+            uint16_t victim = 0;
+            if (xQueueReceive(state->buffered_ready_queue, &victim, 0) ==
+                pdTRUE) {
+              state->buffered_pre_anchor_drops++;
+              index = victim;
+            } else {
+              drop_packet = true;
+              break;
+            }
+          }
+          got_slot = true;
+          break;
+        }
         if (xQueueReceive(state->buffered_free_queue, &index,
                           pdMS_TO_TICKS(20)) == pdTRUE) {
           got_slot = true;
@@ -503,6 +515,10 @@ static void buffered_audio_task(void *pvParameters) {
                    "); sender's TCP window is closed",
                    state->buffered_held_packets);
         }
+      }
+      if (drop_packet) {
+        state->stats.packets_dropped++;
+        continue;
       }
       if (!stream->running || !got_slot) {
         break;
