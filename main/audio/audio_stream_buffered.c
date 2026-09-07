@@ -60,7 +60,7 @@
 // 6.3 s of audio pushed before the first anchor), so 48 slots (1.1 s) was a
 // deadlock: the phone waited for window, we waited for the anchor, and the
 // session went silent for good.  384 slots ≈ 8.9 s of AAC, ~800 KB PSRAM.
-#define BUFFERED_SLOT_PAYLOAD    2048
+#define BUFFERED_SLOT_PAYLOAD 2048
 // 384 slots is 8.9 s of compressed audio.  When the phone already has the
 // next track queued it pushes more than that after a flush before it sends
 // SETRATEANCHORTIME, the queue fills, the reader stops taking from TCP, and
@@ -344,6 +344,10 @@ static void buffered_audio_task(void *pvParameters) {
       // Take a free slot; while the decoder is holding/back-pressured the
       // reader waits here, which closes the TCP window towards the sender.
       uint16_t index = 0;
+      /* Rate limit for the recycle warning; static so it survives across
+       * packets, which is the point — one line per packet would be a flood
+       * from the very task that has to keep draining TCP. */
+      static int64_t last_recycle_log_us = 0;
       int64_t wait_started_us = esp_timer_get_time();
       bool wait_logged = false;
       bool got_slot = false;
@@ -353,7 +357,8 @@ static void buffered_audio_task(void *pvParameters) {
           got_slot = true;
           break;
         }
-        int64_t waited_us = esp_timer_get_time() - wait_started_us;
+        int64_t now_us = esp_timer_get_time();
+        int64_t waited_us = now_us - wait_started_us;
         // Waiting for the anchor: never close the TCP window.  The sender
         // does not anchor until its whole post-flush burst has been
         // accepted (with a queued next track that burst exceeded 8.9 s), so
@@ -361,16 +366,26 @@ static void buffered_audio_task(void *pvParameters) {
         // the anchor.  Recycle the oldest queued packet instead — the
         // anchor sits at the END of the burst, so the newest packets are
         // the ones the RTP gate will want.
-        if (state->discard_all_until_anchor && waited_us > 200000) {
+        // No delay before recycling.  Waiting 200 ms per packet let through
+        // five packets a second against the forty-three the sender produces,
+        // which IS a closed window however large the queue is: the sender
+        // blocks on its own write, never finishes the burst, and never
+        // anchors.  Measured: `recycling oldest` every 220 ms for as long as
+        // the seek lasted, with not one RTSP request from the sender in
+        // between — not even its two-second /feedback.
+        if (state->discard_all_until_anchor) {
           uint16_t victim = 0;
           if (xQueueReceive(state->buffered_ready_queue, &victim, 0) ==
               pdTRUE) {
             state->buffered_pre_anchor_drops++;
-            if (!wait_logged) {
+            if (!wait_logged && now_us - last_recycle_log_us > 2000000) {
               wait_logged = true;
+              last_recycle_log_us = now_us;
               ESP_LOGW(TAG,
-                       "Hold queue full before anchor: recycling oldest "
-                       "packets so the sender can finish its burst");
+                       "Hold queue full before anchor (%" PRIu32
+                       " recycled): still reading so the sender can finish "
+                       "its burst",
+                       state->buffered_pre_anchor_drops);
             }
             index = victim;
             got_slot = true;
