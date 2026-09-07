@@ -61,7 +61,13 @@
 // deadlock: the phone waited for window, we waited for the anchor, and the
 // session went silent for good.  384 slots ≈ 8.9 s of AAC, ~800 KB PSRAM.
 #define BUFFERED_SLOT_PAYLOAD    2048
-#define BUFFERED_SLOT_COUNT      384
+// 384 slots is 8.9 s of compressed audio.  When the phone already has the
+// next track queued it pushes more than that after a flush before it sends
+// SETRATEANCHORTIME, the queue fills, the reader stops taking from TCP, and
+// both sides wait forever — seek goes silent until the session is torn down.
+// 900 slots is 20.9 s, which covers the sender's full lead.  Costs 1.86 MB
+// of PSRAM, of which there is plenty (4.4 MB free with the stream running).
+#define BUFFERED_SLOT_COUNT      900
 #define BUFFERED_STALL_TIMEOUT_S 8
 #define BUFFERED_HOLD_POLL_MS    2
 
