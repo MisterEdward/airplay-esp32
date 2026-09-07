@@ -68,7 +68,14 @@
 // what we hold unscheduled.  Some senders never anchor at all (observed after
 // PAUSE + immediate FLUSHBUFFERED on a track change); silence forever is the
 // worst possible answer.
-#define BUFFERED_ANCHOR_WAIT_US (10 * 1000 * 1000)
+// A healthy sender anchors 300-500 ms after the flush; this wait only ever
+// expires when the exchange has already gone wrong.  Ten seconds was chosen
+// when that failure was not understood, and it turned every stuck resume
+// into a ten-second hole followed by a hard correction when the late anchor
+// finally landed 1.3 s away from where we had started playing.  Giving up at
+// 1.5 s costs nothing in the healthy case and keeps both the hole and the
+// correction small in the unhealthy one.
+#define BUFFERED_ANCHOR_WAIT_US (1500 * 1000)
 
 #if CONFIG_FREERTOS_UNICORE
 #define BUFFERED_DECODER_CORE 0
