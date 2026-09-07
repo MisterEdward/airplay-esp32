@@ -71,8 +71,12 @@
 // Frames in the PCM ring below which a silent data socket really is a stall
 // rather than the sender simply running ahead.  ~3 s at 352-frame blocks.
 #define BUFFERED_STALL_MIN_FRAMES 130
-#define BUFFERED_STALL_TIMEOUT_S  8
-#define BUFFERED_HOLD_POLL_MS     2
+// How long to hold a post-seek segment waiting for SETRATEANCHORTIME before
+// playing it unscheduled.  A healthy sender anchors in 350-500 ms, so this
+// only ever fires when the sender has decided not to anchor at all.
+#define BUFFERED_ANCHOR_WAIT_US  (8 * 1000 * 1000)
+#define BUFFERED_STALL_TIMEOUT_S 8
+#define BUFFERED_HOLD_POLL_MS    2
 
 #if CONFIG_FREERTOS_UNICORE
 #define BUFFERED_DECODER_CORE 0
@@ -185,11 +189,36 @@ static void buffered_decoder_task(void *pvParameters) {
     // anchor arrives so the RTP gates can judge it.  Abandon the hold if a
     // newer seek supersedes this generation.
     bool held = false;
+    int64_t hold_started_us = esp_timer_get_time();
     while (stream->running && state->discard_all_until_anchor &&
            slot->generation == state->buffered_generation) {
       if (!held) {
         held = true;
         state->buffered_held_packets++;
+      }
+      /*
+       * Give up eventually.  Measured on a seek near the end of a track:
+       * the reader was demonstrably running at full rate — the recycle
+       * counter advanced 101 packets every 2 s, so fifty a second against
+       * the forty-three the sender produces, TCP window wide open — and the
+       * sender still never sent SETRATEANCHORTIME.  It simply streamed on
+       * while we held everything and stayed silent forever.
+       *
+       * We cannot make the sender anchor.  We can refuse to wait for it
+       * indefinitely: play what we hold unscheduled and let the timing
+       * engine re-acquire when an anchor does arrive.  Eight seconds is far
+       * beyond the 350-500 ms a healthy sender takes, so this never fires
+       * on the path that makes multiroom sync instant — it only converts
+       * permanent silence into a few seconds of it.
+       */
+      if (esp_timer_get_time() - hold_started_us > BUFFERED_ANCHOR_WAIT_US) {
+        state->discard_all_until_anchor = false;
+        state->timing.quick_start = true;
+        ESP_LOGW(TAG,
+                 "No anchor %d s after the flush: playing the held segment "
+                 "unscheduled (rtp=%" PRIu32 ")",
+                 (int)(BUFFERED_ANCHOR_WAIT_US / 1000000), slot->timestamp);
+        break;
       }
       vTaskDelay(pdMS_TO_TICKS(BUFFERED_HOLD_POLL_MS));
     }
