@@ -27,7 +27,11 @@
 #endif
 
 // Audio buffer size for buffered streams (type 103)
-#define AP2_AUDIO_BUFFER_SIZE (1 * 1024 * 1024)
+// This advertises compressed bytes, not reserved PSRAM.  The 900 packet
+// slots reserve 2048 bytes each, but a typical AAC packet uses much less.
+// Advertising 1 MiB can make a pre-anchor burst exceed the slot count while
+// the decoder is holding.  Leave headroom for variable packet sizes.
+#define AP2_AUDIO_BUFFER_SIZE (128 * 1024)
 
 // Include for audio_format_t
 #include "audio_receiver.h"
