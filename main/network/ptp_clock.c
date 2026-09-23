@@ -50,6 +50,20 @@ static const char *TAG = "ptp_clock";
 #define LOCK_STABLE_TIME_MS  250 // 250ms of stable readings to declare lock
 #define LOCK_TIMEOUT_MS      5000
 #define OUTLIER_THRESHOLD_NS 50000000LL // 50ms - reject samples beyond this
+// Master timescale step.  After a long pause the iPhone tore down the stream
+// and, by the time it resumed, its PTP timescale had jumped by 11.37 s.
+// Every Sync from then on was 11.37 s from our estimate, so every one was
+// rejected as an outlier (outliers 108 -> 487, ptp_gap=-11371810 us) and the
+// filter stayed on the old offset: each anchor looked 11.4 s in the past,
+// ~14 s of audio was dropped as late and playback stuttered, while the Mac
+// in the same group followed the jump.  Jitter never looks like that: a
+// run this long, this consistent and at least a second away is the master's
+// clock having moved, so follow it.  Delay spikes on a congested link are
+// hundreds of milliseconds and do not agree to 30 ms for 1.5 s.
+#define STEP_MIN_NS      1000000000LL // only steps of 1 s or more
+#define STEP_AGREE_NS    30000000LL   // run members within 30 ms of the first
+#define STEP_MIN_SAMPLES 12           // ~1.5 s of Sync at 8 Hz
+#define STEP_MIN_MS      1500
 // Asymmetric filter parameters (modeled after nqptp):
 // Network delays only ADD positive bias to the measured offset, so
 //   offset_measured = true_offset - one_way_delay
@@ -109,6 +123,13 @@ static struct {
   uint32_t announce_count;
   uint32_t rejected_master_count; // SYNC/FOLLOW_UP from a non-matching master
   uint32_t outlier_count;         // samples rejected by 50ms threshold
+  uint32_t step_count;            // master timescale steps followed
+
+  // Timescale step detection: a run of outliers that agree with each other.
+  int64_t step_candidate_ns; // first offset of the current run
+  int64_t step_best_ns;      // largest offset in the run (shortest delay)
+  uint32_t step_run;         // consecutive agreeing outliers
+  uint32_t step_start_ms;
 
   // Master clock filter (0 = accept any master)
   uint64_t expected_clock_id;
@@ -184,8 +205,43 @@ static void update_offset(int64_t new_offset_ns) {
     }
     if (diff > OUTLIER_THRESHOLD_NS) {
       ptp.outlier_count++;
+      int64_t from_candidate = new_offset_ns - ptp.step_candidate_ns;
+      if (from_candidate < 0) {
+        from_candidate = -from_candidate;
+      }
+      if (diff < STEP_MIN_NS) {
+        ptp.step_run = 0;
+      } else if (ptp.step_run == 0 || from_candidate > STEP_AGREE_NS) {
+        ptp.step_candidate_ns = new_offset_ns;
+        ptp.step_best_ns = new_offset_ns;
+        ptp.step_run = 1;
+        ptp.step_start_ms = now_ms;
+      } else {
+        ptp.step_run++;
+        if (new_offset_ns > ptp.step_best_ns) {
+          ptp.step_best_ns = new_offset_ns;
+        }
+        if (ptp.step_run >= STEP_MIN_SAMPLES &&
+            now_ms - ptp.step_start_ms >= STEP_MIN_MS) {
+          ptp.step_count++;
+          ESP_LOGW(TAG,
+                   "Master timescale stepped by %+lld ms (%lu agreeing "
+                   "samples over %lu ms): following it",
+                   (long long)((ptp.step_best_ns - ptp.filtered_offset_ns) /
+                               1000000LL),
+                   (unsigned long)ptp.step_run,
+                   (unsigned long)(now_ms - ptp.step_start_ms));
+          ptp.filtered_offset_ns = ptp.step_best_ns;
+          ptp.previous_offset = ptp.step_best_ns;
+          ptp.previous_offset_time_ms = now_ms;
+          // Aggressive positive tracking again, as after a fresh start.
+          ptp.mastership_start_ms = now_ms;
+          ptp.step_run = 0;
+        }
+      }
       return;
     }
+    ptp.step_run = 0;
 
     int64_t jitter = new_offset_ns - ptp.previous_offset;
     uint32_t mastership_time_ms = now_ms - ptp.mastership_start_ms;
@@ -576,6 +632,7 @@ void ptp_clock_clear(void) {
   ptp.rejected_master_count = 0;
   ptp.outlier_count = 0;
   ptp.raw_offset_ns = 0;
+  ptp.step_run = 0;
 
   // Drop the master filter so the next session can lock to whatever master
   // its anchor packet names (which may differ from the previous session).
@@ -667,6 +724,7 @@ void ptp_clock_set_master_clock_id(uint64_t clock_id) {
   ptp.previous_offset = 0;
   ptp.previous_offset_time_ms = 0;
   ptp.awaiting_followup = false;
+  ptp.step_run = 0;
 }
 
 uint64_t ptp_clock_get_master_clock_id(void) {
@@ -691,6 +749,7 @@ void ptp_clock_get_stats(ptp_stats_t *stats) {
   stats->last_offset_ns = ptp.raw_offset_ns;
   stats->filtered_offset_ns = ptp.filtered_offset_ns;
   stats->outlier_count = ptp.outlier_count;
+  stats->step_count = ptp.step_count;
 
   if (ptp.locked && ptp.lock_start_ms > 0) {
     uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;

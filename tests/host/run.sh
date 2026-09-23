@@ -16,3 +16,6 @@ if [ -f tests/host/test_timing.c ]; then
     tests/host/test_timing.c -lm -o "$out/test_timing"
   "$out/test_timing"
 fi
+$CC $FLAGS -Wno-unused-function -Wno-unused-parameter -I tests/host/fakes_ptp -I main/network \
+  tests/host/test_ptp.c -o "$out/test_ptp"
+"$out/test_ptp"
