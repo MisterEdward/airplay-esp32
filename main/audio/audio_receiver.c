@@ -803,8 +803,14 @@ void audio_receiver_pause(void) {
   // throttles the sender.  On resume the phone sends a fresh
   // SETRATEANCHORTIME anchor that re-aligns the buffered frames to the
   // correct wall-clock position; no flush or offset compensation is needed.
-  audio_timing_set_playing(&receiver.timing, false);
-  receiver.blocks_read_in_sequence = 0;
+  //
+  // Go through audio_receiver_set_playing() so the pause snapshot is taken.
+  // This (fade-complete) path is how every rate=0 pause ends, and without
+  // the snapshot Path B in set_anchor_time estimated the pause position from
+  // the wall clock, pause included.  Measured: an 8 s pause read as an 8.4 s
+  // seek, the ring (7 s of audio the sender never resends) was flushed, and
+  // resume sat in 7.6 s of silence.
+  audio_receiver_set_playing(false);
 }
 
 uint16_t audio_receiver_get_buffered_port(void) {
