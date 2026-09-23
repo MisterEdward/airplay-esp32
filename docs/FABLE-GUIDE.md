@@ -103,8 +103,14 @@ The RTSP side (`rtsp_handlers.c`) drives it:
   position has `seq == flushUntilSeq` (a 36-byte odd one), real audio
   starts at `until+1`.
 - **FLUSHBUFFERED deferred** (`flushFrom*` + `flushUntil*`): "discard the
-  packets in [fromSeq, untilSeq)".  Sent at track transitions and on pause.
-  **Handled wrongly today**, see §7.
+  packets in [fromSeq, untilSeq)".  Sent on pause (and alongside the
+  immediate flush of a seek).  Measured on the iPhone: the range starts
+  exactly at the end of the current track (from - playhead = the time left
+  in it) and covers packets the phone **never sends** — it just skips those
+  sequence numbers, and the next track arrives at `untilSeq` with
+  `rtp == flushFromTS`, contiguous.  After a resume it may send one or two
+  more tiny ranges with the same `from`.  Applied by sequence number (§4,
+  fix 5).  All raw seq values from RTSP carry bit 23: mask with `0x7FFFFF`.
 
 After an immediate flush: `audio_receiver_seek_flush_until()` bumps the slot
 generation (queued packets become stale), resets timing, and arms
@@ -143,7 +149,7 @@ lead=-12001 ms" captures (not re-measured at 1 MiB on the phone, but gone
 on the phone with the fix).  None of the earlier suspects held up: the hold
 queue's rate or size, the recycle delay, a deaf sender, the RTP gate.
 
-### The three commits
+### The fixes
 
 1. **`fix(airplay): seek resumes at the chosen point in under a second`**
    - `audioBufferSize` 512 KiB (~16 s, fits): the sender's Send-Q stays 0.
@@ -173,8 +179,32 @@ queue's rate or size, the recycle delay, a deaf sender, the RTP gate.
      never resends: 7.6 s of silence.  Now routed through
      `audio_receiver_set_playing(false)`.
 
-Nothing in the timing engine, envelope, servo or anchor judging changed.
-That is deliberate: those are what make 55cfa44's sync instant.
+4. **`fix(buffered): the flushUntilSeq gate never outlives its flush`**
+   - Fix 1's gate stayed armed when a session ended right after a seek; the
+     next session's packets all compared "below" it and were dropped: a
+     reconnect played nothing.  Cleared on every flush and stream start;
+     anything more than 16384 below `until` disarms it.
+5. **`fix(airplay): deferred FLUSHBUFFERED drops its sequence range, nothing else`**
+   - The timing engine used to empty the whole ring when a frame reached
+     `flushUntilTS`: ~7 s of silence plus a click at the start of the next
+     song after a pause near a track's end.  Now up to four ranges, dropped
+     by sequence number in the reader (and the decoder for queued ones), as
+     shairport-sync does; an immediate flush cancels them.  Verified on the
+     iPhone: pause 44 s before the end, three ranges, `dropped 0 packets`,
+     clean transition.
+6. **`fix(ptp): follow a master timescale step instead of rejecting it forever`**
+   - **While paused, the iPhone's PTP timescale does not advance normally:
+     it jumps back in steps of ~2-6 s every ~10-12 s** (16 steps in a
+     4.5-minute pause).  The 50 ms outlier gate rejected every sample after
+     the first jump and kept the old offset, so after resume every anchor
+     looked 11.4 s in the past: ~14 s dropped as late, stuttering, while the
+     Mac followed.  A run of ≥ 12 samples over ≥ 1.5 s, ≥ 1 s away and
+     agreeing within 30 ms, is now followed.  Host test in
+     `tests/host/test_ptp.c`; `ptp.steps` in `/api/status`.  Verified: after
+     a 4.5-minute pause the resume anchor had `lead=-17 ms`, `err=+0 us`.
+
+The timing engine's alignment, envelope, servo and anchor judging are
+unchanged.  That is deliberate: those are what make 55cfa44's sync instant.
 
 ---
 
@@ -217,6 +247,9 @@ reselect the speaker).  Knobs reset to the defaults on reboot.
 | `rtsp_events: listener N took …` | never |
 | `Anchor change detected` right after a plain pause | never (that was bug 3) |
 | `PTP not locked to … local timeline latched` | never; means unsynced |
+| `Master timescale stepped by … following it` | only while/after a pause |
+| `Deferred flush done: dropped N packets of [a, b)` | N = 0 is normal |
+| `ptp_gap` in Playout, `ptp.steps` in `/api/status` | gap within ±10 ms |
 
 ---
 
@@ -241,25 +274,6 @@ reselect the speaker).  Knobs reset to the defaults on reboot.
 
 ## 7. Known bugs, not fixed yet
 
-### Deferred FLUSHBUFFERED applied as "flush everything"
-
-`audio_timing_read()` treats a deferred flush as: play until a frame with
-rtp ≥ `flushUntilTS`, then empty the whole ring.  The protocol means
-"discard the packets with seq in [fromSeq, untilSeq)".  Measured after a
-pause on the iPhone: the ring was emptied at the boundary, 7 s of silence
-and a click (`Deferred flush at ts=…` followed by `early=6958 ms`).  Also
-the cause of the old "next with crossfade stalls".
-
-Do it the way shairport-sync does (`ap2_buffered_audio_processor.c`): by
-**sequence number**.  The phone re-sends the same rtp range with new
-sequence numbers after a pause, so any timestamp-based skip (including
-`archive/fable-5.1`'s 169bb56) also throws away the resent audio.  Packets
-still in the compressed slots carry `seq_no`; frames already in the PCM
-ring do not, so either add the sequence number to `audio_frame_header_t`
-or keep the deferred range as a skip list applied at playout by seq.
-Instrument first: log seq/rtp of packets around each deferred flush, like
-the seek trace.
-
 ### PTP: Mac as sender with the iPhone around → unsynced
 
 The anchor names the phone's clock (`a8817e25…`) as timeline, but on the
@@ -273,7 +287,21 @@ grandmaster and treat "anchor names X, tracked source announces X as GM"
 as a lock.  iPhone-as-sender is unaffected (the phone sends its own Sync).
 This touches sync: listening test mandatory.
 
+### Step detection lag at resume
+
+The PTP step detector needs ~1.5 s.  In the verified run the phone's last
+step landed ~2.1 s before its resume anchor, so it was caught in time.  If
+a phone ever anchors less than 1.5 s after its last step, that first anchor
+is judged on the old offset and the next re-acquire corrects it (an audible
+jump).  Watch for `Master timescale stepped` right *after* an `Anchor:`.
+
 ### Smaller
+
+- A small click on play after a pause was reported once; the resume there
+  re-acquired with `trimmed=116 dropped=2` (anchor 55 ms in the past).  The
+  PCM5102A's own zero-data auto-mute is the other suspect.  Not isolated.
+- One isolated ~8 ms render stall (three re-acquires within 110 ms) was
+  seen once in a long session.  Not reproduced.
 
 - On a bad 2.4 GHz link an RTSP reply can still sit in `send()` for
   seconds (`SETRATEANCHORTIME slow: … reply 4664 ms`); the next request
@@ -298,5 +326,5 @@ This touches sync: listening test mandatory.
 - 2026-09-07 (`archive/baseline-55cfa44`): ten attempts at the seek on top
   of 55cfa44, ending with "drop pre-anchor packets at the socket" — seek
   worked but late and popping.  The brownout was found the same day.
-- 2026-09-23: root cause measured from the sender's side, the three
-  commits above.
+- 2026-09-23: root cause measured from the sender's side; the six fixes
+  of §4, each verified on the iPhone.
