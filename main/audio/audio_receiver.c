@@ -332,7 +332,6 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
       receiver.timing.pending_valid = false;
       receiver.timing.pending_frame_len = 0;
       receiver.timing.ready_time_us = 0;
-      receiver.timing.deferred_flush_pending = false;
       audio_timing_reset_continuity(&receiver.timing);
       receiver.blocks_read_in_sequence = 0;
       receiver.discard_before_rtp = rtp_time;
@@ -405,7 +404,6 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
       receiver.timing.pending_valid = false;
       receiver.timing.pending_frame_len = 0;
       receiver.timing.ready_time_us = 0;
-      receiver.timing.deferred_flush_pending = false;
       audio_timing_reset_continuity(&receiver.timing);
       receiver.blocks_read_in_sequence = 0;
       receiver.timing.quick_start = true;
@@ -707,6 +705,11 @@ void audio_receiver_flush(void) {
   // seek-then-disconnect played nothing at all.  seek_flush_until() re-arms
   // it after calling this.
   receiver.flush_until_active = false;
+  // An immediate flush cancels every pending deferred range (shairport-sync
+  // does the same): the stream restarts from flushUntilSeq anyway.
+  for (int i = 0; i < DEFERRED_FLUSH_SLOTS; i++) {
+    receiver.deferred_flushes[i].in_use = false;
+  }
   receiver.seek_trace.active = false;
   receiver.seek_trace.reader_active = false;
   receiver.deferred_trace.active = false;
@@ -794,16 +797,51 @@ uint32_t audio_receiver_get_advertised_buffer_bytes(void) {
   return advertised_buffer_bytes;
 }
 
-void audio_receiver_set_deferred_flush(uint32_t flush_until_ts) {
-  if (!receiver.stream) {
+void audio_receiver_set_deferred_flush(uint32_t from_seq, uint32_t from_ts,
+                                       uint32_t until_seq, uint32_t until_ts) {
+  from_seq &= 0x7FFFFF;
+  until_seq &= 0x7FFFFF;
+  if (seq23_diff(until_seq, from_seq) <= 0) {
+    ESP_LOGW(TAG,
+             "Deferred flush ignored: empty range [%" PRIu32 ", %" PRIu32 ")",
+             from_seq, until_seq);
     return;
   }
-  // Write flush_until_ts before arming the flag so audio_timing_read never
-  // sees deferred_flush_pending=true with a stale timestamp.
-  receiver.timing.flush_until_ts = flush_until_ts;
-  receiver.timing.deferred_flush_pending = true;
-  ESP_LOGI(TAG, "Deferred flush armed: flush_until_ts=%" PRIu32,
-           flush_until_ts);
+  // Take a free slot, else replace the oldest.
+  int slot = 0;
+  for (int i = 0; i < DEFERRED_FLUSH_SLOTS; i++) {
+    if (!receiver.deferred_flushes[i].in_use) {
+      slot = i;
+      break;
+    }
+    if (receiver.deferred_flushes[i].armed_us <
+        receiver.deferred_flushes[slot].armed_us) {
+      slot = i;
+    }
+  }
+  deferred_flush_t *d = &receiver.deferred_flushes[slot];
+  d->in_use = false;
+  d->from_seq = from_seq;
+  d->until_seq = until_seq;
+  d->from_ts = from_ts;
+  d->until_ts = until_ts;
+  d->dropped = 0;
+  d->armed_us = esp_timer_get_time();
+  d->in_use = true;
+
+  // Packets already decoded into the PCM ring carry no sequence number and
+  // will play.  Say so, with how much, so it can be measured if it matters.
+  int32_t decoded_into = seq23_diff(receiver.decoded_last_seq, from_seq);
+  if (receiver.decoded_last_seq != 0 && decoded_into >= 0) {
+    ESP_LOGW(TAG,
+             "Deferred flush [%" PRIu32 ", %" PRIu32 "): %ld packets of it are "
+             "already decoded and will play",
+             from_seq, until_seq, (long)(decoded_into + 1));
+  }
+  ESP_LOGI(TAG,
+           "Deferred flush armed (slot %d): drop seq [%" PRIu32 ", %" PRIu32
+           ") = %ld packets",
+           slot, from_seq, until_seq, (long)seq23_diff(until_seq, from_seq));
 }
 
 void audio_receiver_trace_deferred_flush(uint32_t from_seq, uint32_t from_ts,

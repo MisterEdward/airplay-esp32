@@ -298,8 +298,6 @@ void audio_timing_reset(audio_timing_t *timing) {
   timing->ready_time_us = 0;
   timing->consecutive_early_frames = 0;
   timing->quick_start = false;
-  timing->deferred_flush_pending = false;
-  timing->flush_until_ts = 0;
   timing->late_drop_count = 0;
   timing->late_drop_active = false;
   timing->servo_trims = 0;
@@ -575,24 +573,10 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       frame_samples = samples;
     }
 
-    // Deferred flush (AirPlay 2 FLUSHBUFFERED with flushFromSeq): play up to
-    // the boundary, then discard the rest and start the next track fresh.
-    if (timing->deferred_flush_pending) {
-      if ((int32_t)(hdr->rtp_timestamp - timing->flush_until_ts) >= 0) {
-        ESP_LOGI(TAG, "Deferred flush at ts=%" PRIu32 " (until_ts=%" PRIu32 ")",
-                 hdr->rtp_timestamp, timing->flush_until_ts);
-        release_item(timing, buffer, item, from_pending);
-        audio_buffer_flush(buffer);
-        timing->deferred_flush_pending = false;
-        audio_timing_reset_continuity(timing);
-        timing->playout_started = false;
-        timing->ready_time_us = 0;
-        timing->consecutive_early_frames = 0;
-        timing->quick_start = true;
-        timing->acquired = false;
-        return 0;
-      }
-    }
+    // Deferred FLUSHBUFFERED is applied by sequence number before decode
+    // (audio_stream_buffered.c), never here: emptying the ring when a frame
+    // reached flushUntilTS threw away the next track the sender had already
+    // delivered (measured: ~7 s of silence at the start of the next song).
 
     // Stale start-island rejection: before playout, skip frames stranded
     // more than ~100 ms below the contiguous run that ends at the newest

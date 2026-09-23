@@ -184,16 +184,20 @@ int64_t audio_receiver_sender_unresponsive_since(void);
 void audio_receiver_note_sender_responsive(void);
 
 /**
- * Arm a deferred flush for AirPlay 2 FLUSHBUFFERED with flushFromSeq.
+ * Deferred FLUSHBUFFERED (flushFromSeq/flushUntilSeq present): the packets
+ * with sequence numbers in [from_seq, until_seq) must not be played.
+ * Everything else, before and after, plays on the current anchor.
  *
- * Instead of discarding the buffer immediately, audio_timing_read will
- * continue playing normally until it encounters a frame whose rtp_timestamp
- * >= flush_until_ts, at which point it bulk-flushes the remainder and sets
- * post_flush so the next track starts without delay.
- *
- * @param flush_until_ts  RTP timestamp boundary from flushUntilTS plist key.
+ * Applied by sequence number, as shairport-sync does: the reader drops the
+ * range at the socket and the decoder drops any of it already queued.  The
+ * sender typically names packets it has not sent yet (the next track it had
+ * prepared, invalidated by a pause) and re-sends that audio later under new
+ * sequence numbers with the same timestamps, so any timestamp-based skip
+ * would throw the re-sent audio away too.  An immediate flush cancels all
+ * pending ranges.
  */
-void audio_receiver_set_deferred_flush(uint32_t flush_until_ts);
+void audio_receiver_set_deferred_flush(uint32_t from_seq, uint32_t from_ts,
+                                       uint32_t until_seq, uint32_t until_ts);
 
 /**
  * Diagnostic: log where playback, the PCM ring and the compressed queue stand

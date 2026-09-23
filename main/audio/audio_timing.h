@@ -85,13 +85,6 @@ typedef struct {
   // silence is output until their scheduled play time, exactly like
   // shairport-sync.  Cleared once playout_started becomes true.
   bool quick_start;
-  // Deferred flush (AirPlay 2 FLUSHBUFFERED with flushFromSeq present):
-  // keep playing until a frame with rtp_timestamp >= flush_until_ts arrives,
-  // then bulk-flush and start fresh.  Written by the RTSP task, read by the
-  // DMA callback task.  Aligned 32-bit + bool — atomic on Xtensa without a
-  // mutex (write flush_until_ts first, arm bool second; read bool first).
-  bool deferred_flush_pending;
-  uint32_t flush_until_ts;
 
   // Persistent statistics for a late-frame drain episode.  Kept in the timing
   // state so repeated playout callbacks produce one summary log instead of

@@ -18,6 +18,24 @@
 
 #define MAX_RTP_PACKET_SIZE 2048
 
+// Pending deferred FLUSHBUFFERED ranges (shairport-sync keeps the same few).
+#define DEFERRED_FLUSH_SLOTS 4
+
+typedef struct {
+  volatile bool in_use; // written last by the RTSP task
+  uint32_t from_seq;    // 23-bit
+  uint32_t until_seq;   // 23-bit, exclusive
+  uint32_t from_ts;
+  uint32_t until_ts;
+  uint32_t dropped;
+  int64_t armed_us;
+} deferred_flush_t;
+
+// Signed distance a - b in the sender's 23-bit sequence space.
+static inline int32_t seq23_diff(uint32_t a, uint32_t b) {
+  return (int32_t)(((a - b) & 0x7FFFFF) << 9) >> 9;
+}
+
 typedef struct {
   audio_stream_t *stream;
   audio_stream_t *realtime_stream;
@@ -113,6 +131,8 @@ typedef struct {
     int64_t above_first_us;
   } deferred_trace;
   volatile uint32_t deferred_last_seq; // last seq the reader saw (23-bit)
+  volatile uint32_t decoded_last_seq;  // last seq the decoder queued (23-bit)
+  deferred_flush_t deferred_flushes[DEFERRED_FLUSH_SLOTS];
 
   uint8_t *decrypt_buffer;
   size_t decrypt_buffer_size;

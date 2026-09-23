@@ -118,6 +118,51 @@ static inline buffered_slot_t *slot_at(audio_receiver_state_t *state,
   return &((buffered_slot_t *)state->buffered_packet_pool)[index];
 }
 
+// Deferred FLUSHBUFFERED, reader side: packets arrive in sequence order, so
+// a range is finished once a packet at or past its end shows up.  Returns
+// true when this packet falls inside a pending range and must be dropped.
+static bool deferred_flush_drop(audio_receiver_state_t *state, uint32_t seq23,
+                                uint32_t rtp) {
+  bool drop = false;
+  for (int i = 0; i < DEFERRED_FLUSH_SLOTS; i++) {
+    deferred_flush_t *d = &state->deferred_flushes[i];
+    if (!d->in_use) {
+      continue;
+    }
+    if (seq23_diff(seq23, d->until_seq) >= 0) {
+      ESP_LOGI(TAG,
+               "Deferred flush done: dropped %" PRIu32 " packets of [%" PRIu32
+               ", %" PRIu32 "); next seq=%" PRIu32 " rtp=%" PRIu32
+               " (rtp-fromTS=%ld ms) after %lld ms",
+               d->dropped, d->from_seq, d->until_seq, seq23, rtp,
+               (long)((int64_t)(int32_t)(rtp - d->from_ts) * 1000 / 44100),
+               (long long)((esp_timer_get_time() - d->armed_us) / 1000LL));
+      d->in_use = false;
+      continue;
+    }
+    if (seq23_diff(seq23, d->from_seq) >= 0) {
+      d->dropped++;
+      drop = true;
+    }
+  }
+  return drop;
+}
+
+// Decoder side: packets queued before the range was announced.  Read-only;
+// finishing a range is the reader's job.
+static bool deferred_flush_covers(audio_receiver_state_t *state,
+                                  uint32_t seq23) {
+  for (int i = 0; i < DEFERRED_FLUSH_SLOTS; i++) {
+    deferred_flush_t *d = &state->deferred_flushes[i];
+    if (d->in_use && seq23_diff(seq23, d->from_seq) >= 0 &&
+        seq23_diff(seq23, d->until_seq) < 0) {
+      d->dropped++;
+      return true;
+    }
+  }
+  return false;
+}
+
 // Read exactly `len` bytes.  Returns bytes read, 0 = peer closed, -1 = error
 // or stall.  While paused the timeout is not a stall: the sender has nothing
 // to send, so keep waiting.
@@ -219,6 +264,13 @@ static void buffered_decoder_task(void *pvParameters) {
       continue;
     }
 
+    // Inside a deferred-flush range announced after this packet was queued.
+    if (deferred_flush_covers(state, slot->seq_no & 0x7FFFFF)) {
+      state->stats.packets_dropped++;
+      xQueueSend(state->buffered_free_queue, &index, 0);
+      continue;
+    }
+
     // Post-seek, pre-anchor packet: hold it (compressed, cheap) until the
     // anchor arrives so the RTP gates can judge it.  Abandon the hold if a
     // newer seek supersedes this generation.
@@ -309,6 +361,7 @@ static void buffered_decoder_task(void *pvParameters) {
     }
 
     state->stats.last_seq = (uint16_t)(slot->seq_no & 0xFFFF);
+    state->decoded_last_seq = slot->seq_no & 0x7FFFFF;
     state->stats.last_timestamp = slot->timestamp;
     state->blocks_read++;
     state->blocks_read_in_sequence++;
@@ -503,7 +556,7 @@ static void buffered_audio_task(void *pvParameters) {
           }
           state->deferred_trace.above++;
         }
-        if (now_us - state->deferred_trace.last_report_us > 2000000) {
+        if (now_us - state->deferred_trace.last_report_us > 10000000) {
           state->deferred_trace.last_report_us = now_us;
           ESP_LOGI(
               TAG,
@@ -513,7 +566,8 @@ static void buffered_audio_task(void *pvParameters) {
               state->deferred_trace.below, state->deferred_trace.inside,
               state->deferred_trace.above, seq23, timestamp);
         }
-        if (now_us - state->deferred_trace.started_us > 30000000) {
+        if (now_us - state->deferred_trace.started_us > 300000000 ||
+            state->deferred_trace.above >= 100) {
           state->deferred_trace.active = false;
         }
       }
@@ -601,6 +655,12 @@ static void buffered_audio_task(void *pvParameters) {
                    state->seek_trace.old_packets, state->seek_trace.new_packets,
                    state->seek_trace.new_bytes, state->seek_trace.recycled);
         }
+      }
+
+      // Deferred FLUSHBUFFERED range: drop at the socket.
+      if (deferred_flush_drop(state, seq_no & 0x7FFFFF, timestamp)) {
+        state->stats.packets_dropped++;
+        continue;
       }
 
       // Old backlog (below flushUntilSeq): drop at the socket, always.
@@ -809,6 +869,10 @@ static esp_err_t buffered_start(audio_stream_t *stream, uint16_t port) {
   state->seek_trace.active = false;
   state->seek_trace.reader_active = false;
   state->deferred_trace.active = false;
+  for (int i = 0; i < DEFERRED_FLUSH_SLOTS; i++) {
+    state->deferred_flushes[i].in_use = false;
+  }
+  state->decoded_last_seq = 0;
   stream->running = true;
 
   state->buffered_task_handle = NULL;

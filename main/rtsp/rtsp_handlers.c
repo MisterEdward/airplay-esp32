@@ -1792,11 +1792,10 @@ static void handle_flushbuffered(int socket, rtsp_conn_t *conn,
   //   flushUntilSeq / flushUntilTS — last sequence/timestamp to discard
   //
   // If flushFromSeq is absent → immediate flush (stop and discard everything).
-  // If flushFromSeq is present → deferred flush: keep playing existing buffered
-  //   content until flushUntilTS is reached, then discard and start fresh.
-  //   The phone simultaneously starts streaming the new track, which fills the
-  //   buffer beyond flushUntilTS; audio_timing_read detects the boundary and
-  //   triggers the bulk-flush at the right moment.
+  // If flushFromSeq is present → deferred flush: drop exactly the packets
+  //   with sequence numbers in [flushFromSeq, flushUntilSeq) and keep
+  //   playing everything else on the current anchor (see
+  //   audio_receiver_set_deferred_flush()).
   bool has_deferred = false;
   bool has_until = false;
   int64_t immediate_until_seq = 0, immediate_until_ts = 0;
@@ -1818,12 +1817,14 @@ static void handle_flushbuffered(int socket, rtsp_conn_t *conn,
                "FLUSHBUFFERED deferred: fromSeq=%" PRId64 " fromTS=%" PRId64
                " untilSeq=%" PRId64 " untilTS=%" PRId64,
                flush_from_seq, flush_from_ts, flush_until_seq, flush_until_ts);
-      // Arm the deferred flush.  Do NOT flush the audio output immediately —
-      // let it drain naturally to the boundary so the current track finishes.
+      // Arm the deferred flush.  Do NOT flush the audio output: only the
+      // named sequence range is dropped, as it arrives or from the queue.
       audio_receiver_trace_deferred_flush(
           (uint32_t)flush_from_seq, (uint32_t)flush_from_ts,
           (uint32_t)flush_until_seq, (uint32_t)flush_until_ts);
-      audio_receiver_set_deferred_flush((uint32_t)flush_until_ts);
+      audio_receiver_set_deferred_flush(
+          (uint32_t)flush_from_seq, (uint32_t)flush_from_ts,
+          (uint32_t)flush_until_seq, (uint32_t)flush_until_ts);
     } else {
       has_until = got_until_seq && got_until_ts;
       immediate_until_seq = flush_until_seq;
