@@ -1820,6 +1820,9 @@ static void handle_flushbuffered(int socket, rtsp_conn_t *conn,
                flush_from_seq, flush_from_ts, flush_until_seq, flush_until_ts);
       // Arm the deferred flush.  Do NOT flush the audio output immediately —
       // let it drain naturally to the boundary so the current track finishes.
+      audio_receiver_trace_deferred_flush(
+          (uint32_t)flush_from_seq, (uint32_t)flush_from_ts,
+          (uint32_t)flush_until_seq, (uint32_t)flush_until_ts);
       audio_receiver_set_deferred_flush((uint32_t)flush_until_ts);
     } else {
       has_until = got_until_seq && got_until_ts;

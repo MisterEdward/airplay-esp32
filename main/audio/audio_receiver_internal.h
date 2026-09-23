@@ -92,6 +92,28 @@ typedef struct {
     int64_t last_report_us;
   } seek_trace;
 
+  // Deferred-flush trace: what arrives after a FLUSHBUFFERED with
+  // flushFrom*/flushUntil*, split by sequence number against [from, until).
+  // Written by the reader; diagnostic only.
+  struct {
+    bool active;
+    uint32_t from_seq;
+    uint32_t until_seq;
+    uint32_t from_ts;
+    uint32_t until_ts;
+    int64_t started_us;
+    int64_t last_report_us;
+    uint32_t below;  // seq < from
+    uint32_t inside; // from <= seq < until
+    uint32_t above;  // seq >= until
+    uint32_t inside_min_rtp;
+    uint32_t inside_max_rtp;
+    uint32_t above_first_rtp;
+    uint32_t above_first_seq;
+    int64_t above_first_us;
+  } deferred_trace;
+  volatile uint32_t deferred_last_seq; // last seq the reader saw (23-bit)
+
   uint8_t *decrypt_buffer;
   size_t decrypt_buffer_size;
 

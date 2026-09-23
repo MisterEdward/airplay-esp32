@@ -196,6 +196,14 @@ void audio_receiver_note_sender_responsive(void);
 void audio_receiver_set_deferred_flush(uint32_t flush_until_ts);
 
 /**
+ * Diagnostic: log where playback, the PCM ring and the compressed queue stand
+ * when a deferred FLUSHBUFFERED arrives, and trace what the sender sends
+ * after it.  No behaviour change.
+ */
+void audio_receiver_trace_deferred_flush(uint32_t from_seq, uint32_t from_ts,
+                                         uint32_t until_seq, uint32_t until_ts);
+
+/**
  * Pause playback while preserving the timing anchor.
  * Flushes the audio buffer and resets playback-start state, but does NOT
  * call audio_timing_reset() so the anchor remains valid.  The pause start

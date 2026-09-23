@@ -701,6 +701,15 @@ void audio_receiver_flush(void) {
   receiver.discard_all_until_anchor = false;
   receiver.paused_rtp_valid = false;
   receiver.blocks_read_in_sequence = 1;
+  // The flushUntilSeq gate belongs to one flush on one stream.  Left armed,
+  // a new session (new sequence numbers) had every packet classified as old
+  // backlog and dropped at the socket: measured, a reconnect after a
+  // seek-then-disconnect played nothing at all.  seek_flush_until() re-arms
+  // it after calling this.
+  receiver.flush_until_active = false;
+  receiver.seek_trace.active = false;
+  receiver.seek_trace.reader_active = false;
+  receiver.deferred_trace.active = false;
 }
 
 void audio_receiver_note_sender_unresponsive(void) {
@@ -795,6 +804,46 @@ void audio_receiver_set_deferred_flush(uint32_t flush_until_ts) {
   receiver.timing.deferred_flush_pending = true;
   ESP_LOGI(TAG, "Deferred flush armed: flush_until_ts=%" PRIu32,
            flush_until_ts);
+}
+
+void audio_receiver_trace_deferred_flush(uint32_t from_seq, uint32_t from_ts,
+                                         uint32_t until_seq,
+                                         uint32_t until_ts) {
+  uint32_t oldest = 0;
+  uint32_t newest = 0;
+  bool have_oldest = audio_buffer_oldest_timestamp(&receiver.buffer, &oldest);
+  bool have_newest = audio_buffer_peek_newest_rtp(&receiver.buffer, &newest);
+  uint32_t playhead = receiver.timing.expected_rtp;
+  bool have_playhead = receiver.timing.expected_rtp_valid;
+  int frames = audio_buffer_get_frame_count(&receiver.buffer);
+  UBaseType_t queued =
+      receiver.buffered_ready_queue
+          ? uxQueueMessagesWaiting(receiver.buffered_ready_queue)
+          : 0;
+  ESP_LOGI(
+      TAG,
+      "Deferred flush context: seq [%" PRIu32 ", %" PRIu32 ") = %" PRIu32
+      " pkts, ts [%" PRIu32 ", %" PRIu32 ") = %ld ms; playing=%d "
+      "playhead=%s%" PRIu32 " (from-playhead=%ld ms); ring %d frames "
+      "rtp %" PRIu32 "..%" PRIu32 " (from-newest=%ld ms); last seq "
+      "received=%" PRIu32 "; %u packets queued",
+      from_seq, until_seq, (until_seq - from_seq) & 0x7FFFFF, from_ts, until_ts,
+      (long)((int64_t)(int32_t)(until_ts - from_ts) * 1000 / 44100),
+      receiver.timing.playing, have_playhead ? "" : "?", playhead,
+      have_playhead
+          ? (long)((int64_t)(int32_t)(from_ts - playhead) * 1000 / 44100)
+          : 0L,
+      frames, have_oldest ? oldest : 0, have_newest ? newest : 0,
+      have_newest ? (long)((int64_t)(int32_t)(from_ts - newest) * 1000 / 44100)
+                  : 0L,
+      receiver.deferred_last_seq, (unsigned)queued);
+  memset(&receiver.deferred_trace, 0, sizeof(receiver.deferred_trace));
+  receiver.deferred_trace.from_seq = from_seq & 0x7FFFFF;
+  receiver.deferred_trace.until_seq = until_seq & 0x7FFFFF;
+  receiver.deferred_trace.from_ts = from_ts;
+  receiver.deferred_trace.until_ts = until_ts;
+  receiver.deferred_trace.started_us = esp_timer_get_time();
+  receiver.deferred_trace.active = true;
 }
 
 void audio_receiver_pause(void) {

@@ -83,6 +83,10 @@
 #define BUFFERED_ANCHOR_WAIT_DEAF_US (1200 * 1000)
 #define BUFFERED_STALL_TIMEOUT_S     8
 #define BUFFERED_HOLD_POLL_MS        2
+// Old backlog after a flush is at most the sender's lead plus what is in
+// flight, a couple of thousand packets.  Anything further below
+// flushUntilSeq is a different sequence space, not backlog.
+#define BUFFERED_MAX_OLD_BACKLOG 16384
 
 // Below the RTSP task and the reader (both 5).  After a seek the sender
 // pushes its whole lead at once, and the decoder then turns ~900 packets into
@@ -454,15 +458,83 @@ static void buffered_audio_task(void *pvParameters) {
        * Mode 0 (drop every pre-anchor packet) is kept behind
        * /api/debug/seek_mode for comparison.
        */
+      state->deferred_last_seq = seq_no & 0x7FFFFF;
+      if (state->deferred_trace.active) {
+        int64_t now_us = state->buffered_last_packet_us;
+        uint32_t seq23 = seq_no & 0x7FFFFF;
+        int32_t d_from =
+            (int32_t)(((seq23 - state->deferred_trace.from_seq) & 0x7FFFFF)
+                      << 9) >>
+            9;
+        int32_t d_until =
+            (int32_t)(((seq23 - state->deferred_trace.until_seq) & 0x7FFFFF)
+                      << 9) >>
+            9;
+        if (d_from < 0) {
+          state->deferred_trace.below++;
+        } else if (d_until < 0) {
+          if (!state->deferred_trace.inside) {
+            state->deferred_trace.inside_min_rtp = timestamp;
+          }
+          state->deferred_trace.inside++;
+          state->deferred_trace.inside_max_rtp = timestamp;
+        } else {
+          if (!state->deferred_trace.above) {
+            state->deferred_trace.above_first_rtp = timestamp;
+            state->deferred_trace.above_first_seq = seq23;
+            state->deferred_trace.above_first_us = now_us;
+            ESP_LOGI(TAG,
+                     "Deferred: first packet >= untilSeq +%lld ms: seq=%" PRIu32
+                     " rtp=%" PRIu32 " (rtp-fromTS=%ld ms, rtp-untilTS=%ld "
+                     "ms); before it below=%" PRIu32 " inside=%" PRIu32
+                     " (rtp %" PRIu32 "..%" PRIu32 ")",
+                     (long long)((now_us - state->deferred_trace.started_us) /
+                                 1000LL),
+                     seq23, timestamp,
+                     (long)((int64_t)(int32_t)(timestamp -
+                                               state->deferred_trace.from_ts) *
+                            1000 / 44100),
+                     (long)((int64_t)(int32_t)(timestamp -
+                                               state->deferred_trace.until_ts) *
+                            1000 / 44100),
+                     state->deferred_trace.below, state->deferred_trace.inside,
+                     state->deferred_trace.inside_min_rtp,
+                     state->deferred_trace.inside_max_rtp);
+          }
+          state->deferred_trace.above++;
+        }
+        if (now_us - state->deferred_trace.last_report_us > 2000000) {
+          state->deferred_trace.last_report_us = now_us;
+          ESP_LOGI(
+              TAG,
+              "Deferred trace +%lld ms: below=%" PRIu32 " inside=%" PRIu32
+              " above=%" PRIu32 " last seq=%" PRIu32 " rtp=%" PRIu32,
+              (long long)((now_us - state->deferred_trace.started_us) / 1000LL),
+              state->deferred_trace.below, state->deferred_trace.inside,
+              state->deferred_trace.above, seq23, timestamp);
+        }
+        if (now_us - state->deferred_trace.started_us > 30000000) {
+          state->deferred_trace.active = false;
+        }
+      }
+
       bool awaiting_anchor = state->discard_all_until_anchor;
       bool is_old = false;
       if (state->flush_until_active) {
         // 23-bit sequence arithmetic, as the sender numbers packets.
         int32_t d =
             (int32_t)(((seq_no - state->flush_until_seq) & 0x7FFFFF) << 9) >> 9;
-        if (d < 0) {
+        if (d < 0 && d > -BUFFERED_MAX_OLD_BACKLOG) {
           is_old = true;
         } else {
+          if (d < 0) {
+            // Far below the flush point: not backlog but a different
+            // numbering (a new stream).  Never let the gate eat it.
+            ESP_LOGW(TAG,
+                     "flushUntilSeq gate: seq %" PRIu32 " is %ld below %" PRIu32
+                     ", not backlog; disarming",
+                     seq_no & 0x7FFFFF, (long)-d, state->flush_until_seq);
+          }
           state->flush_until_active = false;
         }
       }
@@ -731,6 +803,12 @@ static esp_err_t buffered_start(audio_stream_t *stream, uint16_t port) {
   state->buffered_held_packets = 0;
   state->buffered_generation_drops = 0;
   state->buffered_pre_anchor_drops = 0;
+  // Per-flush state from a previous session must not judge this one's
+  // sequence numbers (see audio_receiver_flush()).
+  state->flush_until_active = false;
+  state->seek_trace.active = false;
+  state->seek_trace.reader_active = false;
+  state->deferred_trace.active = false;
   stream->running = true;
 
   state->buffered_task_handle = NULL;
