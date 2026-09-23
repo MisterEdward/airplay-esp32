@@ -152,6 +152,28 @@ void audio_receiver_flush(void);
 void audio_receiver_seek_flush(void);
 
 /**
+ * Immediate FLUSHBUFFERED with flushUntilSeq/flushUntilTS: the seek flush,
+ * plus the sequence number where the new position starts, so the reader can
+ * tell old backlog from new audio without waiting for the anchor.
+ */
+void audio_receiver_seek_flush_until(uint32_t until_seq, uint32_t until_ts);
+
+/**
+ * Diagnostic: what to do with new-position packets that arrive before the
+ * anchor.  0 = drop them at the socket (b198d85), 1 = hold them.
+ */
+void audio_receiver_set_seek_hold_mode(int mode);
+int audio_receiver_get_seek_hold_mode(void);
+
+/**
+ * Diagnostic: audioBufferSize advertised in SETUP for buffered streams.  The
+ * sender runs this many bytes ahead; more than we can hold ends up queued
+ * in the sender's socket, where a seek has to wait for it to drain.
+ */
+void audio_receiver_set_advertised_buffer_bytes(uint32_t bytes);
+uint32_t audio_receiver_get_advertised_buffer_bytes(void);
+
+/**
  * The RTSP layer could not hand a reply to the sender: its receive window
  * stayed shut past the socket's send timeout.  A sender that will not read
  * our reply is not about to send SETRATEANCHORTIME either, so the decoder

@@ -17,9 +17,10 @@
  *
  * Seek semantics (see buffered_generation in audio_receiver_internal.h):
  * packets queued before FLUSHBUFFERED are dropped by generation; packets
- * that arrive between FLUSHBUFFERED and SETRATEANCHORTIME are HELD in the
- * queue and released to the RTP gates once the anchor is known.  v0.2.0
- * discarded them (discard_all_until_anchor), which cost ~0.5 s per seek.
+ * that arrive afterwards below flushUntilSeq are old backlog and dropped at
+ * the socket; packets from flushUntilSeq on are HELD in the queue and
+ * released to the RTP gates once the anchor is known.  v0.2.0 discarded
+ * them (discard_all_until_anchor), which cost ~0.5-1 s per seek.
  *
  * Stall handling: the sender normally streams continuously (it pre-buffers
  * seconds ahead).  If no bytes arrive for BUFFERED_STALL_TIMEOUT_S while we
@@ -247,7 +248,12 @@ static void buffered_decoder_task(void *pvParameters) {
                  slot->timestamp);
         break;
       }
-      vTaskDelay(pdMS_TO_TICKS(BUFFERED_HOLD_POLL_MS));
+      // At least one tick: at 100 Hz pdMS_TO_TICKS(2) is 0, and
+      // vTaskDelay(0) only yields to equal priority, so this loop spun the
+      // whole core at priority 6 for as long as the anchor took.
+      vTaskDelay(pdMS_TO_TICKS(BUFFERED_HOLD_POLL_MS) > 0
+                     ? pdMS_TO_TICKS(BUFFERED_HOLD_POLL_MS)
+                     : 1);
     }
     if (!stream->running || slot->generation != state->buffered_generation) {
       state->buffered_generation_drops++;
@@ -420,26 +426,110 @@ static void buffered_audio_task(void *pvParameters) {
           (packet[4] << 24) | (packet[5] << 16) | (packet[6] << 8) | packet[7];
 
       /*
-       * Waiting for the anchor: drop here, at the socket, before any slot is
-       * taken.  The backlog then drains at line rate, the sender finishes the
-       * burst it must finish before it will send SETRATEANCHORTIME, and it
-       * anchors within about a second.
+       * After an immediate FLUSHBUFFERED the sender names the first
+       * sequence number of the new position (flushUntilSeq).  Anything
+       * below it is old backlog still in flight: drop it here, at the
+       * socket, before a slot or any crypto is spent on it.  Everything from
+       * it on is the new position: hold it until the anchor says when it
+       * plays, so playback resumes exactly at the chosen point and the
+       * sender's lead is kept instead of restarted.
        *
-       * Holding these packets instead — the design this fork had — is what
-       * made seek unusable. The reader recycled a slot per free-queue poll,
-       * roughly fifty packets a second, while the sender kept producing
-       * forty-three a second of new audio: a net drain of about seven packets
-       * a second against a burst of twenty seconds. The backlog needed
-       * minutes, so the anchor arrived ten seconds late or not at all, and
-       * every mitigation aimed at the queue (384 -> 900 slots, immediate
-       * recycling, an eight-second deadline) treated a symptom.
+       * Holding was once blamed for anchors arriving ten seconds late.  The
+       * real cause, measured on 2026-09-23 by watching the sender's Send-Q,
+       * was ~130 KB of old audio queued in the SENDER's socket because we
+       * advertised more audioBufferSize than we can hold; the new position
+       * could only arrive once that drained through our TCP window.  With
+       * the advertised size within our capacity the sender's queue stays
+       * empty, and holding costs nothing: first sound 0.4-0.9 s after the
+       * flush, zero frames lost, alignment within tens of microseconds.
        *
-       * Holding bought roughly half a second at resume, because the held
-       * segment could start playing the moment the anchor landed. That is not
-       * worth it. The reference implementation drops, and its seek costs
-       * about a second of silence and always works.
+       * Mode 0 (drop every pre-anchor packet) is kept behind
+       * /api/debug/seek_mode for comparison.
        */
-      if (state->discard_all_until_anchor) {
+      bool awaiting_anchor = state->discard_all_until_anchor;
+      bool is_old = false;
+      if (state->flush_until_active) {
+        // 23-bit sequence arithmetic, as the sender numbers packets.
+        int32_t d =
+            (int32_t)(((seq_no - state->flush_until_seq) & 0x7FFFFF) << 9) >> 9;
+        if (d < 0) {
+          is_old = true;
+        } else {
+          state->flush_until_active = false;
+        }
+      }
+      if (state->seek_trace.reader_active) {
+        int64_t now_us = state->buffered_last_packet_us;
+        if (!state->seek_trace.first_packet_us) {
+          state->seek_trace.first_packet_us = now_us;
+        }
+        state->seek_trace.last_packet_us = now_us;
+        if (is_old) {
+          if (!state->seek_trace.old_packets) {
+            state->seek_trace.old_min_rtp = timestamp;
+            state->seek_trace.old_max_rtp = timestamp;
+          }
+          if ((int32_t)(timestamp - state->seek_trace.old_min_rtp) < 0) {
+            state->seek_trace.old_min_rtp = timestamp;
+          }
+          if ((int32_t)(timestamp - state->seek_trace.old_max_rtp) > 0) {
+            state->seek_trace.old_max_rtp = timestamp;
+          }
+          state->seek_trace.old_packets++;
+          state->seek_trace.old_bytes += (uint32_t)packet_len;
+          state->seek_trace.last_old_us = now_us;
+        } else {
+          if (!state->seek_trace.first_new_us) {
+            state->seek_trace.first_new_us = now_us;
+            state->seek_trace.first_new_seq = seq_no & 0x7FFFFF;
+            state->seek_trace.first_new_rtp = timestamp;
+            ESP_LOGI(TAG,
+                     "Seek: first new-position packet +%lld ms after flush "
+                     "(seq=%" PRIu32 " rtp=%" PRIu32 "); before it %" PRIu32
+                     " old packets, %" PRIu32 " B, rtp %" PRIu32 "..%" PRIu32
+                     " (%ld ms of audio), first +%lld ms, last +%lld ms",
+                     (long long)((now_us - state->buffered_flush_us) / 1000LL),
+                     seq_no & 0x7FFFFF, timestamp,
+                     state->seek_trace.old_packets, state->seek_trace.old_bytes,
+                     state->seek_trace.old_min_rtp,
+                     state->seek_trace.old_max_rtp,
+                     (long)((int64_t)(int32_t)(state->seek_trace.old_max_rtp -
+                                               state->seek_trace.old_min_rtp) *
+                            1000 / 44100),
+                     state->seek_trace.first_packet_us
+                         ? (long long)((state->seek_trace.first_packet_us -
+                                        state->buffered_flush_us) /
+                                       1000LL)
+                         : -1LL,
+                     state->seek_trace.last_old_us
+                         ? (long long)((state->seek_trace.last_old_us -
+                                        state->buffered_flush_us) /
+                                       1000LL)
+                         : -1LL);
+            state->seek_trace.reader_active = false;
+          }
+          state->seek_trace.new_packets++;
+          state->seek_trace.new_bytes += (uint32_t)packet_len;
+        }
+        if (now_us - state->seek_trace.last_report_us > 1000000 &&
+            now_us - state->buffered_flush_us > 900000) {
+          state->seek_trace.last_report_us = now_us;
+          ESP_LOGI(TAG,
+                   "Seek: waiting for new audio +%lld ms: old=%" PRIu32
+                   " new=%" PRIu32 " (%" PRIu32 " B) recycled=%" PRIu32,
+                   (long long)((now_us - state->buffered_flush_us) / 1000LL),
+                   state->seek_trace.old_packets, state->seek_trace.new_packets,
+                   state->seek_trace.new_bytes, state->seek_trace.recycled);
+        }
+      }
+
+      // Old backlog (below flushUntilSeq): drop at the socket, always.
+      if (is_old) {
+        state->buffered_pre_anchor_drops++;
+        state->stats.packets_dropped++;
+        continue;
+      }
+      if (awaiting_anchor && audio_receiver_get_seek_hold_mode() == 0) {
         state->buffered_pre_anchor_drops++;
         state->stats.packets_dropped++;
         continue;
@@ -456,6 +546,24 @@ static void buffered_audio_task(void *pvParameters) {
       bool wait_logged = false;
       bool got_slot = false;
       while (stream->running) {
+        // Holding for an anchor: never wait for a slot.  Take a free one or
+        // recycle the oldest held packet, both without blocking, so the
+        // socket drains at line rate.
+        if (awaiting_anchor && state->discard_all_until_anchor) {
+          if (xQueueReceive(state->buffered_free_queue, &index, 0) == pdTRUE) {
+            got_slot = true;
+            break;
+          }
+          uint16_t victim = 0;
+          if (xQueueReceive(state->buffered_ready_queue, &victim, 0) ==
+              pdTRUE) {
+            state->buffered_pre_anchor_drops++;
+            state->seek_trace.recycled++;
+            index = victim;
+            got_slot = true;
+            break;
+          }
+        }
         if (xQueueReceive(state->buffered_free_queue, &index,
                           pdMS_TO_TICKS(20)) == pdTRUE) {
           got_slot = true;

@@ -26,8 +26,8 @@
 #define AIRPLAY_FEATURES_LO 0x405C4A00
 #endif
 
-// Audio buffer size for buffered streams (type 103)
-#define AP2_AUDIO_BUFFER_SIZE (1 * 1024 * 1024)
+// audioBufferSize for buffered streams (type 103): see
+// audio_receiver_get_advertised_buffer_bytes().
 
 // Include for audio_format_t
 #include "audio_receiver.h"

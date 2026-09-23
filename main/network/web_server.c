@@ -25,6 +25,7 @@
 #endif
 #include "rtsp_server.h"
 #include "audio_output.h"
+#include "audio_receiver.h"
 #include "esp_app_desc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -944,7 +945,7 @@ static esp_err_t tasks_handler(httpd_req_t *req) {
   n = uxTaskGetSystemState(tab, n + 4, NULL);
   cJSON *root = cJSON_CreateObject();
   cJSON *arr = cJSON_CreateArray();
-  static const char *const states[] = {"running", "ready",   "blocked",
+  static const char *const states[] = {"running",   "ready",   "blocked",
                                        "suspended", "deleted", "invalid"};
   for (UBaseType_t i = 0; i < n; i++) {
     cJSON *t = cJSON_CreateObject();
@@ -1171,6 +1172,26 @@ static esp_err_t pc_config_post_handler(httpd_req_t *req) {
   free(json_str);
   cJSON_Delete(resp);
   return ESP_OK;
+}
+
+/* Diagnostic: GET /api/debug/seek_mode[?m=0|1] */
+static esp_err_t seek_mode_handler(httpd_req_t *req) {
+  char query[32] = {0};
+  char value[8] = {0};
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+      httpd_query_key_value(query, "m", value, sizeof(value)) == ESP_OK) {
+    audio_receiver_set_seek_hold_mode(atoi(value));
+  }
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+      httpd_query_key_value(query, "kb", value, sizeof(value)) == ESP_OK) {
+    audio_receiver_set_advertised_buffer_bytes((uint32_t)atoi(value) * 1024U);
+  }
+  char body[80];
+  snprintf(body, sizeof(body), "{\"seek_hold_mode\":%d,\"audio_buffer_kb\":%u}",
+           audio_receiver_get_seek_hold_mode(),
+           (unsigned)(audio_receiver_get_advertised_buffer_bytes() / 1024U));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t system_restart_handler(httpd_req_t *req) {
@@ -1469,6 +1490,7 @@ esp_err_t web_server_start(uint16_t port) {
 #ifdef CONFIG_DAC_TAS58XX
   config.max_uri_handlers += 2; // dual DAC role get/post
   config.max_uri_handlers += 2; // bi-amp get/post
+  config.max_uri_handlers += 1; // debug seek mode
 #endif
   config.max_resp_headers = 8;
   config.stack_size = 8192;
@@ -1587,10 +1609,14 @@ esp_err_t web_server_start(uint16_t port) {
                          .handler = ota_update_handler};
   httpd_register_uri_handler(s_server, &ota_uri);
 
-  httpd_uri_t tasks_uri = {.uri = "/api/tasks",
-                           .method = HTTP_GET,
-                           .handler = tasks_handler};
+  httpd_uri_t tasks_uri = {
+      .uri = "/api/tasks", .method = HTTP_GET, .handler = tasks_handler};
   httpd_register_uri_handler(s_server, &tasks_uri);
+
+  httpd_uri_t seek_mode_uri = {.uri = "/api/debug/seek_mode",
+                               .method = HTTP_GET,
+                               .handler = seek_mode_handler};
+  httpd_register_uri_handler(s_server, &seek_mode_uri);
 
   httpd_uri_t system_info_uri = {.uri = "/api/system/info",
                                  .method = HTTP_GET,

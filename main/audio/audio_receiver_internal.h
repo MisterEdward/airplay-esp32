@@ -63,6 +63,35 @@ typedef struct {
   int64_t buffered_last_packet_us;
   int64_t buffered_flush_us; // when the last seek flush happened
 
+  // Immediate FLUSHBUFFERED names the first sequence number of the new
+  // position (flushUntilSeq).  Everything below it is old backlog still in
+  // flight and can be dropped at the socket; everything from it on is the
+  // new position.  23-bit sequence space, as the sender numbers it.
+  uint32_t flush_until_seq;
+  uint32_t flush_until_ts;
+  volatile bool flush_until_active;
+
+  // Seek trace: what the sender sends between an immediate flush and the
+  // anchor.  Written by the reader, logged by the reader and the RTSP task.
+  struct {
+    bool active;        // until the anchor (RTSP task logs)
+    bool reader_active; // until the first new-position packet
+    uint32_t old_min_rtp;
+    uint32_t old_max_rtp;
+    uint32_t old_packets;
+    uint32_t new_packets;
+    uint32_t old_bytes;
+    uint32_t new_bytes;
+    uint32_t recycled;
+    int64_t first_packet_us;
+    int64_t last_old_us;
+    int64_t first_new_us;
+    int64_t last_packet_us;
+    uint32_t first_new_seq;
+    uint32_t first_new_rtp;
+    int64_t last_report_us;
+  } seek_trace;
+
   uint8_t *decrypt_buffer;
   size_t decrypt_buffer_size;
 

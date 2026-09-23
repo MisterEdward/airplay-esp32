@@ -488,9 +488,8 @@ int rtsp_dispatch(int socket, rtsp_conn_t *conn, const uint8_t *raw_request,
       // A slow reply is invisible to the sender except as a timeout: in a
       // multiroom group the phone drops a speaker that answers late.
       if (took_us > 200000) {
-        ESP_LOGW(TAG, "sid=%" PRIu32 " #%" PRIu32 " %s took %lld ms",
-                 conn->sid, conn->requests, req.method,
-                 (long long)(took_us / 1000));
+        ESP_LOGW(TAG, "sid=%" PRIu32 " #%" PRIu32 " %s took %lld ms", conn->sid,
+                 conn->requests, req.method, (long long)(took_us / 1000));
       } else if (strcmp(req.method, "SETRATEANCHORTIME") == 0 ||
                  strcmp(req.method, "FLUSHBUFFERED") == 0 ||
                  strcmp(req.method, "FLUSH") == 0) {
@@ -1369,7 +1368,7 @@ static void handle_setup(int socket, rtsp_conn_t *conn,
     uint8_t plist_body[256];
     size_t plist_len = bplist_build_stream_setup(
         plist_body, sizeof(plist_body), stream_type, response_data_port,
-        conn->control_port, AP2_AUDIO_BUFFER_SIZE);
+        conn->control_port, audio_receiver_get_advertised_buffer_bytes());
     if (plist_len == 0) {
       audio_receiver_stop();
       rtsp_send_response(socket, conn, 500, "Internal Error", req->cseq, NULL,
@@ -1799,6 +1798,8 @@ static void handle_flushbuffered(int socket, rtsp_conn_t *conn,
   //   buffer beyond flushUntilTS; audio_timing_read detects the boundary and
   //   triggers the bulk-flush at the right moment.
   bool has_deferred = false;
+  bool has_until = false;
+  int64_t immediate_until_seq = 0, immediate_until_ts = 0;
   if (body && body_len >= 8 && memcmp(body, "bplist00", 8) == 0) {
     int64_t flush_from_seq = 0, flush_from_ts = 0;
     int64_t flush_until_seq = 0, flush_until_ts = 0;
@@ -1821,14 +1822,25 @@ static void handle_flushbuffered(int socket, rtsp_conn_t *conn,
       // let it drain naturally to the boundary so the current track finishes.
       audio_receiver_set_deferred_flush((uint32_t)flush_until_ts);
     } else {
-      ESP_LOGI(TAG, "sid=%" PRIu32 " FLUSHBUFFERED immediate (no from/until)",
-               conn->sid);
+      has_until = got_until_seq && got_until_ts;
+      immediate_until_seq = flush_until_seq;
+      immediate_until_ts = flush_until_ts;
+      ESP_LOGI(TAG,
+               "sid=%" PRIu32 " FLUSHBUFFERED immediate untilSeq=%" PRId64
+               " untilTS=%" PRId64 "%s",
+               conn->sid, flush_until_seq, flush_until_ts,
+               has_until ? "" : " (no until)");
     }
   }
 
   if (!has_deferred) {
     // Immediate flush: discard everything and reset now.
-    audio_receiver_seek_flush();
+    if (has_until) {
+      audio_receiver_seek_flush_until((uint32_t)immediate_until_seq,
+                                      (uint32_t)immediate_until_ts);
+    } else {
+      audio_receiver_seek_flush();
+    }
     audio_output_flush();
     ESP_LOGI(TAG, "sid=%" PRIu32 " flush done, replying", conn->sid);
   }

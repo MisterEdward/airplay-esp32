@@ -25,6 +25,11 @@
 static const char *TAG = "audio_recv";
 
 static audio_receiver_state_t receiver = {0};
+// What to do with new-position packets that arrive before the anchor; see
+// audio_receiver_set_seek_hold_mode().  Holding is the default: dropping them
+// made every seek resume past the chosen point and restart the sender's lead
+// from nothing.
+static volatile int seek_hold_mode = 1;
 
 static void audio_receiver_reset_stats(void) {
   memset(&receiver.stats, 0, sizeof(receiver.stats));
@@ -343,6 +348,37 @@ void audio_receiver_set_anchor_time(uint64_t clock_id, uint64_t network_time_ns,
                (unsigned long)reference_rtp, (unsigned long)rtp_time,
                (long)delta, (float)delta / (float)sample_rate);
     }
+  }
+
+  // Seek trace: everything the sender pushed between the flush and this
+  // anchor, so a slow anchor can be told apart from a slow reader.
+  if (receiver.seek_trace.active && receiver.buffered_flush_us != 0) {
+    receiver.seek_trace.active = false;
+    int64_t now_us = esp_timer_get_time();
+    int64_t t0 = receiver.buffered_flush_us;
+    ESP_LOGI(
+        TAG,
+        "Seek trace: anchor +%lld ms after flush, mode=%d; old=%" PRIu32
+        " pkts/%" PRIu32 " B (last +%lld ms) new=%" PRIu32 " pkts/%" PRIu32
+        " B (first +%lld ms seq=%" PRIu32 " rtp=%" PRIu32
+        ", anchor-first=%ld) recycled=%" PRIu32 " last_pkt +%lld ms",
+        (long long)((now_us - t0) / 1000LL), seek_hold_mode,
+        receiver.seek_trace.old_packets, receiver.seek_trace.old_bytes,
+        receiver.seek_trace.last_old_us
+            ? (long long)((receiver.seek_trace.last_old_us - t0) / 1000LL)
+            : -1LL,
+        receiver.seek_trace.new_packets, receiver.seek_trace.new_bytes,
+        receiver.seek_trace.first_new_us
+            ? (long long)((receiver.seek_trace.first_new_us - t0) / 1000LL)
+            : -1LL,
+        receiver.seek_trace.first_new_seq, receiver.seek_trace.first_new_rtp,
+        receiver.seek_trace.first_new_us
+            ? (long)(int32_t)(rtp_time - receiver.seek_trace.first_new_rtp)
+            : 0L,
+        receiver.seek_trace.recycled,
+        receiver.seek_trace.last_packet_us
+            ? (long long)((receiver.seek_trace.last_packet_us - t0) / 1000LL)
+            : -1LL);
   }
 
   // NOW safe to clear the blanket gate — per-RTP gates are active.
@@ -702,7 +738,51 @@ void audio_receiver_seek_flush(void) {
   // Reject ALL incoming frames until the next anchor.  Prevents stale TCP
   // data from filling the buffer between FLUSHBUFFERED and SETRATEANCHORTIME,
   // which would cause a second flush and double the startup delay.
+  receiver.flush_until_active = false;
+  memset(&receiver.seek_trace, 0, sizeof(receiver.seek_trace));
+  receiver.seek_trace.active = true;
+  receiver.seek_trace.reader_active = true;
   receiver.discard_all_until_anchor = true;
+}
+
+void audio_receiver_seek_flush_until(uint32_t until_seq, uint32_t until_ts) {
+  audio_receiver_seek_flush();
+  receiver.flush_until_seq = until_seq & 0x7FFFFF;
+  receiver.flush_until_ts = until_ts;
+  receiver.flush_until_active = true;
+}
+
+void audio_receiver_set_seek_hold_mode(int mode) {
+  seek_hold_mode = mode;
+  ESP_LOGI(TAG, "Seek hold mode -> %d (%s)", mode,
+           mode ? "hold new-position packets until the anchor"
+                : "drop pre-anchor packets at the socket");
+}
+
+int audio_receiver_get_seek_hold_mode(void) {
+  return seek_hold_mode;
+}
+
+/*
+ * audioBufferSize advertised in SETUP.  The sender keeps this many bytes of
+ * lead in flight.  At 1 MiB (~32 s of AAC) it wanted more than we hold (7 s
+ * of PCM + the compressed queue), so the reader back-pressured for good and
+ * the surplus, ~130 KB, sat in the sender's socket; after a seek those ~4 s
+ * of old audio had to drain before the new position could arrive.  512 KiB
+ * (~16 s) fits, and the sender's queue measured empty.
+ */
+static uint32_t advertised_buffer_bytes = 512 * 1024;
+
+void audio_receiver_set_advertised_buffer_bytes(uint32_t bytes) {
+  advertised_buffer_bytes = bytes;
+  ESP_LOGI(TAG,
+           "Advertised audioBufferSize -> %" PRIu32
+           " bytes (applies from the next SETUP)",
+           bytes);
+}
+
+uint32_t audio_receiver_get_advertised_buffer_bytes(void) {
+  return advertised_buffer_bytes;
 }
 
 void audio_receiver_set_deferred_flush(uint32_t flush_until_ts) {
