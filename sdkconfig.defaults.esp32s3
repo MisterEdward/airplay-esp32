@@ -96,3 +96,16 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
+
+# TCP receive window for the AirPlay 2 buffered stream.  At lwIP's default
+# 5760 bytes (4 segments) the Mac/iPhone -> speaker pipe tops out near
+# 135 KB/s over WiFi, so after every seek the sender needs seconds to push
+# its ~16 s lead, and a second seek inside that window waits behind ~130 KB
+# of old audio still queued in the sender's socket (measured: 160-190 old
+# packets, ~4 s of audio, before the first packet of the new position).
+# 24 KiB lets that burst through in a fraction of a second.  The mailbox
+# must hold a full window of segments, and the extra dynamic RX buffers
+# cover a window held by lwIP while the reader is back-pressured.
+CONFIG_LWIP_TCP_WND_DEFAULT=24576
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=24
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=48

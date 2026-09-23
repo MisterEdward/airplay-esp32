@@ -1918,6 +1918,9 @@ static void handle_setrateanchortime(int socket, rtsp_conn_t *conn,
                                      const uint8_t *raw, size_t raw_len) {
   (void)raw;
   (void)raw_len;
+  int64_t t0_us = esp_timer_get_time();
+  int64_t t_anchor_us = t0_us;
+  int64_t t_state_us = t0_us;
 
   const uint8_t *body = req->body;
   size_t body_len = req->body_len;
@@ -1965,6 +1968,7 @@ static void handle_setrateanchortime(int socket, rtsp_conn_t *conn,
                                      (uint32_t)rtp_time);
     }
   }
+  t_anchor_us = esp_timer_get_time();
 
   if (rate == 0.0) {
     ESP_LOGI(TAG, "sid=%" PRIu32 " SETRATEANCHORTIME rate=0 -> PAUSE (fade)",
@@ -1985,8 +1989,18 @@ static void handle_setrateanchortime(int socket, rtsp_conn_t *conn,
     audio_receiver_set_playing(true);
     rtsp_events_emit(RTSP_EVENT_PLAYING, NULL);
   }
+  t_state_us = esp_timer_get_time();
 
   rtsp_send_ok(socket, conn, req->cseq);
+  int64_t t_end_us = esp_timer_get_time();
+  if (t_end_us - t0_us > 200000) {
+    ESP_LOGW(TAG,
+             "sid=%" PRIu32 " SETRATEANCHORTIME slow: anchor %lld ms, "
+             "state+events %lld ms, reply %lld ms",
+             conn->sid, (long long)((t_anchor_us - t0_us) / 1000LL),
+             (long long)((t_state_us - t_anchor_us) / 1000LL),
+             (long long)((t_end_us - t_state_us) / 1000LL));
+  }
 }
 
 static void handle_setpeers(int socket, rtsp_conn_t *conn,

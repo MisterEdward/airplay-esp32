@@ -4,7 +4,7 @@
  * Two tasks instead of v0.2.0's one:
  *
  *   reader  (prio 5)   recv() framed packets → PSRAM slot → ready queue
- *   decoder (prio 6)   ready queue → RTP gate → decrypt → AAC decode → PCM ring
+ *   decoder (prio 4)   ready queue → RTP gate → decrypt → AAC decode → PCM ring
  *
  * Why split: a single task that both blocks on the socket and spends ~2 ms
  * decoding a frame serialises the two.  During a seek the TCP backlog (up to
@@ -83,6 +83,14 @@
 #define BUFFERED_ANCHOR_WAIT_DEAF_US (1200 * 1000)
 #define BUFFERED_STALL_TIMEOUT_S     8
 #define BUFFERED_HOLD_POLL_MS        2
+
+// Below the RTSP task and the reader (both 5).  After a seek the sender
+// pushes its whole lead at once, and the decoder then turns ~900 packets into
+// PCM back to back (~2 s of CPU).  At priority 6 that starved the RTSP task:
+// measured, a SETRATEANCHORTIME handler stalled 1.35 s mid-log and the next
+// request waited behind it.  The decoder only has to beat real time (~9% of
+// a core) and the PCM ring holds 7 s, so it can live on idle time.
+#define BUFFERED_DECODER_PRIORITY 4
 
 #if CONFIG_FREERTOS_UNICORE
 #define BUFFERED_DECODER_CORE 0
@@ -728,8 +736,9 @@ static esp_err_t buffered_start(audio_stream_t *stream, uint16_t port) {
   state->buffered_task_handle = NULL;
   state->buffered_decoder_task_handle = NULL;
   BaseType_t decoder_ret = xTaskCreatePinnedToCore(
-      buffered_decoder_task, "buff_decode", AUDIO_DECODER_STACK_SIZE, stream, 6,
-      &state->buffered_decoder_task_handle, BUFFERED_DECODER_CORE);
+      buffered_decoder_task, "buff_decode", AUDIO_DECODER_STACK_SIZE, stream,
+      BUFFERED_DECODER_PRIORITY, &state->buffered_decoder_task_handle,
+      BUFFERED_DECODER_CORE);
   BaseType_t reader_ret =
       xTaskCreate(buffered_audio_task, "buff_audio", AUDIO_BUFFERED_STACK_SIZE,
                   stream, 5, &state->buffered_task_handle);

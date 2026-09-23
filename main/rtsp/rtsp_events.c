@@ -1,3 +1,5 @@
+#include "esp_timer.h"
+#include "esp_log.h"
 #include "rtsp_events.h"
 
 #include <inttypes.h>
@@ -47,7 +49,14 @@ void rtsp_events_unregister(rtsp_event_callback_t callback) {
 
 void rtsp_events_emit(rtsp_event_t event, const rtsp_event_data_t *data) {
   for (int i = 0; i < listener_count; i++) {
+    int64_t t0 = esp_timer_get_time();
     listeners[i].callback(event, data, listeners[i].user_data);
+    int64_t dt = esp_timer_get_time() - t0;
+    if (dt > 50000) {
+      ESP_LOGW("rtsp_events", "listener %d (%p) took %lld ms on event %d", i,
+               (void *)listeners[i].callback, (long long)(dt / 1000LL),
+               (int)event);
+    }
   }
 }
 
