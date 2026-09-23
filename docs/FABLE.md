@@ -1,8 +1,9 @@
 # Fable 5.1 — personal build for the Bedroom Speakers (ESP32-S3 + PCM5102A)
 
-Branch `fable-5.1`, forked from upstream `v0.2.0`.  Everything below is
-specific to this fork; the upstream README still applies for hardware,
-pairing and the generic web UI.
+Branch `main` (the only one), forked from upstream `v0.2.0`.  Everything
+below is specific to this fork; the upstream README still applies for
+hardware, pairing and the generic web UI.  **For the AirPlay 2 buffered
+path, the seek fix and how to test, read `docs/FABLE-GUIDE.md` first.**
 
 ## What changed versus v0.2.0
 

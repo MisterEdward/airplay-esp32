@@ -10,6 +10,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > must not contain spaces (PlatformIO).  Delete the generated
 > `sdkconfig.esp32s3` after editing any `sdkconfig.defaults*`.
 
+## This fork (Fable)
+
+This is Edward's personal fork ("Fable") running on one ESP32-S3 speaker at
+192.168.68.104.  **Read `docs/FABLE-GUIDE.md` before touching the audio
+path**: board facts, how the buffered AirPlay 2 path works, why the seek fix
+works, how to measure (Mac Music as scripted sender, `scripts/fable/`), and
+the known open bugs.  `main` is the only branch; older lines are
+`archive/*` tags.
+
 ## Project Overview
 
 ESP32 AirPlay 2 Receiver — firmware that turns ESP32/ESP32-S3/ESP32-P4 boards into AirPlay 2 speakers. Supports ALAC and AAC decoding, Bluetooth A2DP (ESP32 only), W5500 Ethernet (Esparagus Audio Brick), OLED/TFT displays, hardware buttons, and OTA updates.
