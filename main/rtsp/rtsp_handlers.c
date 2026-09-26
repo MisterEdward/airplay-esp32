@@ -82,6 +82,18 @@ bool rtsp_codec_configure(int64_t type_id, audio_format_t *fmt,
 
 // Event port task state
 #define EVENT_STACK_SIZE 3072
+// How often the event task re-checks its stop flag.  shutdown() of the
+// LISTENING socket evidently does not wake lwIP's select() on it, so once the
+// sender had closed the event connection the task only saw the flag at its
+// select timeout.  At 1 s that equalled the stop wait: most session ends
+// logged "Event port task did not exit within timeout" (37 times in one
+// reconnect storm), the RTSP client's cleanup sat out that second, and a
+// SETUP arriving within it waited too (stop, then wait again: up to 2 s).
+// A task that outlives the wait can also clear the NEXT task's handle when
+// it finally exits.
+#define EVENT_POLL_MS      100
+#define EVENT_STOP_POLL_MS 10
+#define EVENT_STOP_WAIT_MS 1000
 
 // Default playout latency for realtime (type 96) streams when SETUP does not
 // carry a usable latencyMin: 11025 samples = 250 ms at 44.1 kHz.  This is the
@@ -192,7 +204,7 @@ static void event_port_task(void *pvParameters) {
     FD_ZERO(&read_fds);
     FD_SET(listen_socket, &read_fds);
 
-    struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+    struct timeval tv = {.tv_sec = 0, .tv_usec = EVENT_POLL_MS * 1000};
     int ret = select(listen_socket + 1, &read_fds, NULL, NULL, &tv);
 
     if (event_task_should_stop) {
@@ -239,7 +251,7 @@ static void event_port_task(void *pvParameters) {
         fd_set cfds;
         FD_ZERO(&cfds);
         FD_SET(event_client_socket, &cfds);
-        struct timeval ctv = {.tv_sec = 1, .tv_usec = 0};
+        struct timeval ctv = {.tv_sec = 0, .tv_usec = EVENT_POLL_MS * 1000};
 
         ret = select(event_client_socket + 1, &cfds, NULL, NULL, &ctv);
         if (ret < 0) {
@@ -271,9 +283,14 @@ static void event_port_task(void *pvParameters) {
   vTaskDelete(NULL);
 }
 
-static bool event_port_wait_for_task_stopped(int timeout_ticks) {
-  while (event_task_handle != NULL && timeout_ticks-- > 0) {
-    vTaskDelay(pdMS_TO_TICKS(50));
+static bool event_port_wait_for_task_stopped(void) {
+  TickType_t step = pdMS_TO_TICKS(EVENT_STOP_POLL_MS);
+  if (step == 0) {
+    step = 1;
+  }
+  int64_t deadline_us = esp_timer_get_time() + EVENT_STOP_WAIT_MS * 1000LL;
+  while (event_task_handle != NULL && esp_timer_get_time() < deadline_us) {
+    vTaskDelay(step);
   }
   return event_task_handle == NULL;
 }
@@ -281,7 +298,7 @@ static bool event_port_wait_for_task_stopped(int timeout_ticks) {
 esp_err_t rtsp_start_event_port_task(int listen_socket) {
   if (event_task_handle != NULL) {
     rtsp_stop_event_port_task();
-    if (!event_port_wait_for_task_stopped(20)) {
+    if (!event_port_wait_for_task_stopped()) {
       ESP_LOGE(TAG, "Previous event port task did not stop");
       return ESP_ERR_INVALID_STATE;
     }
@@ -320,8 +337,12 @@ void rtsp_stop_event_port_task(void) {
     shutdown(event_listen_socket, SHUT_RDWR);
   }
 
-  if (!event_port_wait_for_task_stopped(20)) {
+  int64_t t0_us = esp_timer_get_time();
+  if (!event_port_wait_for_task_stopped()) {
     ESP_LOGW(TAG, "Event port task did not exit within timeout");
+  } else {
+    ESP_LOGD(TAG, "Event port task stopped in %lld ms",
+             (long long)((esp_timer_get_time() - t0_us) / 1000LL));
   }
 }
 
