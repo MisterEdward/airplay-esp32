@@ -424,6 +424,11 @@ static void playback_task(void *arg) {
       if (s_pause_pending || switch_pending) {
         audio_envelope_cut(&s_env);
       }
+    } else {
+      // Envelope shut and no media: nothing may be audible.  The block is
+      // not guaranteed to be zeros: scheduled silence goes through the
+      // resampler, whose filter can still hold music from before the fade.
+      memset(play, 0, frames * 2 * sizeof(int16_t));
     }
 
     // A pause fade that has completed: now really stop the receiver.  Doing
@@ -432,6 +437,11 @@ static void playback_task(void *arg) {
     if (s_pause_pending && audio_envelope_is_silent(&s_env)) {
       s_pause_pending = false;
       audio_receiver_pause();
+      // A flush resets the resampler, a pause did not: on resume its filter
+      // still held the last music samples and played them, unenveloped, in
+      // the first block of scheduled silence -- the click ~0.7 s before the
+      // music on every play after a plain pause.
+      audio_resample_reset();
       ESP_LOGD(TAG, "Pause: fade complete, receiver paused");
     }
 
