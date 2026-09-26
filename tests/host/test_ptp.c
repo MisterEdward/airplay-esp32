@@ -130,6 +130,80 @@ int main(void) {
   ptp_clock_set_master_clock_id(PHONE);
   assert(ptp_clock_is_locked_to(PHONE) && ptp.sample_count > 0);
 
+  // 8. Warm re-lock: a session ends (clear), the same clock comes back 4 s
+  //    later.  Locked on its first sample, on the kept offset.
+  reset();
+  ptp.tracked_clock_id = MAC;
+  feed(40, TRUE_OFFSET, wifi_delay);
+  assert(ptp.locked);
+  int64_t kept = ptp.filtered_offset_ns;
+  ptp_clock_clear();
+  ptp_clock_clear(); // clears come in runs; the second must not forget it
+  assert(!ptp.locked && ptp.retained.valid);
+  fake_now_us += 4000000;
+  ptp.tracked_clock_id = MAC; // first Sync of the new session
+  feed(1, TRUE_OFFSET, wifi_delay);
+  assert(ptp.locked && ptp.warm_relocks == 1);
+  assert(llabs(ptp.filtered_offset_ns - kept) < 1000000LL);
+  feed(40, TRUE_OFFSET, wifi_delay); // and it keeps tracking normally
+  assert(ptp.locked && llabs(ptp.filtered_offset_ns - kept) < 3000000LL);
+
+  // 9. Too old: cold lock (not locked after one sample, locked later).
+  reset();
+  ptp.tracked_clock_id = MAC;
+  feed(40, TRUE_OFFSET, wifi_delay);
+  ptp_clock_clear();
+  fake_now_us += (RETAIN_MAX_MS + 1000) * 1000LL;
+  ptp.tracked_clock_id = MAC;
+  feed(1, TRUE_OFFSET, wifi_delay);
+  assert(!ptp.locked && ptp.warm_relocks == 0 && !ptp.retained.valid);
+  feed(10, TRUE_OFFSET, wifi_delay);
+  assert(ptp.locked);
+
+  // 10. The master's timescale stepped while we were away (the phone does
+  //     this while paused): never re-lock on the old offset.
+  reset();
+  ptp.tracked_clock_id = PHONE;
+  feed(40, TRUE_OFFSET, wifi_delay);
+  ptp_clock_clear();
+  fake_now_us += 3000000;
+  ptp.tracked_clock_id = PHONE;
+  int64_t moved = TRUE_OFFSET - 3100000000LL;
+  feed(1, moved, wifi_delay);
+  assert(!ptp.locked && ptp.warm_relocks == 0);
+  feed(10, moved, wifi_delay);
+  assert(ptp.locked && llabs(ptp.filtered_offset_ns - moved) < 10000000LL);
+
+  // 11. A different clock after the clear: cold.
+  reset();
+  ptp.tracked_clock_id = MAC;
+  feed(40, TRUE_OFFSET, wifi_delay);
+  ptp_clock_clear();
+  fake_now_us += 2000000;
+  ptp.tracked_clock_id = PHONE;
+  feed(1, TRUE_OFFSET, wifi_delay);
+  assert(!ptp.locked && ptp.warm_relocks == 0);
+
+  // 12. Never locked before the clear: nothing kept.
+  reset();
+  ptp.tracked_clock_id = MAC;
+  feed(2, TRUE_OFFSET, wifi_delay);
+  assert(!ptp.locked);
+  ptp_clock_clear();
+  assert(!ptp.retained.valid);
+
+  // 13. A sample above the kept offset by more than drift can explain is
+  //     not a confirmation (a wrong kept offset must not be reused).
+  reset();
+  ptp.tracked_clock_id = MAC;
+  feed(40, TRUE_OFFSET, wifi_delay);
+  ptp_clock_clear();
+  fake_now_us += 1000000;
+  ptp.tracked_clock_id = MAC;
+  feed(1, TRUE_OFFSET + 20000000LL, wifi_delay);
+  assert(!ptp.locked && ptp.warm_relocks == 0);
+  printf("warm re-lock: ok\n");
+
   printf("host ptp tests passed\n");
   return 0;
 }

@@ -78,6 +78,23 @@ static const char *TAG = "ptp_clock";
 #define SMOOTH_NEG_CLAMP_NS    (-2500000LL) // clamp negative jitter at -2.5ms
 #define STARTUP_DURATION_MS 1000 // first second: aggressive positive tracking
 
+// Warm re-lock.  A cold lock needs ~6 Sync samples (~650 ms from the first
+// Sync of a session), and a sender that is already playing anchors sooner:
+// in the st3 reconnect storm (Mac switched away and back every 4 s) the
+// first frame was due 0-240 ms (median ~130) BEFORE the lock, so playout
+// waited for it and started by trimming/dropping up to 31 frames.  The
+// offset from the previous session of the same clock is better than a
+// fresh 6-sample estimate as long as it is recent: the two clocks drift
+// 10-40 ppm, <= 1.2 ms over RETAIN_MAX_MS, inside the +-1-2 ms spread of
+// cold-lock offsets across those sessions.  ptp_clock_clear() keeps it;
+// the first sample after the clear re-locks at once if it is from the same
+// clock and consistent with it (below by at most a network delay, above by
+// at most drift), otherwise the filter starts cold as before.  A master
+// timescale step (seconds) never passes that check.
+#define RETAIN_MAX_MS   30000
+#define RETAIN_BELOW_NS 50000000LL // = OUTLIER_THRESHOLD_NS: queueing delay
+#define RETAIN_ABOVE_NS 5000000LL  // drift over RETAIN_MAX_MS plus noise
+
 // Threshold above which we reset the PTP smoothing filter on resume.
 // E.g. at 50 ppm crystal accuracy, 30 s of pause accumulates ~1.5 ms of drift —
 // large enough to be audible in multi-room but well within the 50 ms outlier
@@ -153,6 +170,15 @@ static struct {
     uint64_t grandmaster;
     uint32_t seen_ms;
   } announced[4];
+
+  // Last locked offset, kept across ptp_clock_clear() for a warm re-lock.
+  struct {
+    bool valid;
+    uint64_t clock_id;  // source the samples came from
+    int64_t offset_ns;  // filtered offset at the clear
+    uint32_t sample_ms; // time of the last sample behind it
+  } retained;
+  uint32_t warm_relocks;
 } ptp = {0};
 
 static uint64_t parse_ptp_clock_id(const uint8_t *data);
@@ -179,6 +205,8 @@ static uint64_t source_relaying(uint64_t grandmaster) {
 }
 
 static void reset_filter(void) {
+  // A new master or a new timescale: the retained offset belongs to the old.
+  ptp.retained.valid = false;
   ptp.locked = false;
   ptp.lock_start_ms = 0;
   ptp.lock_candidate_start_ms = 0;
@@ -277,6 +305,44 @@ static inline int64_t get_local_time_ns(void) {
 // dampening negative jitter (smaller offset = longer delay) slowly, the
 // filter converges to the offset corresponding to the minimum network
 // delay — the best available approximation of the true clock offset.
+// First sample after ptp_clock_clear(): re-lock on the retained offset if
+// this sample confirms it (see RETAIN_MAX_MS).  One-shot either way.
+static bool warm_relock(int64_t new_offset_ns, uint32_t now_ms) {
+  if (!ptp.retained.valid) {
+    return false;
+  }
+  ptp.retained.valid = false;
+  uint32_t age_ms = now_ms - ptp.retained.sample_ms;
+  int64_t diff = new_offset_ns - ptp.retained.offset_ns;
+  if (ptp.tracked_clock_id != ptp.retained.clock_id || age_ms > RETAIN_MAX_MS ||
+      diff < -RETAIN_BELOW_NS || diff > RETAIN_ABOVE_NS) {
+    ESP_LOGI(TAG,
+             "PTP cold lock: kept offset of %016llx is %lu ms old, first "
+             "sample from %016llx is %+lld us from it",
+             (unsigned long long)ptp.retained.clock_id, (unsigned long)age_ms,
+             (unsigned long long)ptp.tracked_clock_id,
+             (long long)(diff / 1000LL));
+    return false;
+  }
+  // A sample above the kept offset had a shorter delay (or the clocks
+  // drifted up): take it, as the filter's positive branch would.
+  int64_t seed = diff > 0 ? new_offset_ns : ptp.retained.offset_ns;
+  ptp.filtered_offset_ns = seed;
+  ptp.previous_offset = seed;
+  ptp.previous_offset_time_ms = now_ms;
+  // Fast positive tracking for the first second, as after a cold start.
+  ptp.mastership_start_ms = now_ms;
+  ptp.locked = true;
+  ptp.lock_start_ms = now_ms;
+  ptp.lock_candidate_start_ms = 0;
+  ptp.warm_relocks++;
+  ESP_LOGI(TAG,
+           "LOCKED (warm): offset=%+lldns kept from %lu ms ago, first sample "
+           "%+lld us from it",
+           (long long)seed, (unsigned long)age_ms, (long long)(diff / 1000LL));
+  return true;
+}
+
 static void update_offset(int64_t new_offset_ns) {
   uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
   ptp.last_sync_ms = now_ms;
@@ -286,6 +352,10 @@ static void update_offset(int64_t new_offset_ns) {
   ptp.raw_offset_ns = new_offset_ns;
 
   int64_t smoothed_offset;
+
+  if (ptp.sample_count == 1 && warm_relock(new_offset_ns, now_ms)) {
+    return;
+  }
 
   if (ptp.previous_offset_time_ms == 0) {
     // First sample (or after reset): accept unconditionally
@@ -707,6 +777,15 @@ void ptp_clock_stop(void) {
 }
 
 void ptp_clock_clear(void) {
+  // Keep a locked offset for a warm re-lock (RETAIN_MAX_MS).  Clears come in
+  // runs (stream TEARDOWN, session TEARDOWN, connection cleanup); only a
+  // locked filter replaces what is kept.
+  if (ptp.locked && ptp.tracked_clock_id != 0 && ptp.last_sync_ms != 0) {
+    ptp.retained.valid = true;
+    ptp.retained.clock_id = ptp.tracked_clock_id;
+    ptp.retained.offset_ns = ptp.filtered_offset_ns;
+    ptp.retained.sample_ms = ptp.last_sync_ms;
+  }
   ptp.locked = false;
   ptp.lock_start_ms = 0;
   ptp.lock_candidate_start_ms = 0;
