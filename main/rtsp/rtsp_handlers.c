@@ -505,7 +505,29 @@ int rtsp_dispatch(int socket, rtsp_conn_t *conn, const uint8_t *raw_request,
     if (strcasecmp(req.method, h->method) == 0) {
       int64_t t0 = esp_timer_get_time();
       h->handler(socket, conn, &req, raw_request, raw_len);
-      int64_t took_us = esp_timer_get_time() - t0;
+      int64_t t_end = esp_timer_get_time();
+      int64_t took_us = t_end - t0;
+      // Session start, one line per request: where the time from connect to
+      // the first anchor goes.  "sender" is the gap between our previous
+      // reply and this request (network RTT plus the sender's own work), so
+      // it separates waiting on the sender from waiting on us.
+      if (!conn->start_traced) {
+        int64_t prev =
+            conn->last_reply_us ? conn->last_reply_us : conn->connected_us;
+        ESP_LOGI(TAG,
+                 "sid=%" PRIu32 " start #%" PRIu32 " %s %s at +%lld ms: "
+                 "sender %lld ms, handled in %lld ms",
+                 conn->sid, conn->requests, req.method, req.path,
+                 (long long)((t0 - conn->connected_us) / 1000LL),
+                 (long long)((t0 - prev) / 1000LL),
+                 (long long)(took_us / 1000LL));
+        if ((strcmp(req.method, "SETRATEANCHORTIME") == 0 &&
+             !conn->stream_paused) ||
+            conn->requests >= 40) {
+          conn->start_traced = true;
+        }
+      }
+      conn->last_reply_us = t_end;
       // A slow reply is invisible to the sender except as a timeout: in a
       // multiroom group the phone drops a speaker that answers late.
       if (took_us > 200000) {
