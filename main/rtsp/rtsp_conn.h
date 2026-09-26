@@ -35,6 +35,11 @@ struct rtsp_conn {
   uint32_t sid;
   int64_t connected_us;
   uint32_t requests;
+  // Session-start trace: every request is logged at INFO until the first
+  // anchor that starts playback, with the sender's gap since our previous
+  // reply and our handling time.
+  int64_t last_reply_us;
+  bool start_traced;
 
   // Audio streaming state
   bool stream_active;
