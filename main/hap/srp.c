@@ -176,8 +176,12 @@ esp_err_t srp_start(srp_session_t *session, const char *username,
     mbedtls_mpi_read_binary(&x, x_hash, 64);
   }
 
-  // v = g^x mod N
+  // v = g^x mod N.  Kept in the session: srp_verify_client needs it again,
+  // and recomputing it there cost a modexp and assumed the transient PIN.
   if (mbedtls_mpi_exp_mod(&v, &g, &x, &N, NULL) != 0) {
+    goto cleanup;
+  }
+  if (mpi_to_bytes_padded(&v, session->verifier, SRP_PRIME_BYTES) != 0) {
     goto cleanup;
   }
 
@@ -251,7 +255,7 @@ esp_err_t srp_verify_client(srp_session_t *session,
   memcpy(session->client_public_key + (SRP_PRIME_BYTES - client_pk_len),
          client_public_key, client_pk_len);
 
-  mbedtls_mpi N, g, A, B, b, u, S, k, v, x, tmp, tmp2;
+  mbedtls_mpi N, g, A, B, b, u, S, v, tmp, tmp2;
   mbedtls_mpi_init(&N);
   mbedtls_mpi_init(&g);
   mbedtls_mpi_init(&A);
@@ -259,9 +263,7 @@ esp_err_t srp_verify_client(srp_session_t *session,
   mbedtls_mpi_init(&b);
   mbedtls_mpi_init(&u);
   mbedtls_mpi_init(&S);
-  mbedtls_mpi_init(&k);
   mbedtls_mpi_init(&v);
-  mbedtls_mpi_init(&x);
   mbedtls_mpi_init(&tmp);
   mbedtls_mpi_init(&tmp2);
 
@@ -296,41 +298,8 @@ esp_err_t srp_verify_client(srp_session_t *session,
     mbedtls_mpi_read_binary(&u, u_hash, 64);
   }
 
-  // Recompute k = H(N || pad(g))
-  {
-    uint8_t hash_input[SRP_PRIME_BYTES * 2];
-    memcpy(hash_input, srp_N, SRP_PRIME_BYTES);
-    memset(hash_input + SRP_PRIME_BYTES, 0, SRP_PRIME_BYTES);
-    hash_input[SRP_PRIME_BYTES * 2 - 1] = SRP_GENERATOR;
-    uint8_t k_hash[64];
-    crypto_hash_sha512(k_hash, hash_input, sizeof(hash_input));
-    mbedtls_mpi_read_binary(&k, k_hash, 64);
-    mbedtls_mpi_mod_mpi(&k, &k, &N);
-  }
-
-  // Recompute x = H(s || H(I || ":" || P)) for "Pair-Setup:3939"
-  {
-    uint8_t inner_hash[64];
-    crypto_hash_sha512_state state;
-    crypto_hash_sha512_init(&state);
-    crypto_hash_sha512_update(&state, (const uint8_t *)"Pair-Setup", 10);
-    crypto_hash_sha512_update(&state, (const uint8_t *)":", 1);
-    crypto_hash_sha512_update(&state, (const uint8_t *)"3939", 4);
-    crypto_hash_sha512_final(&state, inner_hash);
-
-    uint8_t x_hash[64];
-    crypto_hash_sha512_init(&state);
-    crypto_hash_sha512_update(&state, session->salt, SRP_SALT_BYTES);
-    crypto_hash_sha512_update(&state, inner_hash, 64);
-    crypto_hash_sha512_final(&state, x_hash);
-
-    mbedtls_mpi_read_binary(&x, x_hash, 64);
-  }
-
-  // v = g^x mod N
-  if (mbedtls_mpi_exp_mod(&v, &g, &x, &N, NULL) != 0) {
-    goto cleanup;
-  }
+  // v was computed by srp_start with the session's own password
+  mbedtls_mpi_read_binary(&v, session->verifier, SRP_PRIME_BYTES);
 
   // S = (A * v^u)^b mod N
   if (mbedtls_mpi_exp_mod(&tmp, &v, &u, &N, NULL) != 0) {
@@ -418,9 +387,7 @@ cleanup:
   mbedtls_mpi_free(&b);
   mbedtls_mpi_free(&u);
   mbedtls_mpi_free(&S);
-  mbedtls_mpi_free(&k);
   mbedtls_mpi_free(&v);
-  mbedtls_mpi_free(&x);
   mbedtls_mpi_free(&tmp);
   mbedtls_mpi_free(&tmp2);
 

@@ -22,6 +22,7 @@ typedef struct srp_session {
   uint8_t salt[SRP_SALT_BYTES];
   uint8_t server_public_key[SRP_PRIME_BYTES]; // B
   uint8_t server_secret[SRP_PRIME_BYTES];     // b
+  uint8_t verifier[SRP_PRIME_BYTES];          // v = g^x, from srp_start
   uint8_t client_public_key[SRP_PRIME_BYTES]; // A
   uint8_t session_key[SRP_SESSION_KEY_BYTES]; // K
   size_t session_key_len;

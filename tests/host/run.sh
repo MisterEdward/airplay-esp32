@@ -19,3 +19,15 @@ fi
 $CC $FLAGS -Wno-unused-function -Wno-unused-parameter -I tests/host/fakes_ptp -I main/network \
   tests/host/test_ptp.c -o "$out/test_ptp"
 "$out/test_ptp"
+# SRP (pair-setup) against mbedtls' bignum from the ESP-IDF tree.
+MBEDTLS_DIR="${MBEDTLS_DIR:-$HOME/.platformio/packages/framework-espidf/components/mbedtls/mbedtls}"
+if [ -d "$MBEDTLS_DIR/library" ]; then
+  L="$MBEDTLS_DIR/library"
+  $CC $FLAGS -Wno-unused-function -I tests/host/fakes_hap -I main/hap \
+    -I "$MBEDTLS_DIR/include" -I "$L" tests/host/test_srp.c \
+    "$L/bignum.c" "$L/bignum_core.c" "$L/constant_time.c" \
+    "$L/platform_util.c" "$L/platform.c" -o "$out/test_srp"
+  "$out/test_srp"
+else
+  echo "srp: skipped (no mbedtls at $MBEDTLS_DIR)"
+fi
