@@ -2,6 +2,7 @@
 
 #include "hap.h"
 #include "hap_internal.h"
+#include "hap_pairings.h"
 #include "tlv8.h"
 
 #include "esp_log.h"
@@ -38,12 +39,9 @@ esp_err_t hap_pair_verify_m1(hap_session_t *session, const uint8_t *input,
     return ESP_FAIL;
   }
 
-  uint8_t mac[6];
-  esp_read_mac(mac, ESP_MAC_WIFI_STA);
   char device_id[18];
-  snprintf(device_id, sizeof(device_id), "%02X:%02X:%02X:%02X:%02X:%02X",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  size_t device_id_len = 17;
+  hap_get_pairing_id(device_id, sizeof(device_id));
+  size_t device_id_len = strlen(device_id);
 
   uint8_t accessory_info[128];
   size_t accessory_info_len = 0;
@@ -128,6 +126,46 @@ esp_err_t hap_pair_verify_m3(hap_session_t *session, const uint8_t *input,
     tlv8_encode_byte(&enc, TLV_TYPE_ERROR, TLV_ERROR_AUTHENTICATION);
     *output_len = tlv8_encoder_size(&enc);
     return ESP_ERR_INVALID_STATE;
+  }
+
+  // A controller that paired with us (pair-setup M5) must prove it holds its
+  // long-term key.  Unknown controllers are still accepted, as before: the
+  // transient PIN is public, so refusing them would add no security, only a
+  // way to lock a sender out.
+  size_t id_len = 0;
+  size_t sig_len = 0;
+  const uint8_t *ctrl_id =
+      tlv8_find(decrypted, (size_t)decrypted_len, TLV_TYPE_IDENTIFIER, &id_len);
+  const uint8_t *ctrl_sig =
+      tlv8_find(decrypted, (size_t)decrypted_len, TLV_TYPE_SIGNATURE, &sig_len);
+  uint8_t ltpk[32];
+  if (ctrl_id && id_len <= HAP_PAIRING_ID_MAX &&
+      hap_pairings_find(ctrl_id, id_len, ltpk)) {
+    // iOSDeviceInfo = iOSDeviceEphPK || iOSDevicePairingID || AccessoryEphPK
+    uint8_t info[HAP_X25519_KEY_SIZE * 2 + HAP_PAIRING_ID_MAX];
+    size_t info_len = 0;
+    memcpy(info, session->client_public_key, HAP_X25519_KEY_SIZE);
+    info_len += HAP_X25519_KEY_SIZE;
+    memcpy(info + info_len, ctrl_id, id_len);
+    info_len += id_len;
+    memcpy(info + info_len, session->session_public_key, HAP_X25519_KEY_SIZE);
+    info_len += HAP_X25519_KEY_SIZE;
+    if (!ctrl_sig || sig_len != crypto_sign_BYTES ||
+        crypto_sign_verify_detached(ctrl_sig, info, info_len, ltpk) != 0) {
+      ESP_LOGE(TAG, "M3: paired controller %.*s failed its signature",
+               (int)id_len, (const char *)ctrl_id);
+      tlv8_encoder_t enc;
+      tlv8_encoder_init(&enc, output, output_capacity);
+      tlv8_encode_byte(&enc, TLV_TYPE_STATE, PAIR_VERIFY_STATE_M4);
+      tlv8_encode_byte(&enc, TLV_TYPE_ERROR, TLV_ERROR_AUTHENTICATION);
+      *output_len = tlv8_encoder_size(&enc);
+      return ESP_ERR_INVALID_STATE;
+    }
+    ESP_LOGI(TAG, "M3: paired controller %.*s verified", (int)id_len,
+             (const char *)ctrl_id);
+  } else if (ctrl_id) {
+    ESP_LOGI(TAG, "M3: controller %.*s not paired with us; accepted",
+             (int)(id_len > 64 ? 64 : id_len), (const char *)ctrl_id);
   }
 
   hap_hkdf_sha512((uint8_t *)"Control-Salt", 12, session->shared_secret,

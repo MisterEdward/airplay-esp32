@@ -29,6 +29,7 @@ set( SRC_FILES
     "hap/hap.c"
     "hap/hap_pair_verify.c"
     "hap/hap_pair_setup.c"
+    "hap/hap_pairings.c"
     "hap/hap_crypto.c"
     "hap/srp.c"
     "hap/srp_pool.c"

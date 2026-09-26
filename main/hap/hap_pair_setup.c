@@ -2,6 +2,7 @@
 
 #include "hap.h"
 #include "hap_internal.h"
+#include "hap_pairings.h"
 #include "srp.h"
 #include "tlv8.h"
 
@@ -154,22 +155,33 @@ esp_err_t hap_pair_setup_m3(hap_session_t *session, const uint8_t *input,
   return ESP_OK;
 }
 
+// M6 failure reply: state M6 and an error code, in the clear.
+static esp_err_t m6_error(uint8_t *output, size_t output_capacity,
+                          size_t *output_len, uint8_t code) {
+  tlv8_encoder_t enc;
+  tlv8_encoder_init(&enc, output, output_capacity);
+  tlv8_encode_byte(&enc, TLV_TYPE_STATE, PAIR_SETUP_M6);
+  tlv8_encode_byte(&enc, TLV_TYPE_ERROR, code);
+  *output_len = tlv8_encoder_size(&enc);
+  return ESP_OK;
+}
+
+// Non-transient pair-setup, exchange M5/M6 (HAP pair-setup steps 5-6): check
+// the controller's signature, remember its long-term key, and answer with
+// ours, signed, so the controller can pair-verify on later connects instead
+// of running SRP again.  Transient pairing stops at M4 and never gets here.
 esp_err_t hap_pair_setup_m5(hap_session_t *session, const uint8_t *input,
                             size_t input_len, uint8_t *output,
                             size_t output_capacity, size_t *output_len) {
-  (void)output;
-  (void)output_capacity;
-  (void)output_len;
-
-  if (!session->srp) {
-    ESP_LOGE(TAG, "No SRP session for M5");
+  if (!session->srp || session->pair_setup_state != PAIR_SETUP_M4 ||
+      session->pair_setup_transient) {
+    ESP_LOGE(TAG, "M5 without a completed non-transient M4");
     return ESP_ERR_INVALID_STATE;
   }
 
   size_t state_len = 0;
   const uint8_t *state =
       tlv8_find(input, input_len, TLV_TYPE_STATE, &state_len);
-
   if (!state || state_len != 1 || state[0] != PAIR_SETUP_M5) {
     ESP_LOGE(TAG, "Invalid pair-setup M5 state");
     return ESP_ERR_INVALID_ARG;
@@ -178,9 +190,11 @@ esp_err_t hap_pair_setup_m5(hap_session_t *session, const uint8_t *input,
   uint8_t encrypted[512];
   size_t encrypted_len = 0;
   if (!tlv8_decode_concat(input, input_len, TLV_TYPE_ENCRYPTED_DATA, encrypted,
-                          sizeof(encrypted), &encrypted_len)) {
+                          sizeof(encrypted), &encrypted_len) ||
+      encrypted_len < crypto_aead_chacha20poly1305_ietf_ABYTES) {
     ESP_LOGE(TAG, "Missing encrypted data in M5");
-    return ESP_ERR_INVALID_ARG;
+    return m6_error(output, output_capacity, output_len,
+                    TLV_ERROR_AUTHENTICATION);
   }
 
   size_t srp_key_len = 0;
@@ -191,23 +205,101 @@ esp_err_t hap_pair_setup_m5(hap_session_t *session, const uint8_t *input,
   }
 
   uint8_t setup_key[32];
-  hap_hkdf_sha512((uint8_t *)"Pair-Setup-Encrypt-Salt", 23, srp_key,
-                  srp_key_len, (uint8_t *)"Pair-Setup-Encrypt-Info", 23,
-                  setup_key, 32);
+  hap_hkdf_sha512((const uint8_t *)"Pair-Setup-Encrypt-Salt", 23, srp_key,
+                  srp_key_len, (const uint8_t *)"Pair-Setup-Encrypt-Info", 23,
+                  setup_key, sizeof(setup_key));
 
-  uint8_t nonce[12] = {0, 0, 0, 0, 'P', 'S', '-', 'M', 's', 'g', '0', '5'};
-  uint8_t decrypted[512];
-  unsigned long long decrypted_len = 0;
-
-  if (crypto_aead_chacha20poly1305_ietf_decrypt(decrypted, &decrypted_len, NULL,
-                                                encrypted, encrypted_len, NULL,
-                                                0, nonce, setup_key) != 0) {
+  uint8_t nonce5[12] = {0, 0, 0, 0, 'P', 'S', '-', 'M', 's', 'g', '0', '5'};
+  uint8_t sub[512];
+  unsigned long long sub_len = 0;
+  if (crypto_aead_chacha20poly1305_ietf_decrypt(sub, &sub_len, NULL, encrypted,
+                                                encrypted_len, NULL, 0, nonce5,
+                                                setup_key) != 0) {
     ESP_LOGE(TAG, "M5 decryption failed");
-    return ESP_FAIL;
+    return m6_error(output, output_capacity, output_len,
+                    TLV_ERROR_AUTHENTICATION);
   }
 
-  session->encrypt_nonce = 0;
-  session->decrypt_nonce = 0;
+  size_t id_len = 0;
+  size_t ltpk_len = 0;
+  size_t sig_len = 0;
+  const uint8_t *ctrl_id =
+      tlv8_find(sub, (size_t)sub_len, TLV_TYPE_IDENTIFIER, &id_len);
+  const uint8_t *ctrl_ltpk =
+      tlv8_find(sub, (size_t)sub_len, TLV_TYPE_PUBLIC_KEY, &ltpk_len);
+  const uint8_t *ctrl_sig =
+      tlv8_find(sub, (size_t)sub_len, TLV_TYPE_SIGNATURE, &sig_len);
+  if (!ctrl_id || id_len == 0 || id_len > HAP_PAIRING_ID_MAX || !ctrl_ltpk ||
+      ltpk_len != crypto_sign_PUBLICKEYBYTES || !ctrl_sig ||
+      sig_len != crypto_sign_BYTES) {
+    ESP_LOGE(TAG, "M5 sub-TLV incomplete (id=%zu pk=%zu sig=%zu)", id_len,
+             ltpk_len, sig_len);
+    return m6_error(output, output_capacity, output_len,
+                    TLV_ERROR_AUTHENTICATION);
+  }
 
+  // iOSDeviceInfo = iOSDeviceX || iOSDevicePairingID || iOSDeviceLTPK
+  uint8_t info[32 + HAP_PAIRING_ID_MAX + 32];
+  size_t info_len = 32;
+  hap_hkdf_sha512((const uint8_t *)"Pair-Setup-Controller-Sign-Salt", 31,
+                  srp_key, srp_key_len,
+                  (const uint8_t *)"Pair-Setup-Controller-Sign-Info", 31, info,
+                  32);
+  memcpy(info + info_len, ctrl_id, id_len);
+  info_len += id_len;
+  memcpy(info + info_len, ctrl_ltpk, 32);
+  info_len += 32;
+  if (crypto_sign_verify_detached(ctrl_sig, info, info_len, ctrl_ltpk) != 0) {
+    ESP_LOGE(TAG, "M5 controller signature invalid");
+    return m6_error(output, output_capacity, output_len,
+                    TLV_ERROR_AUTHENTICATION);
+  }
+
+  if (hap_pairings_add(ctrl_id, id_len, ctrl_ltpk) != ESP_OK) {
+    return m6_error(output, output_capacity, output_len, TLV_ERROR_MAX_PEERS);
+  }
+
+  // AccessoryInfo = AccessoryX || AccessoryPairingID || AccessoryLTPK.  The
+  // pairing ID is the one pair-verify M2 signs with.
+  char acc_id[18];
+  hap_get_pairing_id(acc_id, sizeof(acc_id));
+  size_t acc_id_len = strlen(acc_id);
+  info_len = 32;
+  hap_hkdf_sha512((const uint8_t *)"Pair-Setup-Accessory-Sign-Salt", 30,
+                  srp_key, srp_key_len,
+                  (const uint8_t *)"Pair-Setup-Accessory-Sign-Info", 30, info,
+                  32);
+  memcpy(info + info_len, acc_id, acc_id_len);
+  info_len += acc_id_len;
+  memcpy(info + info_len, session->device_public_key, 32);
+  info_len += 32;
+  uint8_t acc_sig[crypto_sign_BYTES];
+  crypto_sign_detached(acc_sig, NULL, info, info_len,
+                       session->device_secret_key);
+
+  uint8_t plain[256];
+  tlv8_encoder_t sub_enc;
+  tlv8_encoder_init(&sub_enc, plain, sizeof(plain));
+  tlv8_encode(&sub_enc, TLV_TYPE_IDENTIFIER, (const uint8_t *)acc_id,
+              acc_id_len);
+  tlv8_encode(&sub_enc, TLV_TYPE_PUBLIC_KEY, session->device_public_key, 32);
+  tlv8_encode(&sub_enc, TLV_TYPE_SIGNATURE, acc_sig, sizeof(acc_sig));
+
+  uint8_t nonce6[12] = {0, 0, 0, 0, 'P', 'S', '-', 'M', 's', 'g', '0', '6'};
+  uint8_t sealed[256 + crypto_aead_chacha20poly1305_ietf_ABYTES];
+  unsigned long long sealed_len = 0;
+  crypto_aead_chacha20poly1305_ietf_encrypt(sealed, &sealed_len, plain,
+                                            tlv8_encoder_size(&sub_enc), NULL,
+                                            0, NULL, nonce6, setup_key);
+  sodium_memzero(setup_key, sizeof(setup_key));
+
+  tlv8_encoder_t enc;
+  tlv8_encoder_init(&enc, output, output_capacity);
+  tlv8_encode_byte(&enc, TLV_TYPE_STATE, PAIR_SETUP_M6);
+  tlv8_encode(&enc, TLV_TYPE_ENCRYPTED_DATA, sealed, (size_t)sealed_len);
+  *output_len = tlv8_encoder_size(&enc);
+  session->pair_setup_state = PAIR_SETUP_M6;
+  ESP_LOGI(TAG, "non-transient pair-setup complete for %.*s", (int)id_len,
+           (const char *)ctrl_id);
   return ESP_OK;
 }

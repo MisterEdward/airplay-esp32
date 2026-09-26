@@ -67,6 +67,12 @@ esp_err_t hap_init(void);
 const uint8_t *hap_get_public_key(void);
 
 /**
+ * Accessory pairing identifier ("AA:BB:CC:DD:EE:FF", the Wi-Fi STA MAC, same
+ * as the advertised deviceid).  Signed in pair-verify M2 and pair-setup M6.
+ */
+void hap_get_pairing_id(char *out, size_t out_len);
+
+/**
  * Create a new HAP session for a client connection
  */
 hap_session_t *hap_session_create(void);

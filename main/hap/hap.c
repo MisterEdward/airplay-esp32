@@ -2,7 +2,10 @@
 
 #include "hap.h"
 
+#include <stdio.h>
+
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sodium.h"
@@ -73,6 +76,13 @@ esp_err_t hap_init(void) {
 
 const uint8_t *hap_get_public_key(void) {
   return g_device_public_key;
+}
+
+void hap_get_pairing_id(char *out, size_t out_len) {
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  snprintf(out, out_len, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1],
+           mac[2], mac[3], mac[4], mac[5]);
 }
 
 hap_session_t *hap_session_create(void) {
