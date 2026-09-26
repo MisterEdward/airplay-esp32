@@ -67,7 +67,8 @@
 // SETRATEANCHORTIME, the queue fills, the reader stops taking from TCP, and
 // both sides wait forever — seek goes silent until the session is torn down.
 // 900 slots is 20.9 s, which covers the sender's full lead.  Costs 1.86 MB
-// of PSRAM, of which there is plenty (4.4 MB free with the stream running).
+// of PSRAM, of which there is plenty (4.4 MB free with the stream running);
+// allocated by the first stream and kept (see buffered_init_queues).
 #define BUFFERED_SLOT_COUNT 900
 // Frames in the PCM ring below which a silent data socket really is a stall
 // rather than the sender simply running ahead.  ~3 s at 352-frame blocks.
@@ -807,25 +808,46 @@ static void buffered_free_queues(audio_receiver_state_t *state) {
   }
 }
 
+/*
+ * The pool and its queues are allocated on the first stream and then kept
+ * for the life of the receiver; each start only empties the queues and
+ * hands every slot back.  Allocating per stream cost ~60 ms inside the
+ * stream SETUP handler (measured: "SETUP: Stream setup" to this log line),
+ * almost all of it calloc() zeroing 1.86 MB of PSRAM, and the sender waits
+ * for that reply before it connects the data socket.  Nothing reads a slot
+ * before the reader has filled it, so the memory need not be zeroed either.
+ */
 static esp_err_t buffered_init_queues(audio_receiver_state_t *state) {
-  buffered_free_queues(state);
-  state->buffered_packet_pool =
-      heap_caps_calloc(BUFFERED_SLOT_COUNT, sizeof(buffered_slot_t),
-                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  state->buffered_free_queue =
-      xQueueCreate(BUFFERED_SLOT_COUNT, sizeof(uint16_t));
-  state->buffered_ready_queue =
-      xQueueCreate(BUFFERED_SLOT_COUNT, sizeof(uint16_t));
+  int64_t t0_us = esp_timer_get_time();
+  bool fresh = false;
   if (!state->buffered_packet_pool || !state->buffered_free_queue ||
       !state->buffered_ready_queue) {
     buffered_free_queues(state);
-    return ESP_ERR_NO_MEM;
+    state->buffered_packet_pool =
+        heap_caps_malloc((size_t)BUFFERED_SLOT_COUNT * sizeof(buffered_slot_t),
+                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    state->buffered_free_queue =
+        xQueueCreate(BUFFERED_SLOT_COUNT, sizeof(uint16_t));
+    state->buffered_ready_queue =
+        xQueueCreate(BUFFERED_SLOT_COUNT, sizeof(uint16_t));
+    if (!state->buffered_packet_pool || !state->buffered_free_queue ||
+        !state->buffered_ready_queue) {
+      buffered_free_queues(state);
+      return ESP_ERR_NO_MEM;
+    }
+    fresh = true;
   }
+  xQueueReset(state->buffered_free_queue);
+  xQueueReset(state->buffered_ready_queue);
   for (uint16_t i = 0; i < BUFFERED_SLOT_COUNT; i++) {
     xQueueSend(state->buffered_free_queue, &i, 0);
   }
-  ESP_LOGI(TAG, "Compressed packet queue: %u slots x %u bytes in PSRAM",
-           (unsigned)BUFFERED_SLOT_COUNT, (unsigned)sizeof(buffered_slot_t));
+  ESP_LOGI(TAG,
+           "Compressed packet queue: %u slots x %u bytes in PSRAM (%s, %lld "
+           "us)",
+           (unsigned)BUFFERED_SLOT_COUNT, (unsigned)sizeof(buffered_slot_t),
+           fresh ? "allocated" : "reused",
+           (long long)(esp_timer_get_time() - t0_us));
   return ESP_OK;
 }
 
@@ -935,7 +957,11 @@ static void buffered_stop(audio_stream_t *stream) {
     heap_caps_free(state->buffered_recv_buffer);
     state->buffered_recv_buffer = NULL;
   }
-  buffered_free_queues(state);
+  // Keep the pool for the next stream (see buffered_init_queues); just leave
+  // nothing queued behind.
+  if (state->buffered_ready_queue) {
+    xQueueReset(state->buffered_ready_queue);
+  }
   state->buffered_port = 0;
   ESP_LOGI(TAG,
            "Buffered stream stopped: connections=%" PRIu32 " stalls=%" PRIu32
@@ -966,6 +992,7 @@ static void buffered_destroy(audio_stream_t *stream) {
     ESP_LOGW(TAG, "Leaking buffered stream because task shutdown timed out");
     return;
   }
+  buffered_free_queues(state);
   free(stream);
 }
 
