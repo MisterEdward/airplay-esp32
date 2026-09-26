@@ -36,6 +36,35 @@ Definition of done, in Edward's words: sync as impressive as 55cfa44, seek
 under a second, resume at the verse, no silent "playing" dead time, no
 pops — "behave like an Apple product".
 
+### Handover — start the next session here (as of 2026-09-26)
+
+1. **The board is NOT running `main`.**  It runs tag `wip/ptp-grandmaster`
+   (`5951440`, one commit on top of `main`): PTP accepts a grandmaster that
+   the tracked source relays (§7, first item).  Host-tested, flashed,
+   **never verified on hardware** because the speaker's WiFi collapsed
+   first.  To verify: from the iPhone, play and seek a few times; every
+   `Anchor:` must say `domain=ptp`, and where the group's grandmaster is
+   another device a `PTP timeline … is relayed by tracked source` line must
+   appear.  If good: `git cherry-pick wip/ptp-grandmaster`, push `main`,
+   delete the tag.  If bad: OTA a build of `main`.
+2. **Check the speaker's link before anything else.**  After Edward
+   power-cycled it (the PS5 went to rest mode and cut its USB power),
+   pings to it ran 0.1-2 s with timeouts while the router and `.103` were
+   fine; `reset_reason: poweron`.  The iPhone also refused to connect even
+   to the Mac.  Suspects in order: USB power from the PS5 in rest mode
+   (brownout history, §2), then 2.4 GHz interference.  Try a 5 V charger
+   and a full iPhone restart before debugging firmware.
+3. **Hardware plans discussed** (not started): Seeed XIAO ESP32-S3 Plus with
+   an external antenna (same code, new pin map in a
+   `config/sdkconfig.user.*`); longer term, wired Ethernet (W5500 on the S3
+   is already supported) or 5 GHz.  The CPU was never the bottleneck: the
+   decoder uses ~9 % of a core; the link was.  Options weighed:
+   ESP32-C5 (5 GHz, but single core and no USB OTG, so no PC speaker),
+   ESP32-P4 + C5/C6 companion (everything, most complex), ESP32-S31
+   (dual RISC-V 320 MHz, Gigabit Ethernet MAC, USB HS, BT Classic back,
+   but 2.4 GHz only; new silicon: needs a recent ESP-IDF and a
+   `esp_audio_codec` AAC build for it — check both before buying).
+
 ---
 
 ## 2. The board
@@ -274,7 +303,16 @@ reselect the speaker).  Knobs reset to the defaults on reboot.
 
 ## 7. Known bugs, not fixed yet
 
-### PTP: Mac as sender with the iPhone around → unsynced
+### PTP: the anchor names a grandmaster that only reaches us relayed
+
+**Fix written, unverified: tag `wip/ptp-grandmaster`** (see the handover in
+§1).  Seen twice: with the Mac as sender and the iPhone around, and with the
+iPhone as sender after an airplane-mode reset made another device
+(`cc6146fffefc2f15`) the group's grandmaster; the phone kept sending Sync,
+now carrying that clock's time (a 43 h timescale jump the step detector
+followed), the anchors named `cc6146…`, and every seek played
+`domain=local`, 1.3-5 s to sound.  The original analysis:
+
 
 The anchor names the phone's clock (`a8817e25…`) as timeline, but on the
 wire only the Mac (`3c06307f…`) sends Sync, relaying the phone's time as a
