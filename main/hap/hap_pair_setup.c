@@ -52,8 +52,8 @@ esp_err_t hap_pair_setup_m1(hap_session_t *session, const uint8_t *input,
     return ESP_ERR_NO_MEM;
   }
 
-  const char *password = transient ? "3939" : "0000";
-  esp_err_t err = srp_start(session->srp, "Pair-Setup", password);
+  esp_err_t err = transient ? srp_start_transient(session->srp)
+                            : srp_start(session->srp, "Pair-Setup", "0000");
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to start SRP: %d", err);
     return err;
@@ -109,6 +109,8 @@ esp_err_t hap_pair_setup_m3(hap_session_t *session, const uint8_t *input,
 
   esp_err_t err = srp_verify_client(session->srp, client_pk, pk_len,
                                     client_proof, proof_len);
+  // This pairing's heavy math is done: let the pool prepare the next one.
+  srp_pool_refill();
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Client verification failed");
     tlv8_encoder_t enc;

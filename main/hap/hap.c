@@ -66,6 +66,7 @@ esp_err_t hap_init(void) {
 
   nvs_close(nvs);
 
+  srp_pool_init();
   g_initialized = true;
   return ESP_OK;
 }
@@ -105,6 +106,8 @@ void hap_session_free(hap_session_t *session) {
     srp_session_free(session->srp);
     session->srp = NULL;
   }
+  // A connection that left after M1 took the precomputed context.
+  srp_pool_refill();
 
   sodium_memzero(session->device_secret_key,
                  sizeof(session->device_secret_key));

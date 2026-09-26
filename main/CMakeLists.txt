@@ -31,6 +31,7 @@ set( SRC_FILES
     "hap/hap_pair_setup.c"
     "hap/hap_crypto.c"
     "hap/srp.c"
+    "hap/srp_pool.c"
     "hap/tlv8.c"
     "network/wifi.c"
     "network/mdns_airplay.c"

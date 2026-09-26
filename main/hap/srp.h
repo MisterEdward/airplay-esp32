@@ -91,3 +91,14 @@ const uint8_t *srp_get_proof(srp_session_t *session);
  * This key is used to encrypt M5/M6 messages
  */
 const uint8_t *srp_get_session_key(srp_session_t *session, size_t *len);
+
+/**
+ * Precomputed transient contexts (srp_pool.c).
+ * srp_pool_init starts a lowest-priority task that keeps one
+ * "Pair-Setup"/"3939" context ready; srp_start_transient hands it out (or
+ * computes inline when none is ready); srp_pool_refill asks for a new one
+ * once the current pairing no longer needs the CPU.
+ */
+void srp_pool_init(void);
+void srp_pool_refill(void);
+esp_err_t srp_start_transient(srp_session_t *session);
