@@ -140,7 +140,101 @@ static struct {
   // thrown away.
   uint64_t tracked_clock_id;
   uint32_t last_lock_log_ms;
+
+  // Grandmaster each PTP talker announces (Announce grandmasterIdentity).
+  // In a group, only one device may be sending us Sync while the timeline
+  // the anchor names is another device's clock that it relays: measured,
+  // after the iPhone's AirPlay session was reset the group elected a new
+  // grandmaster, the phone kept sending Sync but now carried the new
+  // master's time, and the anchor named the new master.  We waited for Sync
+  // from a clock that never sends us any and played unsynced (domain=local).
+  struct {
+    uint64_t source;
+    uint64_t grandmaster;
+    uint32_t seen_ms;
+  } announced[4];
 } ptp = {0};
+
+static uint64_t parse_ptp_clock_id(const uint8_t *data);
+
+// Grandmaster announced by a source, 0 if unknown.
+static uint64_t announced_gm(uint64_t source) {
+  for (int i = 0; i < 4; i++) {
+    if (ptp.announced[i].source == source) {
+      return ptp.announced[i].grandmaster;
+    }
+  }
+  return 0;
+}
+
+// A source that announces this grandmaster, 0 if none.
+static uint64_t source_relaying(uint64_t grandmaster) {
+  for (int i = 0; i < 4; i++) {
+    if (ptp.announced[i].source &&
+        ptp.announced[i].grandmaster == grandmaster) {
+      return ptp.announced[i].source;
+    }
+  }
+  return 0;
+}
+
+static void reset_filter(void) {
+  ptp.locked = false;
+  ptp.lock_start_ms = 0;
+  ptp.lock_candidate_start_ms = 0;
+  ptp.filtered_offset_ns = 0;
+  ptp.sample_count = 0;
+  ptp.previous_offset = 0;
+  ptp.previous_offset_time_ms = 0;
+  ptp.awaiting_followup = false;
+  ptp.step_run = 0;
+}
+
+static void note_announce(const uint8_t *data, size_t len) {
+  // Announce body: originTimestamp(10) currentUtcOffset(2) reserved(1)
+  // priority1(1) clockQuality(4) priority2(1) grandmasterIdentity(8) ...
+  if (len < PTP_HEADER_SIZE + 27) {
+    return;
+  }
+  uint64_t source = parse_ptp_clock_id(data);
+  uint64_t gm = 0;
+  for (int i = 0; i < 8; i++) {
+    gm = (gm << 8) | data[PTP_HEADER_SIZE + 19 + i];
+  }
+  uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+  int slot = -1;
+  int oldest = 0;
+  for (int i = 0; i < 4; i++) {
+    if (ptp.announced[i].source == source) {
+      slot = i;
+      break;
+    }
+    if (ptp.announced[i].seen_ms < ptp.announced[oldest].seen_ms) {
+      oldest = i;
+    }
+  }
+  if (slot < 0) {
+    slot = oldest;
+    ptp.announced[slot].source = source;
+    ptp.announced[slot].grandmaster = 0;
+  }
+  uint64_t previous = ptp.announced[slot].grandmaster;
+  ptp.announced[slot].grandmaster = gm;
+  ptp.announced[slot].seen_ms = now_ms;
+  if (previous == gm) {
+    return;
+  }
+  ESP_LOGI(TAG,
+           "PTP source %016llx announces grandmaster %016llx (was %016llx)",
+           (unsigned long long)source, (unsigned long long)gm,
+           (unsigned long long)previous);
+  // The source we take samples from now relays a different timescale.
+  // Start the filter afresh rather than wait for the step detector.
+  if (previous != 0 && source == ptp.tracked_clock_id) {
+    ESP_LOGW(TAG, "Tracked source changed grandmaster: re-locking");
+    reset_filter();
+  }
+}
 
 // Parse 8-byte clockIdentity (big-endian) from PTP sourcePortIdentity
 // (header bytes 20-27).
@@ -420,7 +514,7 @@ static void process_ptp_message(const uint8_t *data, size_t len,
 
   case PTP_MSG_ANNOUNCE:
     ptp.announce_count++;
-    // Could track master identity here if needed
+    note_announce(data, len);
     break;
 
   default:
@@ -708,23 +802,36 @@ void ptp_clock_set_master_clock_id(uint64_t clock_id) {
     return;
   }
 
-  ESP_LOGI(TAG, "PTP master clock_id %s: %016llx (was tracking %016llx)",
+  // The anchor names a grandmaster whose time reaches us relayed by the
+  // source we already track: same timeline, keep the samples and the lock.
+  if (clock_id != 0 && ptp.tracked_clock_id != 0 && ptp.sample_count > 0 &&
+      announced_gm(ptp.tracked_clock_id) == clock_id) {
+    ptp.expected_clock_id = ptp.tracked_clock_id;
+    ESP_LOGI(TAG,
+             "PTP timeline %016llx is relayed by tracked source %016llx: "
+             "keeping it (locked=%d, samples=%lu)",
+             (unsigned long long)clock_id,
+             (unsigned long long)ptp.tracked_clock_id, ptp.locked,
+             (unsigned long)ptp.sample_count);
+    return;
+  }
+
+  // Another talker relays it: follow that one.
+  uint64_t relay = clock_id ? source_relaying(clock_id) : 0;
+  uint64_t source = relay ? relay : clock_id;
+
+  ESP_LOGI(TAG,
+           "PTP master clock_id %s: %016llx via source %016llx (was tracking "
+           "%016llx)",
            clock_id ? "set" : "cleared", (unsigned long long)clock_id,
+           (unsigned long long)source,
            (unsigned long long)ptp.tracked_clock_id);
-  ptp.expected_clock_id = clock_id;
-  ptp.tracked_clock_id = clock_id;
+  ptp.expected_clock_id = source;
+  ptp.tracked_clock_id = source;
 
   // Drop accumulated samples / lock state — they came from a different
   // master.
-  ptp.locked = false;
-  ptp.lock_start_ms = 0;
-  ptp.lock_candidate_start_ms = 0;
-  ptp.filtered_offset_ns = 0;
-  ptp.sample_count = 0;
-  ptp.previous_offset = 0;
-  ptp.previous_offset_time_ms = 0;
-  ptp.awaiting_followup = false;
-  ptp.step_run = 0;
+  reset_filter();
 }
 
 uint64_t ptp_clock_get_master_clock_id(void) {
@@ -733,7 +840,8 @@ uint64_t ptp_clock_get_master_clock_id(void) {
 
 bool ptp_clock_is_locked_to(uint64_t clock_id) {
   return clock_id != 0 && ptp_clock_is_locked() &&
-         ptp.tracked_clock_id == clock_id;
+         (ptp.tracked_clock_id == clock_id ||
+          announced_gm(ptp.tracked_clock_id) == clock_id);
 }
 
 uint64_t ptp_clock_get_tracked_clock_id(void) {
