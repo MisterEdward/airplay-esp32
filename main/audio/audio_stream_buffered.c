@@ -417,8 +417,16 @@ static void buffered_audio_task(void *pvParameters) {
     if (client_sock < 0) {
       if (errno != EAGAIN && errno != EWOULDBLOCK && stream->running) {
         ESP_LOGE(TAG, "Buffered audio accept error: %d", errno);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        continue;
       }
-      vTaskDelay(pdMS_TO_TICKS(100));
+      // The sender connects within one RTT of our SETUP reply and starts
+      // writing at once.  Polling every 100 ms put "Buffered data
+      // connection #1" 90-100 ms (sometimes 190-200 ms) after "stream
+      // ready" in every journal; one tick keeps the added wait <= 10 ms
+      // for the cost of a failed non-blocking accept() per tick while no
+      // data connection is open.
+      vTaskDelay(1);
       continue;
     }
 
