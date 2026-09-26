@@ -759,6 +759,7 @@ static void handle_post(int socket, rtsp_conn_t *conn,
 
     size_t response_len = 0;
     esp_err_t err = ESP_FAIL;
+    int64_t pv_t0 = esp_timer_get_time();
 
     if (body && body_len > 0) {
       size_t state_len;
@@ -794,6 +795,10 @@ static void handle_post(int socket, rtsp_conn_t *conn,
         }
       }
     }
+    // X25519 + Ed25519 (libsodium, software): expected tens of ms.
+    ESP_LOGI(TAG, "sid=%" PRIu32 " pair-verify state=%d ok=%d took %lld us",
+             conn->sid, conn->hap_session->pair_verify_state, err == ESP_OK,
+             (long long)(esp_timer_get_time() - pv_t0));
 
     if (err == ESP_OK && response_len > 0) {
       rtsp_send_response(socket, conn, 200, "OK", req->cseq,

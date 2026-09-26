@@ -19,3 +19,17 @@ fi
 $CC $FLAGS -Wno-unused-function -Wno-unused-parameter -I tests/host/fakes_ptp -I main/network \
   tests/host/test_ptp.c -o "$out/test_ptp"
 "$out/test_ptp"
+# SRP pair-setup: needs the software mbedtls bignum from the IDF tree.
+MBEDTLS="${MBEDTLS_DIR:-$HOME/.platformio/packages/framework-espidf/components/mbedtls/mbedtls}"
+if [ -f "$MBEDTLS/library/bignum.c" ]; then
+  for f in bignum bignum_core constant_time platform_util sha512; do
+    $CC -std=c11 -O2 -I "$MBEDTLS/include" -I "$MBEDTLS/library" \
+      -c "$MBEDTLS/library/$f.c" -o "$out/mbed_$f.o"
+  done
+  $CC $FLAGS -I tests/host/fakes_srp -I tests/host -I main/hap \
+    -I "$MBEDTLS/include" tests/host/test_srp.c main/hap/srp.c \
+    "$out"/mbed_*.o -o "$out/test_srp"
+  "$out/test_srp"
+else
+  echo "test_srp: skipped (no mbedtls at $MBEDTLS)"
+fi

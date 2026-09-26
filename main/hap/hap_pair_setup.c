@@ -6,6 +6,7 @@
 #include "tlv8.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "sodium.h"
 
 static const char *TAG = "hap_setup";
@@ -43,6 +44,7 @@ esp_err_t hap_pair_setup_m1(hap_session_t *session, const uint8_t *input,
   }
   session->pair_setup_transient = transient;
 
+  int64_t t0 = esp_timer_get_time();
   if (session->srp) {
     srp_session_free(session->srp);
   }
@@ -52,11 +54,25 @@ esp_err_t hap_pair_setup_m1(hap_session_t *session, const uint8_t *input,
     return ESP_ERR_NO_MEM;
   }
 
+  // Server keys come precomputed from the pool when it has a set; otherwise
+  // (back-to-back sessions, non-transient) they are computed here.
   const char *password = transient ? "3939" : "0000";
-  esp_err_t err = srp_start(session->srp, "Pair-Setup", password);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to start SRP: %d", err);
-    return err;
+  bool pooled = srp_pool_take(session->srp, "Pair-Setup", password);
+  if (!pooled) {
+    esp_err_t err = srp_start(session->srp, "Pair-Setup", password);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to start SRP: %d", err);
+      return err;
+    }
+  }
+  if (pooled) {
+    ESP_LOGI(TAG, "M1 transient=%d keys=pool total=%lld us", transient,
+             (long long)(esp_timer_get_time() - t0));
+  } else {
+    ESP_LOGI(TAG, "M1 transient=%d keys=inline g^x=%lld g^b=%lld total=%lld us",
+             transient, (long long)session->srp->t1_us,
+             (long long)session->srp->t2_us,
+             (long long)(esp_timer_get_time() - t0));
   }
 
   size_t pk_len = 0;
@@ -107,8 +123,13 @@ esp_err_t hap_pair_setup_m3(hap_session_t *session, const uint8_t *input,
     return ESP_ERR_INVALID_ARG;
   }
 
+  int64_t t0 = esp_timer_get_time();
   esp_err_t err = srp_verify_client(session->srp, client_pk, pk_len,
                                     client_proof, proof_len);
+  ESP_LOGI(TAG, "M3 ok=%d v^u=%lld mulmod=%lld S=%lld total=%lld us",
+           err == ESP_OK, (long long)session->srp->t1_us,
+           (long long)session->srp->t3_us, (long long)session->srp->t2_us,
+           (long long)(esp_timer_get_time() - t0));
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Client verification failed");
     tlv8_encoder_t enc;

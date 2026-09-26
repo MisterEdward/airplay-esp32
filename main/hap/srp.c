@@ -1,6 +1,8 @@
+#include <stdlib.h>
 #include <string.h>
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "mbedtls/bignum.h"
 #include "sodium.h"
 
@@ -44,6 +46,15 @@ static const uint8_t srp_N[] = {
     0xA9, 0x3A, 0xD2, 0xCA, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 #define SRP_GENERATOR 5
+
+// Per-device constants: set once by srp_global_init(), read-only afterwards,
+// so the RTSP client tasks and the pool task share them without a lock.
+static mbedtls_mpi g_N;
+static mbedtls_mpi g_k;    // k = H(N || PAD(g))
+static mbedtls_mpi g_rr;   // R^2 mod N: exp_mod's Montgomery constant
+static mbedtls_mpi g_mu;   // floor(2^(2 * 3072) / N), the Barrett constant
+static uint8_t g_h_ng[64]; // H(N) xor H(g)
+static bool g_ready;
 
 // Helper: write MPI to buffer with minimum bytes (no leading zeros except for
 // value 0)
@@ -104,6 +115,123 @@ static void compute_m1(uint8_t *out, const uint8_t *h_Ng_xor,
   crypto_hash_sha512_final(&state, out);
 }
 
+esp_err_t srp_global_init(void) {
+  if (g_ready) {
+    return ESP_OK;
+  }
+  int64_t t0 = esp_timer_get_time();
+  int ret = 0;
+  mbedtls_mpi g, e, t;
+  mbedtls_mpi_init(&g_N);
+  mbedtls_mpi_init(&g_k);
+  mbedtls_mpi_init(&g_rr);
+  mbedtls_mpi_init(&g_mu);
+  mbedtls_mpi_init(&g);
+  mbedtls_mpi_init(&e);
+  mbedtls_mpi_init(&t);
+
+  MBEDTLS_MPI_CHK(mbedtls_mpi_read_binary(&g_N, srp_N, sizeof(srp_N)));
+
+  // k = H(N || PAD(g)) (512 bits, already < N) and H(N) xor H(g)
+  {
+    static const uint8_t zeros[64] = {0};
+    const uint8_t g_byte = SRP_GENERATOR;
+    uint8_t k_hash[64];
+    crypto_hash_sha512_state state;
+    crypto_hash_sha512_init(&state);
+    crypto_hash_sha512_update(&state, srp_N, sizeof(srp_N));
+    for (size_t left = SRP_PRIME_BYTES - 1; left > 0;) {
+      size_t n = left < sizeof(zeros) ? left : sizeof(zeros);
+      crypto_hash_sha512_update(&state, zeros, n);
+      left -= n;
+    }
+    crypto_hash_sha512_update(&state, &g_byte, 1);
+    crypto_hash_sha512_final(&state, k_hash);
+    MBEDTLS_MPI_CHK(mbedtls_mpi_read_binary(&g_k, k_hash, sizeof(k_hash)));
+
+    uint8_t h_g[64];
+    crypto_hash_sha512(g_h_ng, srp_N, sizeof(srp_N));
+    crypto_hash_sha512(h_g, &g_byte, 1);
+    for (int i = 0; i < 64; i++) {
+      g_h_ng[i] ^= h_g[i];
+    }
+  }
+
+  // mu = floor(2^6144 / N)
+  MBEDTLS_MPI_CHK(mbedtls_mpi_lset(&t, 1));
+  MBEDTLS_MPI_CHK(mbedtls_mpi_shift_l(&t, 2 * SRP_PRIME_BITS));
+  MBEDTLS_MPI_CHK(mbedtls_mpi_div_mpi(&g_mu, NULL, &t, &g_N));
+
+  // The first exp_mod with an empty cache fills g_rr; later calls only read
+  // it.  Every base and exponent is < N, so the accelerator word count (and
+  // so R) is the same for every call.
+  MBEDTLS_MPI_CHK(mbedtls_mpi_lset(&g, SRP_GENERATOR));
+  MBEDTLS_MPI_CHK(mbedtls_mpi_lset(&e, 2));
+  MBEDTLS_MPI_CHK(mbedtls_mpi_exp_mod(&t, &g, &e, &g_N, &g_rr));
+  if (mbedtls_mpi_cmp_int(&t, SRP_GENERATOR * SRP_GENERATOR) != 0) {
+    ret = MBEDTLS_ERR_MPI_BAD_INPUT_DATA;
+    goto cleanup;
+  }
+  g_ready = true;
+  ESP_LOGI(TAG, "constants ready in %lld us",
+           (long long)(esp_timer_get_time() - t0));
+
+cleanup:
+  mbedtls_mpi_free(&g);
+  mbedtls_mpi_free(&e);
+  mbedtls_mpi_free(&t);
+  if (ret != 0) {
+    ESP_LOGE(TAG, "init failed: -0x%04x", (unsigned)-ret);
+    mbedtls_mpi_free(&g_N);
+    mbedtls_mpi_free(&g_k);
+    mbedtls_mpi_free(&g_rr);
+    mbedtls_mpi_free(&g_mu);
+    return ESP_FAIL;
+  }
+  return ESP_OK;
+}
+
+// Barrett reduction (HAC 14.42 with base 2, k = 3072): with
+// q = floor(floor(x / 2^(k-1)) * mu / 2^(k+1)), x - q*N lies in [0, 3N).
+// Whatever q is, x - q*N is congruent to x, so the range check at the end is
+// the whole correctness argument; anything unexpected falls back to the long
+// division (~100 accelerator calls, ~25 ms on the S3).
+int srp_mod_n(mbedtls_mpi *r, const mbedtls_mpi *x) {
+  if (!g_ready || mbedtls_mpi_cmp_int(x, 0) < 0 ||
+      mbedtls_mpi_bitlen(x) > 2 * SRP_PRIME_BITS) {
+    return mbedtls_mpi_mod_mpi(r, x, &g_N);
+  }
+  if (mbedtls_mpi_cmp_mpi(x, &g_N) < 0) {
+    return mbedtls_mpi_copy(r, x);
+  }
+  int ret = 0;
+  mbedtls_mpi q, t;
+  mbedtls_mpi_init(&q);
+  mbedtls_mpi_init(&t);
+  // No operand aliasing: the accelerated multiply splits long operands in
+  // place.
+  MBEDTLS_MPI_CHK(mbedtls_mpi_copy(&t, x));
+  MBEDTLS_MPI_CHK(mbedtls_mpi_shift_r(&t, SRP_PRIME_BITS - 1));
+  MBEDTLS_MPI_CHK(mbedtls_mpi_mul_mpi(&q, &t, &g_mu));
+  MBEDTLS_MPI_CHK(mbedtls_mpi_shift_r(&q, SRP_PRIME_BITS + 1));
+  MBEDTLS_MPI_CHK(mbedtls_mpi_mul_mpi(&t, &q, &g_N));
+  MBEDTLS_MPI_CHK(mbedtls_mpi_sub_mpi(&q, x, &t));
+  for (int i = 0; i < 3 && mbedtls_mpi_cmp_mpi(&q, &g_N) >= 0; i++) {
+    MBEDTLS_MPI_CHK(mbedtls_mpi_sub_mpi(&q, &q, &g_N));
+  }
+  if (mbedtls_mpi_cmp_int(&q, 0) < 0 || mbedtls_mpi_cmp_mpi(&q, &g_N) >= 0) {
+    ESP_LOGW(TAG, "Barrett out of range, using long division");
+    ret = mbedtls_mpi_mod_mpi(r, x, &g_N);
+  } else {
+    ret = mbedtls_mpi_copy(r, &q);
+  }
+
+cleanup:
+  mbedtls_mpi_free(&q);
+  mbedtls_mpi_free(&t);
+  return ret;
+}
+
 srp_session_t *srp_session_create(void) {
   srp_session_t *session = calloc(1, sizeof(srp_session_t));
   return session;
@@ -111,7 +239,7 @@ srp_session_t *srp_session_create(void) {
 
 void srp_session_free(srp_session_t *session) {
   if (session) {
-    memset(session, 0, sizeof(srp_session_t));
+    sodium_memzero(session, sizeof(srp_session_t));
     free(session);
   }
 }
@@ -121,39 +249,25 @@ esp_err_t srp_start(srp_session_t *session, const char *username,
   if (!session || !username || !password) {
     return ESP_ERR_INVALID_ARG;
   }
+  if (!g_ready) {
+    return ESP_ERR_INVALID_STATE;
+  }
 
-  mbedtls_mpi N, g, k, v, b, B, x, tmp, tmp2;
-  mbedtls_mpi_init(&N);
+  mbedtls_mpi g, v, b, B, x, tmp;
   mbedtls_mpi_init(&g);
-  mbedtls_mpi_init(&k);
   mbedtls_mpi_init(&v);
   mbedtls_mpi_init(&b);
   mbedtls_mpi_init(&B);
   mbedtls_mpi_init(&x);
   mbedtls_mpi_init(&tmp);
-  mbedtls_mpi_init(&tmp2);
 
-  int ret = -1;
+  int ret = 0;
+  int64_t t0 = 0;
+  int64_t t1 = 0;
+  int64_t t2 = 0;
 
   // Generate random salt
   esp_fill_random(session->salt, SRP_SALT_BYTES);
-
-  // Load N and g
-  mbedtls_mpi_read_binary(&N, srp_N, sizeof(srp_N));
-  mbedtls_mpi_lset(&g, SRP_GENERATOR);
-
-  // k = H(N || pad(g))
-  {
-    uint8_t hash_input[SRP_PRIME_BYTES * 2];
-    memcpy(hash_input, srp_N, SRP_PRIME_BYTES);
-    memset(hash_input + SRP_PRIME_BYTES, 0, SRP_PRIME_BYTES);
-    hash_input[SRP_PRIME_BYTES * 2 - 1] = SRP_GENERATOR;
-
-    uint8_t k_hash[64];
-    crypto_hash_sha512(k_hash, hash_input, sizeof(hash_input));
-    mbedtls_mpi_read_binary(&k, k_hash, 64);
-    mbedtls_mpi_mod_mpi(&k, &k, &N);
-  }
 
   // x = H(s || H(I || ":" || P))
   {
@@ -173,49 +287,54 @@ esp_err_t srp_start(srp_session_t *session, const char *username,
     crypto_hash_sha512_update(&state, inner_hash, 64);
     crypto_hash_sha512_final(&state, x_hash);
 
-    mbedtls_mpi_read_binary(&x, x_hash, 64);
+    MBEDTLS_MPI_CHK(mbedtls_mpi_read_binary(&x, x_hash, 64));
+    sodium_memzero(x_hash, sizeof(x_hash));
   }
+  MBEDTLS_MPI_CHK(mbedtls_mpi_lset(&g, SRP_GENERATOR));
 
-  // v = g^x mod N
-  if (mbedtls_mpi_exp_mod(&v, &g, &x, &N, NULL) != 0) {
+  // v = g^x mod N (512-bit exponent), kept for M3
+  t0 = esp_timer_get_time();
+  MBEDTLS_MPI_CHK(mbedtls_mpi_exp_mod(&v, &g, &x, &g_N, &g_rr));
+  t1 = esp_timer_get_time();
+
+  // Server secret b: 256 random bits (RFC 5054 asks for at least 256; Apple's
+  // HomeKit ADK uses 32 bytes).  The accelerator's time follows the exponent
+  // length, so this is 12x cheaper than a 3072-bit b for g^b and S.
+  esp_fill_random(session->server_secret, SRP_SECRET_BYTES);
+  MBEDTLS_MPI_CHK(
+      mbedtls_mpi_read_binary(&b, session->server_secret, SRP_SECRET_BYTES));
+  if (mbedtls_mpi_cmp_int(&b, 0) == 0) {
+    ret = MBEDTLS_ERR_MPI_BAD_INPUT_DATA;
     goto cleanup;
-  }
-
-  // Generate random b (server secret)
-  {
-    uint8_t b_bytes[SRP_PRIME_BYTES];
-    esp_fill_random(b_bytes, sizeof(b_bytes));
-    mbedtls_mpi_read_binary(&b, b_bytes, sizeof(b_bytes));
-    mbedtls_mpi_mod_mpi(&b, &b, &N);
-    mpi_to_bytes_padded(&b, session->server_secret, SRP_PRIME_BYTES);
   }
 
   // B = (k*v + g^b) mod N
-  if (mbedtls_mpi_exp_mod(&tmp, &g, &b, &N, NULL) != 0) {
+  MBEDTLS_MPI_CHK(mbedtls_mpi_exp_mod(&tmp, &g, &b, &g_N, &g_rr));
+  t2 = esp_timer_get_time();
+  MBEDTLS_MPI_CHK(mbedtls_mpi_mul_mpi(&B, &g_k, &v));
+  MBEDTLS_MPI_CHK(mbedtls_mpi_add_mpi(&B, &B, &tmp));
+  MBEDTLS_MPI_CHK(srp_mod_n(&B, &B));
+  if (mbedtls_mpi_cmp_int(&B, 0) == 0) {
+    ret = MBEDTLS_ERR_MPI_BAD_INPUT_DATA;
     goto cleanup;
   }
-  if (mbedtls_mpi_mul_mpi(&tmp2, &k, &v) != 0) {
-    goto cleanup;
-  }
-  if (mbedtls_mpi_add_mpi(&B, &tmp2, &tmp) != 0) {
-    goto cleanup;
-  }
-  mbedtls_mpi_mod_mpi(&B, &B, &N);
 
-  mpi_to_bytes_padded(&B, session->server_public_key, SRP_PRIME_BYTES);
+  MBEDTLS_MPI_CHK(mpi_to_bytes_padded(&v, session->verifier, SRP_PRIME_BYTES));
+  MBEDTLS_MPI_CHK(
+      mpi_to_bytes_padded(&B, session->server_public_key, SRP_PRIME_BYTES));
+  session->t1_us = t1 - t0;
+  session->t2_us = t2 - t1;
+  session->t3_us = 0;
+  session->verified = false;
   session->state = 1;
-  ret = 0;
 
 cleanup:
-  mbedtls_mpi_free(&N);
   mbedtls_mpi_free(&g);
-  mbedtls_mpi_free(&k);
   mbedtls_mpi_free(&v);
   mbedtls_mpi_free(&b);
   mbedtls_mpi_free(&B);
   mbedtls_mpi_free(&x);
   mbedtls_mpi_free(&tmp);
-  mbedtls_mpi_free(&tmp2);
 
   return ret == 0 ? ESP_OK : ESP_FAIL;
 }
@@ -242,6 +361,12 @@ esp_err_t srp_verify_client(srp_session_t *session,
       proof_len < SRP_PROOF_BYTES) {
     return ESP_ERR_INVALID_ARG;
   }
+  session->t1_us = 0;
+  session->t2_us = 0;
+  session->t3_us = 0;
+  if (!g_ready || session->state != 1) {
+    return ESP_ERR_INVALID_STATE;
+  }
 
   // Store client's public key A (zero-padded)
   if (client_pk_len > SRP_PRIME_BYTES) {
@@ -251,123 +376,81 @@ esp_err_t srp_verify_client(srp_session_t *session,
   memcpy(session->client_public_key + (SRP_PRIME_BYTES - client_pk_len),
          client_public_key, client_pk_len);
 
-  mbedtls_mpi N, g, A, B, b, u, S, k, v, x, tmp, tmp2;
-  mbedtls_mpi_init(&N);
-  mbedtls_mpi_init(&g);
+  mbedtls_mpi A, Ar, B, b, u, S, v, tmp, tmp2;
   mbedtls_mpi_init(&A);
+  mbedtls_mpi_init(&Ar);
   mbedtls_mpi_init(&B);
   mbedtls_mpi_init(&b);
   mbedtls_mpi_init(&u);
   mbedtls_mpi_init(&S);
-  mbedtls_mpi_init(&k);
   mbedtls_mpi_init(&v);
-  mbedtls_mpi_init(&x);
   mbedtls_mpi_init(&tmp);
   mbedtls_mpi_init(&tmp2);
 
-  int ret = -1;
+  int ret = 0;
+  bool proof_ok = false;
+  int64_t t0 = 0;
+  int64_t t1 = 0;
+  int64_t t2 = 0;
+  int64_t t3 = 0;
 
   // Load parameters
-  mbedtls_mpi_read_binary(&N, srp_N, sizeof(srp_N));
-  mbedtls_mpi_lset(&g, SRP_GENERATOR);
-  mbedtls_mpi_read_binary(&A, session->client_public_key, SRP_PRIME_BYTES);
-  mbedtls_mpi_read_binary(&B, session->server_public_key, SRP_PRIME_BYTES);
-  mbedtls_mpi_read_binary(&b, session->server_secret, SRP_PRIME_BYTES);
+  MBEDTLS_MPI_CHK(
+      mbedtls_mpi_read_binary(&A, session->client_public_key, SRP_PRIME_BYTES));
+  MBEDTLS_MPI_CHK(
+      mbedtls_mpi_read_binary(&B, session->server_public_key, SRP_PRIME_BYTES));
+  MBEDTLS_MPI_CHK(
+      mbedtls_mpi_read_binary(&b, session->server_secret, SRP_SECRET_BYTES));
+  MBEDTLS_MPI_CHK(
+      mbedtls_mpi_read_binary(&v, session->verifier, SRP_PRIME_BYTES));
 
-  // Check A != 0 and A % N != 0
-  if (mbedtls_mpi_cmp_int(&A, 0) == 0) {
-    ESP_LOGE(TAG, "Invalid client public key (zero)");
-    goto cleanup;
-  }
-  mbedtls_mpi_mod_mpi(&tmp, &A, &N);
-  if (mbedtls_mpi_cmp_int(&tmp, 0) == 0) {
-    ESP_LOGE(TAG, "Invalid client public key (multiple of N)");
+  // Check A % N != 0 (covers A == 0)
+  MBEDTLS_MPI_CHK(srp_mod_n(&Ar, &A));
+  if (mbedtls_mpi_cmp_int(&Ar, 0) == 0) {
+    ESP_LOGE(TAG, "Invalid client public key (A mod N == 0)");
     goto cleanup;
   }
 
   // u = H(PAD(A) || PAD(B))
   {
-    uint8_t ab_concat[SRP_PRIME_BYTES * 2];
-    memcpy(ab_concat, session->client_public_key, SRP_PRIME_BYTES);
-    memcpy(ab_concat + SRP_PRIME_BYTES, session->server_public_key,
-           SRP_PRIME_BYTES);
     uint8_t u_hash[64];
-    crypto_hash_sha512(u_hash, ab_concat, sizeof(ab_concat));
-    mbedtls_mpi_read_binary(&u, u_hash, 64);
-  }
-
-  // Recompute k = H(N || pad(g))
-  {
-    uint8_t hash_input[SRP_PRIME_BYTES * 2];
-    memcpy(hash_input, srp_N, SRP_PRIME_BYTES);
-    memset(hash_input + SRP_PRIME_BYTES, 0, SRP_PRIME_BYTES);
-    hash_input[SRP_PRIME_BYTES * 2 - 1] = SRP_GENERATOR;
-    uint8_t k_hash[64];
-    crypto_hash_sha512(k_hash, hash_input, sizeof(hash_input));
-    mbedtls_mpi_read_binary(&k, k_hash, 64);
-    mbedtls_mpi_mod_mpi(&k, &k, &N);
-  }
-
-  // Recompute x = H(s || H(I || ":" || P)) for "Pair-Setup:3939"
-  {
-    uint8_t inner_hash[64];
     crypto_hash_sha512_state state;
     crypto_hash_sha512_init(&state);
-    crypto_hash_sha512_update(&state, (const uint8_t *)"Pair-Setup", 10);
-    crypto_hash_sha512_update(&state, (const uint8_t *)":", 1);
-    crypto_hash_sha512_update(&state, (const uint8_t *)"3939", 4);
-    crypto_hash_sha512_final(&state, inner_hash);
-
-    uint8_t x_hash[64];
-    crypto_hash_sha512_init(&state);
-    crypto_hash_sha512_update(&state, session->salt, SRP_SALT_BYTES);
-    crypto_hash_sha512_update(&state, inner_hash, 64);
-    crypto_hash_sha512_final(&state, x_hash);
-
-    mbedtls_mpi_read_binary(&x, x_hash, 64);
+    crypto_hash_sha512_update(&state, session->client_public_key,
+                              SRP_PRIME_BYTES);
+    crypto_hash_sha512_update(&state, session->server_public_key,
+                              SRP_PRIME_BYTES);
+    crypto_hash_sha512_final(&state, u_hash);
+    MBEDTLS_MPI_CHK(mbedtls_mpi_read_binary(&u, u_hash, 64));
   }
-
-  // v = g^x mod N
-  if (mbedtls_mpi_exp_mod(&v, &g, &x, &N, NULL) != 0) {
+  if (mbedtls_mpi_cmp_int(&u, 0) == 0) {
+    ESP_LOGE(TAG, "Invalid scrambler (u == 0)");
     goto cleanup;
   }
 
-  // S = (A * v^u)^b mod N
-  if (mbedtls_mpi_exp_mod(&tmp, &v, &u, &N, NULL) != 0) {
-    goto cleanup;
-  }
-  if (mbedtls_mpi_mul_mpi(&tmp2, &A, &tmp) != 0) {
-    goto cleanup;
-  }
-  mbedtls_mpi_mod_mpi(&tmp2, &tmp2, &N);
-  if (mbedtls_mpi_exp_mod(&S, &tmp2, &b, &N, NULL) != 0) {
-    goto cleanup;
-  }
+  // S = (A * v^u)^b mod N, v from M1 (no second g^x)
+  t0 = esp_timer_get_time();
+  MBEDTLS_MPI_CHK(mbedtls_mpi_exp_mod(&tmp, &v, &u, &g_N, &g_rr));
+  t1 = esp_timer_get_time();
+  MBEDTLS_MPI_CHK(mbedtls_mpi_mul_mpi(&tmp2, &Ar, &tmp));
+  MBEDTLS_MPI_CHK(srp_mod_n(&tmp2, &tmp2));
+  t2 = esp_timer_get_time();
+  MBEDTLS_MPI_CHK(mbedtls_mpi_exp_mod(&S, &tmp2, &b, &g_N, &g_rr));
+  t3 = esp_timer_get_time();
+  session->t1_us = t1 - t0;
+  session->t2_us = t3 - t2;
+  session->t3_us = t2 - t1;
 
   // K = H(S)
   uint8_t S_bytes[SRP_PRIME_BYTES];
   size_t S_len = mpi_to_bytes_min(&S, S_bytes, sizeof(S_bytes));
   crypto_hash_sha512(session->session_key, S_bytes, S_len);
+  sodium_memzero(S_bytes, sizeof(S_bytes));
   session->session_key_len = 64;
 
   // Compute expected M1 = H(H(N)^H(g) || H(I) || s || A || B || K)
   uint8_t expected_m1[64];
   {
-    // H(N)
-    uint8_t h_N[64];
-    crypto_hash_sha512(h_N, srp_N, sizeof(srp_N));
-
-    // H(g)
-    uint8_t g_byte = SRP_GENERATOR;
-    uint8_t h_g[64];
-    crypto_hash_sha512(h_g, &g_byte, 1);
-
-    // H(N) ^ H(g)
-    uint8_t h_Ng_xor[64];
-    for (int i = 0; i < 64; i++) {
-      h_Ng_xor[i] = h_N[i] ^ h_g[i];
-    }
-
     // H(I) where I = "Pair-Setup"
     uint8_t h_I[64];
     crypto_hash_sha512(h_I, (const uint8_t *)"Pair-Setup", 10);
@@ -382,12 +465,12 @@ esp_err_t srp_verify_client(srp_session_t *session,
     size_t A_len = mpi_to_bytes_min(&A, A_bytes, sizeof(A_bytes));
     size_t B_len = mpi_to_bytes_min(&B, B_bytes, sizeof(B_bytes));
 
-    compute_m1(expected_m1, h_Ng_xor, h_I, salt_ptr, salt_len, A_bytes, A_len,
+    compute_m1(expected_m1, g_h_ng, h_I, salt_ptr, salt_len, A_bytes, A_len,
                B_bytes, B_len, session->session_key, 64);
   }
 
   // Verify client proof
-  if (memcmp(client_proof, expected_m1, SRP_PROOF_BYTES) != 0) {
+  if (sodium_memcmp(client_proof, expected_m1, SRP_PROOF_BYTES) != 0) {
     ESP_LOGE(TAG, "Client proof verification failed");
     goto cleanup;
   }
@@ -408,23 +491,20 @@ esp_err_t srp_verify_client(srp_session_t *session,
 
   session->verified = true;
   session->state = 2;
-  ret = 0;
+  proof_ok = true;
 
 cleanup:
-  mbedtls_mpi_free(&N);
-  mbedtls_mpi_free(&g);
   mbedtls_mpi_free(&A);
+  mbedtls_mpi_free(&Ar);
   mbedtls_mpi_free(&B);
   mbedtls_mpi_free(&b);
   mbedtls_mpi_free(&u);
   mbedtls_mpi_free(&S);
-  mbedtls_mpi_free(&k);
   mbedtls_mpi_free(&v);
-  mbedtls_mpi_free(&x);
   mbedtls_mpi_free(&tmp);
   mbedtls_mpi_free(&tmp2);
 
-  return ret == 0 ? ESP_OK : ESP_FAIL;
+  return (ret == 0 && proof_ok) ? ESP_OK : ESP_FAIL;
 }
 
 const uint8_t *srp_get_proof(srp_session_t *session) {

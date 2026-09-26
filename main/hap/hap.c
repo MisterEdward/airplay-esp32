@@ -66,6 +66,16 @@ esp_err_t hap_init(void) {
 
   nvs_close(nvs);
 
+  // SRP constants (~50 ms once) and the spare pair-setup keys, so a
+  // transient pair-setup does two short modexps instead of five.  A failure
+  // only disables pair-setup (it answers with an error); USB, the web UI and
+  // OTA keep working, so do not fail boot over it.
+  if (srp_global_init() == ESP_OK) {
+    srp_pool_start();
+  } else {
+    ESP_LOGE(TAG, "SRP init failed: pair-setup disabled");
+  }
+
   g_initialized = true;
   return ESP_OK;
 }
