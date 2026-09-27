@@ -195,6 +195,18 @@ menu "Airplay ESP Configuration"
             Independent from AUDIO_OUTPUT_USB, which sends AirPlay audio TO a
             USB host (the device acts as a microphone there).
 
+    config USB_AUDIO_CAPTURE
+        bool "USB capture of the rendered audio (debug)"
+        default n
+        depends on USB_AUDIO_SOURCE
+        help
+            Add a UAC2 input (48 kHz stereo 16-bit) to the USB speaker so the
+            host can record, bit-exact, every block the render task hands to
+            the DAC.  The interface is always in the descriptor; the tap is
+            switched at runtime (GET /api/debug/capture?on=1) and is off at
+            boot.  Adds one isochronous IN endpoint and renumbers the HID
+            wake interface from 2 to 3.
+
     choice OUTPUT_SAMPLE_RATE
         prompt "Output sample rate"
         default OUTPUT_SAMPLE_RATE_44100

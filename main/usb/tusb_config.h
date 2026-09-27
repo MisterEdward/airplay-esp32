@@ -46,6 +46,34 @@ extern "C" {
 #include "uac_descriptors.h"
 #include "tusb_config_uac.h"
 
+#if CONFIG_USB_AUDIO_CAPTURE
+/*
+ * Debug capture input (usb_audio_capture.c).  The UAC component's
+ * microphone path stays compiled out (CONFIG_UAC_MIC_CHANNEL_NUM=0); only
+ * TinyUSB's IN side is sized here, on top of the component's settings.
+ * The frame and endpoint sizes derive from N_CHANNELS_TX in
+ * tusb_config_uac.h, so redefining it is enough for those.
+ */
+#include "usb_descriptors.h"
+
+#undef CFG_TUD_AUDIO_FUNC_1_DESC_LEN
+#define CFG_TUD_AUDIO_FUNC_1_DESC_LEN USB_AUDIO_FUNC_DESC_LEN
+#undef CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX
+#define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX USB_CAP_CHANNELS
+#undef CFG_TUD_AUDIO_FUNC_1_N_AS_INT
+#define CFG_TUD_AUDIO_FUNC_1_N_AS_INT 2
+// Software FIFO in front of the IN endpoint: 8 KiB = 2048 frames = 42.7 ms.
+// TinyUSB's flow control keeps it near half full by sending 47/48/49-frame
+// packets, which is what matches our I2S clock to the host's; the half that
+// is free absorbs the pump's scheduling jitter.
+#undef CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ
+#define CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ 8192
+#ifndef __cplusplus
+_Static_assert(USB_CAP_EP_SIZE == CFG_TUD_AUDIO_FUNC_1_FORMAT_1_EP_SZ_IN,
+               "capture endpoint size mismatch");
+#endif
+#endif
+
 #ifdef __cplusplus
 }
 #endif

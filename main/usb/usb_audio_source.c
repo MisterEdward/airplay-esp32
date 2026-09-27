@@ -1,6 +1,9 @@
 #include "usb_audio_source.h"
 
 #include "audio_output.h"
+#if CONFIG_USB_AUDIO_CAPTURE
+#include "usb_audio_capture.h"
+#endif
 #include "settings.h"
 #include "usb_descriptors.h"
 #include "usb_device_uac.h"
@@ -375,7 +378,7 @@ static void usb_state_poll_cb(void *arg) {
              "speed=%s packets=%" PRIu32 " fifo=%u ring=%" PRIu32
              " under=%" PRIu32 " over=%" PRIu32,
              !!(now & 1), !!(now & 2), !!(now & 4), !!(now & 8),
-             tud_speed_get() == TUSB_SPEED_HIGH ? "high"
+             tud_speed_get() == TUSB_SPEED_HIGH   ? "high"
              : tud_speed_get() == TUSB_SPEED_FULL ? "full"
                                                   : "none",
              s_stats.packets, (unsigned)tud_audio_n_available(0),
@@ -415,6 +418,12 @@ esp_err_t usb_audio_source_init(void) {
     return err;
   }
   audio_output_register_external_source(usb_pull, NULL);
+#if CONFIG_USB_AUDIO_CAPTURE
+  // Debug capture input: failure only loses the tap, not the speaker.
+  if (usb_audio_capture_init() != ESP_OK) {
+    ESP_LOGW(TAG, "USB capture unavailable");
+  }
+#endif
   const esp_timer_create_args_t poll = {.callback = usb_state_poll_cb,
                                         .name = "usb_state"};
   if (esp_timer_create(&poll, &s_state_timer) == ESP_OK) {

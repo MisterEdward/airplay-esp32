@@ -77,6 +77,9 @@ if(CONFIG_USB_AUDIO_SOURCE)
         "usb/usb_audio_source.c"
         "usb/usb_descriptors.c"
     )
+    if(CONFIG_USB_AUDIO_CAPTURE)
+        list(APPEND SRC_FILES "usb/usb_audio_capture.c")
+    endif()
 endif()
 
 # W5500 SPI Ethernet
