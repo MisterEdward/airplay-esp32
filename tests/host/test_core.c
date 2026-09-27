@@ -2,6 +2,7 @@
 // tests/host/run.sh — no ESP-IDF needed.
 #include "audio_align.h"
 #include "audio_envelope.h"
+#include "audio_tap_ring.h"
 #include "log_journal.h"
 #include "source_volume.h"
 
@@ -242,6 +243,65 @@ static void test_source_volume(void) {
   assert(!source_volume_normalize_id(longid, out, sizeof(out)));
 }
 
+static void test_tap_ring(void) {
+  audio_tap_ring_t r;
+  int16_t buf[2 * 8];
+  assert(!audio_tap_ring_init(&r, buf, 6)); // not a power of two
+  assert(audio_tap_ring_init(&r, buf, 8));
+  assert(audio_tap_ring_level(&r) == 0);
+
+  // Frames carry their own index so order and continuity can be checked.
+  int16_t in[2 * 32];
+  for (int i = 0; i < 32; i++) {
+    in[2 * i] = (int16_t)i;
+    in[2 * i + 1] = (int16_t)-i;
+  }
+  int16_t out[2 * 32];
+  assert(audio_tap_ring_read(&r, out, 4) == 0);
+  assert(audio_tap_ring_write(&r, in, 5) == 5);
+  assert(audio_tap_ring_level(&r) == 5);
+  // Full: only what fits goes in, nothing is overwritten.
+  assert(audio_tap_ring_write(&r, &in[2 * 5], 6) == 3);
+  assert(audio_tap_ring_level(&r) == 8);
+  assert(audio_tap_ring_write(&r, &in[2 * 8], 1) == 0);
+  assert(audio_tap_ring_read(&r, out, 3) == 3);
+  assert(out[0] == 0 && out[5] == -2);
+  // Wrap-around on both sides.
+  assert(audio_tap_ring_write(&r, &in[2 * 8], 3) == 3);
+  assert(audio_tap_ring_read(&r, out, 32) == 8);
+  for (int i = 0; i < 8; i++) {
+    assert(out[2 * i] == 3 + i && out[2 * i + 1] == -(3 + i));
+  }
+  assert(audio_tap_ring_level(&r) == 0);
+  // Long run across many wraps stays contiguous.
+  int next_in = 0;
+  int next_out = 0;
+  for (int round = 0; round < 1000; round++) {
+    size_t want = (size_t)(round % 7) + 1;
+    int16_t blk[2 * 8];
+    for (size_t i = 0; i < want; i++) {
+      blk[2 * i] = (int16_t)(next_in + (int)i);
+      blk[2 * i + 1] = 0;
+    }
+    next_in += (int)audio_tap_ring_write(&r, blk, want);
+    size_t got = audio_tap_ring_read(&r, out, (size_t)(round % 5) + 1);
+    for (size_t i = 0; i < got; i++) {
+      assert(out[2 * i] == (int16_t)next_out++);
+    }
+  }
+  // Discard empties the ring and reports what it dropped.
+  audio_tap_ring_write(&r, in, 4);
+  uint32_t level = audio_tap_ring_level(&r);
+  assert(audio_tap_ring_discard(&r) == level);
+  assert(audio_tap_ring_level(&r) == 0);
+  // Counters wrapping at 2^32 keep working (capacity is a power of two).
+  r.head = r.tail = UINT32_MAX - 2;
+  assert(audio_tap_ring_write(&r, in, 6) == 6);
+  assert(audio_tap_ring_level(&r) == 6);
+  assert(audio_tap_ring_read(&r, out, 6) == 6);
+  assert(out[0] == 0 && out[10] == 5);
+}
+
 int main(void) {
   test_shape();
   test_envelope_fade_in();
@@ -250,6 +310,7 @@ int main(void) {
   test_align();
   test_journal();
   test_source_volume();
+  test_tap_ring();
   puts("host core tests passed");
   return 0;
 }
