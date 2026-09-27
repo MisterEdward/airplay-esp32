@@ -288,6 +288,7 @@ static esp_err_t wifi_config_handler(httpd_req_t *req) {
       ESP_LOGI(TAG, "WiFi credentials saved. We are restarting...");
       // Schedule restart
       vTaskDelay(pdMS_TO_TICKS(1000));
+      wifi_shutdown_for_restart();
       esp_restart();
     } else {
       cJSON_AddBoolToObject(response, "success", false);
@@ -899,6 +900,7 @@ static esp_err_t ota_update_handler(httpd_req_t *req) {
   // Send response before restarting
   httpd_resp_sendstr(req, "Firmware update complete, rebooting now!\n");
   vTaskDelay(pdMS_TO_TICKS(500));
+  wifi_shutdown_for_restart();
   esp_restart();
 
   return ESP_OK;
@@ -1206,6 +1208,7 @@ static esp_err_t system_restart_handler(httpd_req_t *req) {
 
   ESP_LOGI(TAG, "Restart requested via web interface");
   vTaskDelay(pdMS_TO_TICKS(500));
+  wifi_shutdown_for_restart();
   esp_restart();
 
   return ESP_OK;

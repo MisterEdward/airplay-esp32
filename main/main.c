@@ -78,6 +78,7 @@ static void ota_verify_timer_cb(void *arg) {
            "restarting so the bootloader rolls back",
            OTA_VERIFY_TIMEOUT_S);
   vTaskDelay(pdMS_TO_TICKS(500));
+  wifi_shutdown_for_restart();
   esp_restart();
 }
 

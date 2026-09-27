@@ -8,6 +8,9 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_attr.h"
+#include "esp_sleep.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
 
@@ -33,6 +36,19 @@ static bool s_wifi_initialized = false;
 static bool s_sta_connected = false;
 static bool s_bssid_set = false;
 static esp_timer_handle_t s_retry_timer = NULL;
+static volatile bool s_shutting_down = false;
+
+// Without an IP for this long, restart.  On 2026-09-26 the board twice
+// failed to rejoin after an OTA reboot (17+ min of retries) while a power
+// cycle joined within seconds.
+#define WIFI_WATCHDOG_S 180
+static esp_timer_handle_t s_watchdog_timer = NULL;
+static int64_t s_down_since_us; // start of the current outage; 0 = connected
+// Survives esp_restart() (not a power cycle): set right before a watchdog
+// restart so the next boot, if it fails again, escalates to a deep sleep,
+// which powers the radio down like the power cycle that worked.
+#define WATCHDOG_MAGIC 0x57444f47u
+static RTC_NOINIT_ATTR uint32_t s_watchdog_restarts;
 
 // Saved AP config from init, used to re-enable AP without duplication
 static wifi_config_t s_ap_config;
@@ -89,6 +105,46 @@ static void enable_ap_mode(void) {
   }
 }
 
+void wifi_shutdown_for_restart(void) {
+  if (!s_wifi_initialized) {
+    return;
+  }
+  s_shutting_down = true;
+  esp_timer_stop(s_retry_timer);
+  if (s_watchdog_timer) {
+    esp_timer_stop(s_watchdog_timer);
+  }
+  if (s_sta_connected) {
+    // Deauthenticate now, so the AP does not hold our old association into
+    // the next boot's attempts.
+    esp_wifi_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+  esp_wifi_stop();
+}
+
+static void watchdog_callback(void *arg) {
+  if (s_sta_connected || s_down_since_us == 0 ||
+      !settings_has_wifi_credentials()) {
+    return;
+  }
+  int64_t down_s = (esp_timer_get_time() - s_down_since_us) / 1000000LL;
+  if (down_s < WIFI_WATCHDOG_S) {
+    return;
+  }
+  bool again = s_watchdog_restarts == WATCHDOG_MAGIC;
+  ESP_LOGW(TAG, "No WiFi for %lld s (%d attempts): %s", (long long)down_s,
+           s_retry_num, again ? "deep sleep 1 s (radio power-down)" : "restart");
+  wifi_shutdown_for_restart();
+  if (again) {
+    s_watchdog_restarts = 0;
+    esp_sleep_enable_timer_wakeup(1000000);
+    esp_deep_sleep_start();
+  }
+  s_watchdog_restarts = WATCHDOG_MAGIC;
+  esp_restart();
+}
+
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data) {
   if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
@@ -97,7 +153,13 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     xTaskCreate(scan_and_connect_task, "wifi_scan", 4096, NULL, 3, NULL);
   } else if (event_base == WIFI_EVENT &&
              event_id == WIFI_EVENT_STA_DISCONNECTED) {
+    if (s_sta_connected || s_down_since_us == 0) {
+      s_down_since_us = esp_timer_get_time();
+    }
     s_sta_connected = false;
+    if (s_shutting_down) {
+      return;
+    }
     wifi_event_sta_disconnected_t *disconnected =
         (wifi_event_sta_disconnected_t *)event_data;
     ESP_LOGI(TAG, "Disconnected from AP, reason: %d", disconnected->reason);
@@ -126,6 +188,8 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
     s_retry_num = 0;
     s_sta_connected = true;
+    s_down_since_us = 0;
+    s_watchdog_restarts = 0;
     xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 
     // Disable AP mode when STA connects
@@ -280,6 +344,14 @@ static void wifi_init_base(void) {
       .name = "wifi_retry",
   };
   ESP_ERROR_CHECK(esp_timer_create(&timer_args, &s_retry_timer));
+
+  const esp_timer_create_args_t wd_args = {
+      .callback = watchdog_callback,
+      .name = "wifi_wd",
+  };
+  ESP_ERROR_CHECK(esp_timer_create(&wd_args, &s_watchdog_timer));
+  s_down_since_us = esp_timer_get_time();
+  esp_timer_start_periodic(s_watchdog_timer, 10 * 1000000LL);
 
   s_wifi_initialized = true;
 }
@@ -458,6 +530,12 @@ esp_err_t wifi_scan(wifi_ap_record_t **ap_list, uint16_t *ap_count) {
 void wifi_stop(void) {
   if (s_wifi_initialized) {
     esp_timer_stop(s_retry_timer);
+    // WiFi off on purpose (Ethernet took over): nothing for the watchdog.
+    if (s_watchdog_timer) {
+      esp_timer_stop(s_watchdog_timer);
+      esp_timer_delete(s_watchdog_timer);
+      s_watchdog_timer = NULL;
+    }
     esp_wifi_stop();
     esp_wifi_deinit();
     s_wifi_initialized = false;

@@ -50,6 +50,12 @@ esp_err_t wifi_scan(wifi_ap_record_t **ap_list, uint16_t *ap_count);
 void wifi_stop(void);
 
 /**
+ * Call right before esp_restart(): deauthenticates from the AP (so it does
+ * not keep our old association into the next boot) and stops the radio.
+ */
+void wifi_shutdown_for_restart(void);
+
+/**
  * Set the DHCP hostname from the given device name.
  * Sanitizes to a valid DNS label (lowercase, hyphens for spaces/symbols).
  * Takes effect on the next DHCP transaction.
