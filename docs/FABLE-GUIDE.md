@@ -13,6 +13,22 @@ read the journal.
 
 ## 1. Where things stand
 
+**Update 2026-09-27 (stress-test campaign, report:
+https://claude.ai/artifact/RTLNSYFthtMgFKNcWSFdwe).**  On `main`: the pop fix
+(36eaced).  Built and running on the board, not yet on `main` (waiting for an
+iPhone check): fast SRP pair-setup (session start 3.61 -> 1.73 s click to first
+sample; the TCL TV takes 2.23 s), WiFi clean-deauth + offline watchdog, PTP
+multicast re-join, and the USB capture debug path (see §5).  Findings:
+- The "phantom session" (Music shows playing, no sound) is Music.app's own
+  idle-timeout disconnect (`baod-B> auto disconnecting ... due idle timeout`),
+  ~73 s after a scripted seek.  Not firmware.
+- The 2.4 GHz link to the board collapses at times when powered from the PS5
+  (ping ~85 ms, 20 % loss, RSSI unchanged); on the Mac's USB power it stays at
+  ~7 ms.  After such a collapse PTP stopped arriving until reboot; fixed by the
+  re-join.
+- 90 min measured on the wire: 0 resets, seek median 0.80 s, |err| p50 157 us.
+
+
 `main` is the only branch.  It is `55cfa44` (the build whose multiroom sync
 Edward confirmed as instant) plus the fixes below.  Everything older is kept
 as tags, not branches:
@@ -261,6 +277,15 @@ reselect the speaker).  Knobs reset to the defaults on reboot.
 
 **Raw pipe:** `curl -X POST --data-binary @1mb.bin http://192.168.68.104/api/speedtest/upload -w '%{speed_upload}'`.
 
+**Stress harness and capture (2026-09-27):** `scripts/fable/stress/`
+(README there).  Mic-based or, better, on the wire: the capture firmware makes
+the board a USB input ("Bedroom Speakers Audio") carrying exactly what goes to
+the DAC, and can mute the DAC (`GET /api/debug/capture?on=1&mute=1`, off at
+boot).  Mac-side AirPlay logs: `/usr/bin/log stream --level debug` on
+AirPlayXPCHelper (debug lines are not persisted, stream them live).
+Plugging the board into the Mac once left it in ROM download mode
+(303a:1001, `boot:0x0`): press RESET.
+
 **Log lines that matter** (tags `audio_buf`, `audio_recv`, `audio_time`,
 `rtsp_handlers`):
 
@@ -324,6 +349,20 @@ latches the local timeline: `PTP not locked … local timeline latched`.
 grandmaster and treat "anchor names X, tracked source announces X as GM"
 as a lock.  iPhone-as-sender is unaffected (the phone sends its own Sync).
 This touches sync: listening test mandatory.
+
+### Music's idle-timeout disconnect (sender side)
+
+After some scripted seeks Music arms an idle timer that is not cancelled and
+~73 s later disconnects the AirPlay device while playback continues; Music
+then plays on the Mac's own speakers or shows "playing" with no session.
+The AirPlay side of a fatal seek is identical to a good one.  Workaround in
+tests: `scripts/fable/stress/guard.sh` reselects the speaker.
+
+### WiFi 2.4 GHz collapse and PTP
+
+See §1.  Firmware only mitigates: clean deauth before restarts, a watchdog
+(no IP for 180 s -> restart, then deep sleep 1 s), and a PTP multicast re-join
+after 5 s of silence during a session (`ptp.rejoins`).
 
 ### Step detection lag at resume
 

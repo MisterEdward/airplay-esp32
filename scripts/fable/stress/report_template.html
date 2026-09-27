@@ -1,0 +1,346 @@
+<meta charset="utf-8">
+<title>Fable sub stres</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+:root {
+  --bg: #F3F5F4;
+  --surface: #FFFFFF;
+  --ink: #162022;
+  --muted: #56646A;
+  --faint: #8A979B;
+  --rule: #D4DCDA;
+  --grid: #E6EBE9;
+  --esp: #1B6E8E;
+  --esp-soft: #D6E8EF;
+  --tv: #A26F1E;
+  --tv-soft: #F1E4CE;
+  --good: #2E7A4C;
+  --good-soft: #DCEFE3;
+  --warn: #A8650A;
+  --warn-soft: #F6E8D2;
+  --bad: #B0343A;
+  --bad-soft: #F6DEDF;
+  --sans: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --cond: "IBM Plex Sans Condensed", "Arial Narrow", "Helvetica Neue", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0E1315; --surface: #151D20; --ink: #E2E9E7; --muted: #9AA8AB; --faint: #6D7B7F;
+    --rule: #2A3639; --grid: #1E282B;
+    --esp: #62B6D6; --esp-soft: #173541; --tv: #DDA955; --tv-soft: #3A2C15;
+    --good: #62BF88; --good-soft: #163324; --warn: #E3A447; --warn-soft: #3A2A12;
+    --bad: #E56D72; --bad-soft: #3D1A1C;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0E1315; --surface: #151D20; --ink: #E2E9E7; --muted: #9AA8AB; --faint: #6D7B7F;
+  --rule: #2A3639; --grid: #1E282B;
+  --esp: #62B6D6; --esp-soft: #173541; --tv: #DDA955; --tv-soft: #3A2C15;
+  --good: #62BF88; --good-soft: #163324; --warn: #E3A447; --warn-soft: #3A2A12;
+  --bad: #E56D72; --bad-soft: #3D1A1C;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--sans);
+  font-size: 15px; line-height: 1.55; -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1060px; margin: 0 auto; padding-inline: 20px; padding-block: 40px 72px; }
+h1, h2, h3 { font-family: var(--cond); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(34px, 6vw, 52px); font-weight: 700; letter-spacing: -0.01em; line-height: 1.02; }
+h2 { font-size: 26px; font-weight: 600; line-height: 1.15; }
+h3 { font-size: 18px; font-weight: 600; }
+p { margin: 0; max-width: 68ch; }
+.mono, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+header.top { display: grid; gap: 14px; padding-bottom: 28px; border-bottom: 1px solid var(--rule); }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 18px; font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+.lead { font-size: 17.5px; line-height: 1.6; max-width: 72ch; }
+.facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin-top: 8px;
+  border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+.fact { padding: 14px 16px 14px 0; display: grid; gap: 2px; align-content: start; }
+.fact + .fact { padding-left: 16px; border-left: 1px solid var(--rule); }
+.fact .v { font-family: var(--mono); font-size: 26px; font-weight: 500; line-height: 1.1; }
+.fact .k { font-size: 13px; color: var(--muted); }
+.fact .v small { font-size: 14px; color: var(--muted); }
+section { display: grid; gap: 16px; padding-top: 44px; }
+.intro { color: var(--muted); max-width: 72ch; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13px; color: var(--muted); align-items: center; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+.sw.esp { background: var(--esp); } .sw.tv { background: var(--tv); }
+.tick-sw { display: inline-block; width: 2px; height: 12px; background: var(--ink); margin-right: 6px; vertical-align: -2px; }
+
+.table-scroll { overflow-x: auto; background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; min-width: 820px; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
+th { font-family: var(--mono); font-size: 11.5px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); background: var(--surface); }
+tr.grp td { font-family: var(--cond); font-weight: 600; font-size: 14px; letter-spacing: 0.02em; color: var(--muted); background: var(--bg); padding-top: 10px; padding-bottom: 6px; }
+td.act { min-width: 170px; }
+td.act b { font-weight: 600; display: block; }
+td.act span { font-size: 12.5px; color: var(--muted); }
+td.n { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+td.n.esp { color: var(--esp); font-weight: 500; }
+td.n.tv { color: var(--tv); font-weight: 500; }
+td.delta { font-family: var(--mono); font-size: 13px; white-space: nowrap; text-align: right; }
+.faster { color: var(--good); } .slower { color: var(--bad); } .same { color: var(--muted); }
+td.plot { width: 330px; padding-top: 4px; padding-bottom: 4px; }
+td.plot svg { display: block; width: 100%; height: auto; }
+td.small { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.axis-row td { border-bottom: none; padding-top: 0; }
+.chip { display: inline-block; font-family: var(--mono); font-size: 11.5px; padding: 1px 7px; border-radius: 10px; white-space: nowrap; }
+.chip.bad { background: var(--bad-soft); color: var(--bad); }
+.chip.warn { background: var(--warn-soft); color: var(--warn); }
+.chip.good { background: var(--good-soft); color: var(--good); }
+.chip.muted { background: var(--grid); color: var(--muted); }
+
+.bd { display: grid; gap: 12px; background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 18px 20px; }
+.bd-row { display: grid; grid-template-columns: 130px 1fr 64px; gap: 12px; align-items: center; }
+.bd-row .lab { font-weight: 600; font-size: 14px; }
+.bd-row .tot { font-family: var(--mono); text-align: right; font-size: 13px; }
+.bar { display: flex; height: 22px; border-radius: 3px; overflow: hidden; background: var(--grid); }
+.bar > div { height: 100%; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11px; color: #fff; white-space: nowrap; overflow: hidden; }
+.seg-mac { background: #7A8A8F; } .seg-sender { background: var(--tv); } .seg-sched { background: #5E8F7B; } .seg-aud { background: var(--esp); }
+.bd-legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12.5px; color: var(--muted); }
+.bd-legend i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 6px; vertical-align: -2px; }
+
+.stages { display: grid; gap: 0; border-top: 1px solid var(--rule); }
+.stage { display: grid; grid-template-columns: 210px 1fr; gap: 18px; padding: 18px 0; border-bottom: 1px solid var(--rule); }
+.stage .head { display: grid; gap: 6px; align-content: start; }
+.stage .head .eyebrow { font-size: 11px; }
+.stage ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+.stage li { max-width: 78ch; }
+
+.bugs { display: grid; gap: 12px; }
+.bug { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 16px 18px; display: grid; gap: 8px; }
+.bug .row1 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; }
+.bug .rank { font-family: var(--mono); color: var(--faint); font-size: 13px; }
+.bug h3 { flex: 1 1 320px; }
+.bug p { max-width: 90ch; }
+.bug .ev { font-family: var(--mono); font-size: 12.5px; color: var(--muted); background: var(--bg); border-radius: 4px; padding: 8px 10px; overflow-x: auto; white-space: pre; }
+.bug .fix { font-size: 14px; }
+.bug .fix b { font-weight: 600; }
+.bug.dim { background: transparent; }
+
+.soak { display: grid; gap: 12px; background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 16px 18px; }
+.soak svg { width: 100%; height: auto; display: block; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 14px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; font-family: var(--mono); font-size: 13px; }
+code { font-family: var(--mono); font-size: 0.9em; background: var(--grid); padding: 0 4px; border-radius: 3px; }
+.path { font-family: var(--mono); font-size: 12px; word-break: break-all; color: var(--muted); }
+footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--rule); color: var(--faint); font-size: 12.5px; }
+
+@media (max-width: 760px) {
+  .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fact:nth-child(3) { padding-left: 0; border-left: none; }
+  .fact:nth-child(n+3) { border-top: 1px solid var(--rule); }
+  .stage { grid-template-columns: 1fr; gap: 8px; }
+  .two { grid-template-columns: 1fr; }
+  .bd-row { grid-template-columns: 90px 1fr 54px; }
+}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow">Raport de stres · 26 septembrie 2026</div>
+    <h1>Fable sub stres</h1>
+    <div class="meta">
+      <span>ESP32-S3 + PCM5102A · Bedroom Speakers · 192.168.68.104</span>
+      <span>firmware: main + fix PTP grandmaster (<span id="fw">81d7d12</span>)</span>
+      <span>sender: Music pe MacBook Pro M1</span>
+      <span>referință: TCL C6K, AirPlay 2 nativ</span>
+    </div>
+    <p class="lead" id="lead"></p>
+    <div class="facts" id="facts"></div>
+  </header>
+
+  <section id="azi">
+    <div class="eyebrow">27 septembrie · actualizare</div>
+    <h2>Ce s-a schimbat de ieri</h2>
+    <div class="table-scroll"><table id="upd" style="min-width:640px">
+      <thead><tr><th>Subiect</th><th>Stare</th><th>Detalii</th></tr></thead><tbody></tbody></table></div>
+    <p class="intro" id="upd-note"></p>
+  </section>
+
+  <section id="latenta">
+    <div class="eyebrow">1 · Latență</div>
+    <h2>Cât durează fiecare acțiune, față de TV</h2>
+    <p class="intro">Timpul de la comanda din Music până când microfonul Mac-ului, pus lângă boxă, aude efectul: sunetul nou, liniștea sau schimbarea de volum. Aceeași metodă pentru ambele dispozitive, fiecare testat singur. Fiecare punct e o măsurătoare, iar linia verticală e mediana. Valorile peste 4 s sunt strânse la margine.</p>
+    <div class="legend">
+      <span><i class="sw esp"></i>ESP32 (Bedroom Speakers)</span>
+      <span><i class="sw tv"></i>TV (TCL C6K)</span>
+      <span><i class="tick-sw"></i>mediană</span>
+    </div>
+    <div class="table-scroll">
+      <table id="cmp">
+        <thead><tr>
+          <th>Acțiune</th><th style="text-align:right">ESP32</th><th style="text-align:right">TV</th><th style="text-align:right">Δ</th>
+          <th>Distribuție (0 – 4 s)</th><th>ESP32 p90 / max</th><th>Obs.</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="compozitie">
+    <div class="eyebrow">2 · Unde se duce timpul</div>
+    <h2>Boxa nu adaugă aproape nimic; restul e programul sender-ului</h2>
+    <p class="intro">Descompunere pe mediane, din jurnalul boxei sincronizat cu ceasul Mac-ului. Sender-ul decide când trimite ancora și cât de departe în viitor o pune. Boxa pornește la momentul exact din ancoră (eroare tipică de zeci de µs), iar ultimii ~140 ms sunt fade-in-ul de 150 ms plus DMA până când microfonul trece pragul.</p>
+    <div class="bd" id="bd"></div>
+  </section>
+
+  <section id="etape">
+    <div class="eyebrow">3 · Etape</div>
+    <h2>De la realist la absurd: unde și cum pică</h2>
+    <div class="stages" id="stages"></div>
+  </section>
+
+  <section id="bugs">
+    <div class="eyebrow">4 · Bug-uri</div>
+    <h2>Ce am găsit, ordonat după cât se aude</h2>
+    <p class="intro">Nimic nu e reparat încă. Fiecare reparație vine separat, cu acordul tău și cu testul de ureche.</p>
+    <div class="bugs" id="buglist"></div>
+  </section>
+
+  <section id="anduranta">
+    <div class="eyebrow">5 · Anduranță</div>
+    <h2 id="soak-title">Anduranță</h2>
+    <div class="soak" id="soak"></div>
+  </section>
+
+  <section id="metoda">
+    <div class="eyebrow">6 · Metodă</div>
+    <h2>Cum s-a măsurat</h2>
+    <div class="two">
+      <div style="display:grid; gap:10px">
+        <p><b>Sender.</b> Music pe Mac, pilotat din JavaScript for Automation printr-un proces persistent. Timestamp-ul fiecărei comenzi se ia în ms, chiar lângă Apple Event.</p>
+        <p><b>Sunet.</b> Microfonul MacBook-ului, printr-un tap AVAudioEngine cu timestamp-uri hardware (<code>ffmpeg</code>/avfoundation pierdea ~12 % din eșantioane, așa că a fost înlocuit). Nivelul e calculat în banda 100–800 Hz (SNR ~30 dB față de cameră), cu prag la 50 % între liniște și muzică, susținut 150 ms.</p>
+        <p><b>Pop-uri.</b> Vârf izolat peste 2,5 kHz, de cel puțin 25 dB peste vecinătatea de ±100 ms, apărut în liniște. În 280 s de pauză: 0 detecții.</p>
+      </div>
+      <div style="display:grid; gap:10px">
+        <p><b>Jurnalul boxei.</b> Liniile <code>FLUSHBUFFERED</code>, <code>Anchor</code> și <code>Acquired</code> sunt legate de ceasul Mac-ului prin marcaje HTTP (<code>/api/debug/seek_mode?m=1</code>, care nu schimbă nimic), cu o împrăștiere de 50–90 ms. Verificare încrucișată: microfonul aude sunetul la 140 ms (mediană) după <code>Acquired</code>.</p>
+        <p><b>Limite.</b> La next/prev, piesele cu intro liniștit întârzie detecția pe microfon; pentru ESP32, jurnalul dă valoarea reală (0,6 s). Piesele nu au fost identice între ESP32 și TV. În etapa 1 ai fost în cameră și ai schimbat piesa o dată.</p>
+        <dl class="kv" id="rawdata"></dl>
+      </div>
+    </div>
+  </section>
+
+  <footer>Generat din <span class="mono" id="nact"></span> acțiuni. Datele brute (TSV/JSON + jurnale) sunt pe Mac, în scratchpad-ul sesiunii.</footer>
+</div>
+
+<script>
+const D = /*DATA*/null;
+const fmtS = ms => ms == null ? '—' : (ms / 1000).toLocaleString('ro-RO', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' s';
+const fmtMs = ms => ms == null ? '—' : Math.round(ms).toLocaleString('ro-RO') + ' ms';
+const el = (tag, attrs = {}, html = '') => { const e = document.createElement(tag); for (const k in attrs) e.setAttribute(k, attrs[k]); e.innerHTML = html; return e; };
+
+/* ---------- lead + facts ---------- */
+const byKey = Object.fromEntries(D.compare.map(c => [c.key, c]));
+const totalActions = Object.entries(D.totals).filter(([k]) => !k.includes('aborted')).reduce((a, [, v]) => a + v.actions, 0);
+const hours = D.uptime_span ? (D.uptime_span[1] - D.uptime_span[0]) / 3600 : 0;
+document.getElementById('nact').textContent = totalActions.toLocaleString('ro-RO');
+document.getElementById('lead').innerHTML = LEAD_TEXT(byKey, totalActions, hours);
+const facts = [
+  [String(D.resets), 'resetări ale boxei', `în ${hours.toLocaleString('ro-RO', {maximumFractionDigits: 1})} h de stres; închiderile de sesiune vin din Music`],
+  [totalActions.toLocaleString('ro-RO'), 'acțiuni trimise din Music', 'de la 1 la 20 pe secundă'],
+  [fmtS(byKey.seek.esp.med), 'seek, mediană ESP32', `TV: ${fmtS(byKey.seek.tv.med)}`],
+  [`${Math.round(100 * D.pops.esp.pops / D.pops.esp.plays)} %`, 'play-uri cu pop pe ESP32', `TV: ${D.pops.tv.pops} din ${D.pops.tv.plays}`],
+];
+const fx = document.getElementById('facts');
+for (const [v, k, s] of facts) fx.append(el('div', {class: 'fact'}, `<div class="v">${v}</div><div class="k">${k}<br><span style="color:var(--faint)">${s}</span></div>`));
+
+/* ---------- comparison table ---------- */
+const MAXV = 4000, W = 330, H = 40, PADX = 6;
+const xs = v => PADX + (Math.min(v, MAXV) / MAXV) * (W - 2 * PADX);
+function strip(c) {
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="distribuție ${c.title}">`;
+  for (let t = 0; t <= MAXV; t += 500) {
+    s += `<line x1="${xs(t)}" x2="${xs(t)}" y1="2" y2="${H - 2}" stroke="var(--grid)" stroke-width="${t % 1000 ? 0.6 : 1.2}"/>`;
+  }
+  const lane = (vals, y, color, med) => {
+    let r = '';
+    vals.forEach((v, i) => {
+      const jitter = ((i * 37) % 7 - 3) * 1.1;
+      r += `<circle cx="${xs(v).toFixed(1)}" cy="${(y + jitter).toFixed(1)}" r="2.6" fill="${color}" fill-opacity="${v > MAXV ? 1 : 0.55}"${v > MAXV ? ' stroke="var(--ink)" stroke-width="0.6"' : ''}/>`;
+    });
+    if (med != null) r += `<line x1="${xs(med)}" x2="${xs(med)}" y1="${y - 8}" y2="${y + 8}" stroke="var(--ink)" stroke-width="2"/>`;
+    return r;
+  };
+  s += lane(c.esp.vals || [], 12, 'var(--esp)', c.esp.med);
+  s += lane(c.tv.vals || [], 29, 'var(--tv)', c.tv.med);
+  return s + '</svg>';
+}
+function axis() {
+  let s = `<svg viewBox="0 0 ${W} 16" aria-hidden="true">`;
+  for (let t = 0; t <= MAXV; t += 1000) s += `<text x="${xs(t)}" y="11" font-size="9.5" text-anchor="middle" fill="var(--muted)" font-family="IBM Plex Mono, monospace">${t / 1000} s</text>`;
+  return s + '</svg>';
+}
+const SECT = {realist: 'Etapa 1 · realist', agitat: 'Etapa 2 · utilizator agitat', nerealist: 'Etapa 3 · nerealist'};
+const tb = document.querySelector('#cmp tbody');
+let lastSec = null;
+for (const c of D.compare) {
+  if (c.section !== lastSec) {
+    tb.append(el('tr', {class: 'grp'}, `<td colspan="7">${SECT[c.section]}</td>`));
+    lastSec = c.section;
+  }
+  const e = c.esp.med, t = c.tv.med;
+  let delta = '—', cls = 'same';
+  if (e != null && t != null) {
+    const d = e - t;
+    delta = (d > 0 ? '+' : '−') + Math.abs(Math.round(d)) + ' ms';
+    cls = Math.abs(d) < 40 ? 'same' : (d < 0 ? 'faster' : 'slower');
+  }
+  const obs = OBS[c.key] || '';
+  const tr = el('tr', {}, `
+    <td class="act"><b>${c.title}</b><span>${c.note || ''}</span></td>
+    <td class="n esp">${fmtS(e)}</td><td class="n tv">${fmtS(t)}</td>
+    <td class="delta ${cls}">${delta}</td>
+    <td class="plot">${strip(c)}</td>
+    <td class="small">${fmtS(c.esp.p90)} / ${fmtS(c.esp.max)}<br>n=${c.esp.vals ? c.esp.vals.length : 0}${c.esp.unmeasured ? ` (+${c.esp.unmeasured} nemăs.)` : ''}</td>
+    <td>${obs}</td>`);
+  tb.append(tr);
+}
+tb.append(el('tr', {class: 'axis-row'}, `<td></td><td></td><td></td><td></td><td class="plot">${axis()}</td><td></td><td></td>`));
+
+/* ---------- today ---------- */
+const ub = document.querySelector('#upd tbody');
+for (const [a, chip, b] of UPDATE) ub.append(el('tr', {}, `<td class="act"><b>${a}</b></td><td><span class="chip ${chip[0]}">${chip[1]}</span></td><td>${b}</td>`));
+document.getElementById('upd-note').innerHTML = UPDATE_NOTE;
+
+/* ---------- breakdown ---------- */
+const BD = [['seek', 'Seek'], ['next', 'Next'], ['play', 'Play'], ['sstart', 'Start sesiune']];
+const bd = document.getElementById('bd');
+const maxTot = Math.max(...BD.map(([k]) => D.breakdown[k].total || 0));
+bd.append(el('div', {class: 'bd-legend'}, `
+  <span><i class="seg-mac"></i>Mac: comandă → RTSP la boxă</span>
+  <span><i class="seg-sender"></i>sender: pregătește audio, trimite ancora</span>
+  <span><i class="seg-sched"></i>așteptare până la ora din ancoră</span>
+  <span><i class="seg-aud"></i>fade-in + DMA + prag microfon</span>`));
+for (const [k, lab] of BD) {
+  const b = D.breakdown[k];
+  const segs = [['seg-mac', b.mac], ['seg-sender', b.sender], ['seg-sched', b.esp], ['seg-aud', b.audible]];
+  const sum = segs.reduce((a, [, v]) => a + (v || 0), 0);
+  const scale = (b.total || sum) / maxTot;
+  let bar = `<div class="bar" style="width:${(100 * scale).toFixed(1)}%">`;
+  for (const [c, v] of segs) if (v) bar += `<div class="${c}" style="width:${(100 * v / sum).toFixed(1)}%" title="${Math.round(v)} ms">${v / sum > 0.12 ? Math.round(v) : ''}</div>`;
+  bar += '</div>';
+  bd.append(el('div', {class: 'bd-row'}, `<div class="lab">${lab}</div><div>${bar}</div><div class="tot">${fmtS(b.total)}</div>`));
+}
+bd.append(el('p', {class: 'intro', style: 'font-size:13.5px'}, BD_NOTE));
+
+/* ---------- stages / bugs / soak (text from the generator) ---------- */
+const st = document.getElementById('stages');
+for (const s of STAGES) st.append(el('div', {class: 'stage'}, `<div class="head"><div class="eyebrow">${s.eyebrow}</div><h3>${s.title}</h3><div><span class="chip ${s.chip[0]}">${s.chip[1]}</span></div></div><ul>${s.items.map(i => `<li>${i}</li>`).join('')}</ul>`));
+const bl = document.getElementById('buglist');
+BUGS.forEach((b, i) => bl.append(el('div', {class: 'bug' + (b.dim ? ' dim' : '')}, `
+  <div class="row1"><span class="rank">${b.dim ? '—' : '#' + (i + 1)}</span><h3>${b.title}</h3><span class="chip ${b.sev[0]}">${b.sev[1]}</span></div>
+  <p>${b.what}</p>${b.ev ? `<div class="ev">${b.ev}</div>` : ''}${b.fix ? `<p class="fix"><b>Reparație propusă:</b> ${b.fix}</p>` : ''}`)));
+SOAK_RENDER(document.getElementById('soak'), D.soak);
+const rd = document.getElementById('rawdata');
+for (const [k, v] of RAW) rd.append(el('dt', {}, k), el('dd', {}, v));
+</script>
