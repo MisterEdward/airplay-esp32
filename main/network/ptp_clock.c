@@ -124,6 +124,9 @@ static struct {
   uint32_t rejected_master_count; // SYNC/FOLLOW_UP from a non-matching master
   uint32_t outlier_count;         // samples rejected by 50ms threshold
   uint32_t step_count;            // master timescale steps followed
+  uint32_t rejoin_count;          // multicast re-joins after a PTP silence
+  uint32_t last_rx_ms;            // any PTP message, either port
+  uint32_t last_rejoin_ms;
 
   // Timescale step detection: a run of outliers that agree with each other.
   int64_t step_candidate_ns; // first offset of the current run
@@ -565,6 +568,52 @@ static int create_ptp_socket(uint16_t port) {
   return sock;
 }
 
+// Leave and re-join the PTP multicast group on one socket.  The join makes
+// lwIP send a fresh IGMP membership report.
+static void rejoin_group(int sock) {
+  if (sock < 0) {
+    return;
+  }
+  struct ip_mreq mreq = {0};
+  mreq.imr_multiaddr.s_addr = inet_addr(PTP_MULTICAST_ADDR);
+  mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+  setsockopt(sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+  if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) <
+      0) {
+    ESP_LOGE(TAG, "Re-join of %s failed: %d", PTP_MULTICAST_ADDR, errno);
+  }
+}
+
+// A session names a PTP clock but nothing arrives on either port: re-join
+// the multicast group.  On 2026-09-27, after the WiFi link degraded for half
+// an hour, the board received zero PTP messages in every later session
+// until it was rebooted (sync_count 0, every anchor fell back to the local
+// timeline after a 1.5 s wait): the group membership had been lost.
+#define PTP_SILENCE_REJOIN_MS 5000
+#define PTP_REJOIN_INTERVAL_MS 10000
+static void check_ptp_silence(void) {
+  if (ptp.expected_clock_id == 0) {
+    return; // no session is waiting for PTP: silence is normal
+  }
+  uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+  uint32_t since_rx = ptp.last_rx_ms ? now_ms - ptp.last_rx_ms : UINT32_MAX;
+  if (since_rx < PTP_SILENCE_REJOIN_MS ||
+      (ptp.last_rejoin_ms &&
+       now_ms - ptp.last_rejoin_ms < PTP_REJOIN_INTERVAL_MS)) {
+    return;
+  }
+  ptp.last_rejoin_ms = now_ms;
+  ptp.rejoin_count++;
+  ESP_LOGW(TAG,
+           "No PTP message for %s while a session expects %016llx: "
+           "re-joining %s (#%lu)",
+           since_rx == UINT32_MAX ? "ever" : "5+ s",
+           (unsigned long long)ptp.expected_clock_id, PTP_MULTICAST_ADDR,
+           (unsigned long)ptp.rejoin_count);
+  rejoin_group(ptp.event_socket);
+  rejoin_group(ptp.general_socket);
+}
+
 // PTP task - listens for messages on both ports
 static void ptp_task(void *pvParameters) {
   uint8_t buffer[256];
@@ -605,6 +654,7 @@ static void ptp_task(void *pvParameters) {
       continue;
     }
 
+    check_ptp_silence();
     if (ret == 0) {
       // Timeout - check if we lost lock due to no messages
     } else {
@@ -612,6 +662,7 @@ static void ptp_task(void *pvParameters) {
       if (ptp.event_socket >= 0 && FD_ISSET(ptp.event_socket, &read_fds)) {
         ssize_t len = recv(ptp.event_socket, buffer, sizeof(buffer), 0);
         if (len > 0) {
+          ptp.last_rx_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
           process_ptp_message(buffer, (size_t)len, true);
         }
       }
@@ -620,6 +671,7 @@ static void ptp_task(void *pvParameters) {
       if (ptp.general_socket >= 0 && FD_ISSET(ptp.general_socket, &read_fds)) {
         ssize_t len = recv(ptp.general_socket, buffer, sizeof(buffer), 0);
         if (len > 0) {
+          ptp.last_rx_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
           process_ptp_message(buffer, (size_t)len, false);
         }
       }
@@ -858,6 +910,7 @@ void ptp_clock_get_stats(ptp_stats_t *stats) {
   stats->filtered_offset_ns = ptp.filtered_offset_ns;
   stats->outlier_count = ptp.outlier_count;
   stats->step_count = ptp.step_count;
+  stats->rejoin_count = ptp.rejoin_count;
 
   if (ptp.locked && ptp.lock_start_ms > 0) {
     uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;

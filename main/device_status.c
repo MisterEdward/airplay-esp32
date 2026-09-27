@@ -208,6 +208,7 @@ cJSON *device_status_build_json(void) {
   cJSON_AddNumberToObject(ptp, "sync_count", ps.sync_count);
   cJSON_AddNumberToObject(ptp, "outliers", ps.outlier_count);
   cJSON_AddNumberToObject(ptp, "steps", ps.step_count);
+  cJSON_AddNumberToObject(ptp, "rejoins", ps.rejoin_count);
   cJSON_AddNumberToObject(
       ptp, "gap_us",
       (double)((ps.last_offset_ns - ps.filtered_offset_ns) / 1000LL));

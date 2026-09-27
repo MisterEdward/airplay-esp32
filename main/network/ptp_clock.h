@@ -73,6 +73,7 @@ typedef struct {
   uint32_t lock_time_ms;      // Time since lock achieved (0 if not locked)
   uint32_t outlier_count;     // Samples rejected as outliers since start
   uint32_t step_count;        // Master timescale steps followed
+  uint32_t rejoin_count;      // Multicast re-joins after a PTP silence
 } ptp_stats_t;
 
 void ptp_clock_get_stats(ptp_stats_t *stats);
