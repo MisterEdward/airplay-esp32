@@ -93,3 +93,16 @@ __attribute__((weak)) void audio_output_get_stats(audio_output_stats_t *out) {
     memset(out, 0, sizeof(*out));
   }
 }
+
+/* The output tap and the DAC mute test mode live in the I2S render task. */
+__attribute__((weak)) void audio_output_set_tap(audio_output_tap_fn fn) {
+  (void)fn;
+}
+
+__attribute__((weak)) void audio_output_set_dac_mute(bool mute) {
+  (void)mute;
+}
+
+__attribute__((weak)) bool audio_output_get_dac_mute(void) {
+  return false;
+}

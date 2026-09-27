@@ -58,6 +58,14 @@ typedef enum {
 typedef size_t (*audio_output_pull_fn)(int16_t *pcm, size_t max_frames,
                                        void *ctx);
 
+/**
+ * Output tap: called by the render task with every block exactly as it is
+ * handed to the DAC (post envelope, volume and channel mode), interleaved
+ * stereo int16 at the output rate.  Runs in the real-time render task: it
+ * must copy and return, never block.
+ */
+typedef void (*audio_output_tap_fn)(const int16_t *pcm, size_t frames);
+
 /** Render-task statistics for the status API and diagnostics. */
 typedef struct {
   uint32_t dma_underruns;  // DMA clocked out descriptors nobody filled
@@ -125,6 +133,18 @@ void audio_output_set_source_volume(audio_source_t source, int32_t volume_q15,
 
 /** Snapshot of render statistics. */
 void audio_output_get_stats(audio_output_stats_t *out);
+
+/** Register (or clear, with fn=NULL) the output tap. */
+void audio_output_set_tap(audio_output_tap_fn fn);
+
+/**
+ * DAC mute test mode: the render task writes zeros to the DAC instead of
+ * each block, AFTER the tap has seen the real block.  Everything upstream
+ * (timing, envelope, statistics, the DMA cursor) is unchanged; only what
+ * reaches the speaker is silenced.  Off at boot, not persisted.
+ */
+void audio_output_set_dac_mute(bool mute);
+bool audio_output_get_dac_mute(void);
 
 /**
  * Write raw PCM data to the I2S output, bypassing the render task.

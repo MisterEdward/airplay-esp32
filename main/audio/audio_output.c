@@ -202,13 +202,39 @@ static uint32_t output_queued_frames(int64_t *sampled_us) {
   return queued > ring ? (uint32_t)ring : (uint32_t)queued;
 }
 
-static void dma_write(const int16_t *pcm, size_t frames) {
+/* Debug hooks at the DAC boundary (see audio_output_set_tap/_dac_mute). */
+static volatile audio_output_tap_fn s_tap;
+static volatile bool s_dac_mute;
+// Zeros written instead of a block while the DAC mute test mode is on.
+#define MUTE_CHUNK_FRAMES 256
+static int16_t s_mute_zeros[MUTE_CHUNK_FRAMES * 2];
+
+static void i2s_submit(const int16_t *pcm, size_t frames) {
   size_t written = 0;
   if (i2s_channel_write(tx_handle, pcm, frames * 2 * sizeof(int16_t), &written,
                         portMAX_DELAY) == ESP_OK) {
     portENTER_CRITICAL(&output_cursor_mux);
     output_submitted_frames += written / (2U * sizeof(int16_t));
     portEXIT_CRITICAL(&output_cursor_mux);
+  }
+}
+
+/* Every block the DAC gets goes through here.  The tap sees it first; the
+ * mute test mode then swaps the samples for zeros of the same length, so
+ * the DMA ring, the cursor and the loop's pacing are exactly as unmuted. */
+static void dma_write(const int16_t *pcm, size_t frames) {
+  audio_output_tap_fn tap = s_tap;
+  if (tap) {
+    tap(pcm, frames);
+  }
+  if (!s_dac_mute) {
+    i2s_submit(pcm, frames);
+    return;
+  }
+  while (frames > 0) {
+    size_t n = frames < MUTE_CHUNK_FRAMES ? frames : MUTE_CHUNK_FRAMES;
+    i2s_submit(s_mute_zeros, n);
+    frames -= n;
   }
 }
 
@@ -663,6 +689,23 @@ void audio_output_get_stats(audio_output_stats_t *out) {
   }
   *out = s_stats;
   out->dma_underruns = audio_output_get_underruns();
+}
+
+void audio_output_set_tap(audio_output_tap_fn fn) {
+  s_tap = fn;
+}
+
+void audio_output_set_dac_mute(bool mute) {
+  if (mute == s_dac_mute) {
+    return;
+  }
+  s_dac_mute = mute;
+  ESP_LOGI(TAG, "DAC mute test mode: %s",
+           mute ? "ON (zeros to I2S, tap unchanged)" : "off");
+}
+
+bool audio_output_get_dac_mute(void) {
+  return s_dac_mute;
 }
 
 void audio_output_set_source_rate(int rate) {
