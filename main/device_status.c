@@ -21,6 +21,9 @@
 #ifdef CONFIG_USB_AUDIO_SOURCE
 #include "usb_audio_source.h"
 #endif
+#ifdef CONFIG_USB_AUDIO_CAPTURE
+#include "usb_audio_capture.h"
+#endif
 
 static const char *TAG = "status";
 
@@ -241,6 +244,19 @@ cJSON *device_status_build_json(void) {
   cJSON_AddNumberToObject(usb, "discarded_kb", us.discarded_bytes / 1024);
   cJSON_AddNumberToObject(usb, "volume_q15", us.volume_q15);
   cJSON_AddBoolToObject(usb, "muted", us.muted);
+#ifdef CONFIG_USB_AUDIO_CAPTURE
+  // Debug capture (GET /api/debug/capture has the full set).
+  usb_audio_capture_stats_t cs;
+  usb_audio_capture_get_stats(&cs);
+  cJSON *cap = cJSON_CreateObject();
+  cJSON_AddBoolToObject(cap, "on", cs.enabled);
+  cJSON_AddBoolToObject(cap, "dac_mute", audio_output_get_dac_mute());
+  cJSON_AddBoolToObject(cap, "host_streaming", cs.host_streaming);
+  cJSON_AddNumberToObject(cap, "tapped_frames", cs.tapped_frames);
+  cJSON_AddNumberToObject(cap, "dropped_frames", cs.dropped_frames);
+  cJSON_AddNumberToObject(cap, "underruns", cs.underruns);
+  cJSON_AddItemToObject(usb, "capture", cap);
+#endif
 #else
   cJSON_AddBoolToObject(usb, "available", false);
 #endif

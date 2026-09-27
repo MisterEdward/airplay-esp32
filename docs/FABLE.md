@@ -128,6 +128,31 @@ AirPlay is serving.  If it never reaches the network it restarts after
   - `Hand-over: old session released audio after … ms` — device switch.
   - `Output -> USB (AirPlay gone for 3 s)` — arbiter decisions.
 
+### Recording what the speaker plays (USB capture)
+
+With `CONFIG_USB_AUDIO_CAPTURE` (on in the `esp32s3` env) the USB device
+also has an input, "Bedroom Speakers" (48 kHz, 2 ch, 16-bit, asynchronous),
+that carries every block the render task hands to the DAC, bit-exact:
+after resampling, envelope, volume and channel mode.
+
+- `GET /api/debug/capture?on=1` — tap on; `?mute=1` — DAC mute test mode
+  (the DAC gets zeros, the tap still gets the audio, nothing else in the
+  pipeline changes).  Both off at boot; `GET /api/debug/capture` alone
+  returns the state and counters (`host_streaming`, `tapped_frames`,
+  `dropped_frames`, `underruns`, ...).  `/api/status` → `pc.capture` has
+  a summary.
+- Record on the Mac from the "Bedroom Speakers" input at 48 kHz / 16-bit
+  (any recorder; sox: `sox -t coreaudio "Bedroom Speakers" -b 16 -r 48000
+  out.wav`).  The stream starts with ~21 ms of silence, then the tap.
+  With the tap off a recording host gets silence.
+- The host follows the speaker's I2S clock (TinyUSB sends 47/48/49-frame
+  packets), so nothing is dropped or duplicated for clock drift.
+  `dropped_frames` > 0 means the host stopped reading for > ~170 ms;
+  `underruns` means the pump fell behind (a gap in the recording).
+- Log lines (tag `usb_capture`): `Host started capture stream #N`,
+  `Host stopped capture stream (…)` with the counters, `Capture tap ON`,
+  and `DAC mute test mode: ON` (tag `audio_output`).
+
 ## Test plan for the first hardware session
 
 1. Flash bootloader + firmware + SPIFFS over COM; confirm boot log shows

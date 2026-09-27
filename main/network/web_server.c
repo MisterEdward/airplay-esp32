@@ -23,6 +23,9 @@
 #if CONFIG_USB_AUDIO_SOURCE
 #include "usb_audio_source.h"
 #endif
+#if CONFIG_USB_AUDIO_CAPTURE
+#include "usb_audio_capture.h"
+#endif
 #include "rtsp_server.h"
 #include "audio_output.h"
 #include "audio_receiver.h"
@@ -1196,6 +1199,55 @@ static esp_err_t seek_mode_handler(httpd_req_t *req) {
   return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
 
+/* Diagnostic: GET /api/debug/capture[?on=0|1][&mute=0|1]
+ * on   = USB capture tap (the host records what the DAC is given)
+ * mute = DAC mute test mode (zeros to I2S, the tap still gets the audio)
+ * Both are off at boot.  Returns the state and the capture counters. */
+static esp_err_t capture_handler(httpd_req_t *req) {
+  char query[48] = {0};
+  char value[8] = {0};
+  bool have_query =
+      httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK;
+#if CONFIG_USB_AUDIO_CAPTURE
+  if (have_query &&
+      httpd_query_key_value(query, "on", value, sizeof(value)) == ESP_OK) {
+    usb_audio_capture_set_enabled(atoi(value) != 0);
+  }
+#endif
+  if (have_query &&
+      httpd_query_key_value(query, "mute", value, sizeof(value)) == ESP_OK) {
+    audio_output_set_dac_mute(atoi(value) != 0);
+  }
+
+  cJSON *resp = cJSON_CreateObject();
+#if CONFIG_USB_AUDIO_CAPTURE
+  usb_audio_capture_stats_t cs;
+  usb_audio_capture_get_stats(&cs);
+  cJSON_AddBoolToObject(resp, "available", true);
+  cJSON_AddBoolToObject(resp, "on", cs.enabled);
+  cJSON_AddBoolToObject(resp, "mute", audio_output_get_dac_mute());
+  cJSON_AddBoolToObject(resp, "host_streaming", cs.host_streaming);
+  cJSON_AddNumberToObject(resp, "streams", cs.streams);
+  cJSON_AddNumberToObject(resp, "tapped_frames", cs.tapped_frames);
+  cJSON_AddNumberToObject(resp, "sent_frames", cs.sent_frames);
+  cJSON_AddNumberToObject(resp, "dropped_frames", cs.dropped_frames);
+  cJSON_AddNumberToObject(resp, "silence_frames", cs.silence_frames);
+  cJSON_AddNumberToObject(resp, "underruns", cs.underruns);
+  cJSON_AddNumberToObject(resp, "ring_frames", cs.ring_frames);
+  cJSON_AddNumberToObject(resp, "fifo_frames", cs.fifo_frames);
+#else
+  cJSON_AddBoolToObject(resp, "available", false);
+  cJSON_AddBoolToObject(resp, "on", false);
+  cJSON_AddBoolToObject(resp, "mute", audio_output_get_dac_mute());
+#endif
+  char *json_str = cJSON_PrintUnformatted(resp);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
+  free(json_str);
+  cJSON_Delete(resp);
+  return ESP_OK;
+}
+
 static esp_err_t system_restart_handler(httpd_req_t *req) {
   cJSON *json = cJSON_CreateObject();
   cJSON_AddBoolToObject(json, "success", true);
@@ -1495,6 +1547,7 @@ esp_err_t web_server_start(uint16_t port) {
   config.max_uri_handlers += 2; // bi-amp get/post
   config.max_uri_handlers += 1; // debug seek mode
 #endif
+  config.max_uri_handlers += 1; // debug capture / DAC mute
   config.max_resp_headers = 8;
   config.stack_size = 8192;
 
@@ -1620,6 +1673,11 @@ esp_err_t web_server_start(uint16_t port) {
                                .method = HTTP_GET,
                                .handler = seek_mode_handler};
   httpd_register_uri_handler(s_server, &seek_mode_uri);
+
+  httpd_uri_t capture_uri = {.uri = "/api/debug/capture",
+                             .method = HTTP_GET,
+                             .handler = capture_handler};
+  httpd_register_uri_handler(s_server, &capture_uri);
 
   httpd_uri_t system_info_uri = {.uri = "/api/system/info",
                                  .method = HTTP_GET,
