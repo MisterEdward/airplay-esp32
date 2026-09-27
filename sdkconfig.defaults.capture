@@ -1,0 +1,4 @@
+# Debug build: the board is also a USB audio input carrying exactly what
+# goes to the DAC (GET /api/debug/capture?on=1&mute=1).  It changes the USB
+# descriptor, so a PS5 or a PC may see a headset: test benches only.
+CONFIG_USB_AUDIO_CAPTURE=y

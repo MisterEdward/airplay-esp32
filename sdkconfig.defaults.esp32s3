@@ -26,7 +26,8 @@ CONFIG_UAC_SPK_TASK_CORE=1
 # Mac can record the speaker's output bit-exact.  It is driven by our own
 # pump, not the UAC component's microphone path, so UAC_MIC_CHANNEL_NUM
 # stays 0 (main/usb/tusb_config.h sizes the IN endpoint instead).
-CONFIG_USB_AUDIO_CAPTURE=y
+# CONFIG_USB_AUDIO_CAPTURE is not set
+# (debug capture input: build env esp32s3-capture, see sdkconfig.defaults.capture)
 
 # GPIO defaults
 CONFIG_BAT_CHANNEL=7
