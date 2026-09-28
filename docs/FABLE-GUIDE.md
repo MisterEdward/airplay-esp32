@@ -13,21 +13,37 @@ read the journal.
 
 ## 1. Where things stand
 
-**Update 2026-09-27 (stress-test campaign, report:
-https://claude.ai/artifact/RTLNSYFthtMgFKNcWSFdwe).**  On `main`: the pop fix
-(36eaced).  Built and running on the board, not yet on `main` (waiting for an
-iPhone check): fast SRP pair-setup (session start 3.61 -> 1.73 s click to first
-sample; the TCL TV takes 2.23 s), WiFi clean-deauth + offline watchdog, PTP
-multicast re-join, and the USB capture debug path (see §5).  Findings:
-- The "phantom session" (Music shows playing, no sound) is Music.app's own
-  idle-timeout disconnect (`baod-B> auto disconnecting ... due idle timeout`),
-  ~73 s after a scripted seek.  Not firmware.
-- The 2.4 GHz link to the board collapses at times when powered from the PS5
-  (ping ~85 ms, 20 % loss, RSSI unchanged); on the Mac's USB power it stays at
-  ~7 ms.  After such a collapse PTP stopped arriving until reboot; fixed by the
-  re-join.
-- 90 min measured on the wire: 0 resets, seek median 0.80 s, |err| p50 157 us.
+**Update 2026-09-28: everything below is on `main` (4fbd9f8) and on the
+board.**  Stress-test report: https://claude.ai/artifact/RTLNSYFthtMgFKNcWSFdwe.
 
+| Commit | What changed | Verified |
+|---|---|---|
+| 36eaced | No click on play after a plain pause: resampler history reset when the pause fade ends, silence forced while the envelope is shut | mic: HF peak at play 27-38 dB -> 2-6 dB, 0/8 pops; Edward on the iPhone |
+| 81d7d12 | PTP accepts a grandmaster relayed by the source it tracks (§7) | group runs Mac+TV: `relayed by tracked source … keeping it`, every anchor `domain=ptp` |
+| 4835c3c | Transient pair-setup ~0.15 s instead of ~1.6 s (SRP: 256-bit private exponent, Barrett reduction on the MPI unit, precomputed M1 key pool) | host KAT tests; iPhone pairing M1 71 us, M3 141 ms; click->first sample 3.61 -> 1.73 s (TCL TV: 2.23 s) |
+| 32c6402 | WiFi: clean deauth before every restart; watchdog (no IP 180 s -> restart, again -> deep sleep 1 s) | rejoined alone after every later OTA |
+| 5274cf2 | PTP multicast re-join after 5 s of silence in a session (`ptp.rejoins`) | after a 2.4 GHz collapse PTP came back without reboot |
+| db2f0ac, 34da543, 0838870, 227943e, 4fbd9f8 | USB capture of what the DAC plays + DAC mute (debug; env `esp32s3-capture` only) | 4 h soak recorded on the wire |
+| 73ab243 | Stress harness, capture recorder, report generator (`scripts/fable/stress/`) | used for all numbers here |
+
+Measured: 4 h soak on the wire (Mac Music, a seek a minute, a storm every
+15 min): 0 resets, 0 gaps, 0 underruns, every anchor PTP, |err| p50 126 us,
+seek median 0.68 s, internal heap stable (~95-107 KB free while streaming,
+largest block ~31 KB).  Still open: see §7 "Fade cut at seek" and "Short
+dropouts with the iPhone".
+
+Board on 2026-09-28: on a plain 5 V USB charger (not the PS5), running the
+capture build of 4fbd9f8 with capture and mute off.  Before it goes back
+behind the PS5, OTA the normal build (`pio run -e esp32s3`).  Ping on the
+charger: 0 % loss, but a regular 75-90 ms spike every 15 s while an iPhone
+session is active (4-9 ms between spikes); not investigated.
+
+Earlier findings that still hold:
+- The "phantom session" (Music shows playing, no sound) is Music.app's own
+  idle-timeout disconnect (§7).  Not firmware.
+- The 2.4 GHz link collapses at times when the board is powered from the PS5
+  (ping ~85 ms, 20 % loss, RSSI unchanged); on the Mac's or a charger's power
+  it stays fine.
 
 `main` is the only branch.  It is `55cfa44` (the build whose multiroom sync
 Edward confirmed as instant) plus the fixes below.  Everything older is kept
@@ -52,24 +68,15 @@ Definition of done, in Edward's words: sync as impressive as 55cfa44, seek
 under a second, resume at the verse, no silent "playing" dead time, no
 pops — "behave like an Apple product".
 
-### Handover — start the next session here (as of 2026-09-26)
+### Handover — start the next session here (as of 2026-09-28)
 
-1. **The board is NOT running `main`.**  It runs tag `wip/ptp-grandmaster`
-   (`5951440`, one commit on top of `main`): PTP accepts a grandmaster that
-   the tracked source relays (§7, first item).  Host-tested, flashed,
-   **never verified on hardware** because the speaker's WiFi collapsed
-   first.  To verify: from the iPhone, play and seek a few times; every
-   `Anchor:` must say `domain=ptp`, and where the group's grandmaster is
-   another device a `PTP timeline … is relayed by tracked source` line must
-   appear.  If good: `git cherry-pick wip/ptp-grandmaster`, push `main`,
-   delete the tag.  If bad: OTA a build of `main`.
-2. **Check the speaker's link before anything else.**  After Edward
-   power-cycled it (the PS5 went to rest mode and cut its USB power),
-   pings to it ran 0.1-2 s with timeouts while the router and `.103` were
-   fine; `reset_reason: poweron`.  The iPhone also refused to connect even
-   to the Mac.  Suspects in order: USB power from the PS5 in rest mode
-   (brownout history, §2), then 2.4 GHz interference.  Try a 5 V charger
-   and a full iPhone restart before debugging firmware.
+1. **The board runs `main`** (capture build, see above).  The old
+   `wip/ptp-grandmaster` tag is merged as 81d7d12.
+2. **Next audio work, in order**: the fade cut at seek (§7), then the
+   iPhone-only short dropouts (§7, needs Edward and the phone), then the
+   session-start follow-ups on branch `perf/session-start-rtsp-path`
+   (event port 100 ms, keep packet pool, accept in 10 ms, warm PTP re-lock;
+   the last one touches sync, so ear test).  Measure with plan `sstart`.
 3. **Hardware plans discussed** (not started): Seeed XIAO ESP32-S3 Plus with
    an external antenna (same code, new pin map in a
    `config/sdkconfig.user.*`); longer term, wired Ethernet (W5500 on the S3
@@ -330,8 +337,9 @@ Plugging the board into the Mac once left it in ROM download mode
 
 ### PTP: the anchor names a grandmaster that only reaches us relayed
 
-**Fix written, unverified: tag `wip/ptp-grandmaster`** (see the handover in
-§1).  Seen twice: with the Mac as sender and the iPhone around, and with the
+**Fixed in 81d7d12** (on `main`, exercised in the Mac+TV group runs: the
+journal shows `PTP timeline … is relayed by tracked source …: keeping it`).
+Kept here for the analysis.  Seen twice: with the Mac as sender and the iPhone around, and with the
 iPhone as sender after an airplane-mode reset made another device
 (`cc6146fffefc2f15`) the group's grandmaster; the phone kept sending Sync,
 now carrying that clock's time (a 43 h timescale jump the step detector
@@ -349,6 +357,29 @@ latches the local timeline: `PTP not locked … local timeline latched`.
 grandmaster and treat "anchor names X, tracked source announces X as GM"
 as a lock.  iPhone-as-sender is unaffected (the phone sends its own Sync).
 This touches sync: listening test mandatory.
+
+### Fade cut at seek
+
+17 of 21 Mac seeks recorded on the wire (capture, post-envelope) keep full
+level until the last ~10 ms and then drop to zero: no 100 ms fade-out.  A
+plain pause fades perfectly.  On the wire the sender sends rate=0 at +15 ms and
+`FLUSHBUFFERED immediate` at +65..145 ms.  Lead: `rtsp_handlers.c` ~1848 ->
+`audio_receiver_seek_flush_until` -> `audio_receiver_flush()` empties the PCM
+ring from the RTSP task; the render loop then has no media and cuts the
+envelope.  But even the 50-130 ms between rate=0 and the flush shows no ramp,
+so check first whether the pause fade starts at all on a seek.  Fix idea: let
+the fade finish on audio already held before emptying the ring.  Touches the
+envelope: ear test.
+
+### Short dropouts with the iPhone
+
+60-70 ms holes of digital silence between audible audio, 3 in 2.5 min with the
+iPhone as sender (capture run `phone2`), 0 in 20 Mac seeks.  One came ~110 ms
+after a seek's `Acquired`, one ~1.2 s after a re-acquire.  Suspects: the AAC
+decoder reset on the 36-byte packet at `untilSeq` (every seek logs one decode
+error), or a quick start with only 1-2 frames buffered starving.  To capture:
+board on the Mac's USB, `CAPTURE=1 python3 run.py phoneN esp listen30` while
+Edward plays from the phone, then `python3 holes.py $FABLE_RUNS/phoneN`.
 
 ### Music's idle-timeout disconnect (sender side)
 
@@ -374,6 +405,13 @@ jump).  Watch for `Master timescale stepped` right *after* an `Anchor:`.
 
 ### Smaller
 
+- Found by the 2026-09-26/27 stress campaign, all inaudible so far: the
+  `gaps` counter can be bumped by a deferred-flush/seek race; every seek logs
+  one AAC decode error on the 36-byte packet at `untilSeq` (may relate to the
+  iPhone dropouts); a grandmaster change mid-play once gave `Anchor 12242 ms in
+  the future`; the first acquisition after a rapid reconnect can be off by up
+  to -7.7 ms (corrected by the next re-acquire); each disconnect blocks ~1 s on
+  the event port (fix on `perf/session-start-rtsp-path`).
 - A small click on play after a pause was reported once; the resume there
   re-acquired with `trimmed=116 dropped=2` (anchor 55 ms in the past).  The
   PCM5102A's own zero-data auto-mute is the other suspect.  Not isolated.

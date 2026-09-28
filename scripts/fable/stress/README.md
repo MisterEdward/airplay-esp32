@@ -21,12 +21,14 @@ CAPTURE=1 START=3 python3 run.py RUN esp soak240   # on the wire, DAC muted
 zsh guard.sh RUN &                     # recovers Music's idle disconnects, logs ping
 python3 analyze.py $FABLE_RUNS/RUN     # -> results.tsv
 python3 stats.py $FABLE_RUNS/RUN
+python3 holes.py $FABLE_RUNS/RUN       # capture runs: 30-150 ms holes + journal around each
 ```
 
 Plans (`plans.py`): `stage1` (realistic), `stage2` (agitated), `stage3`
 (absurd: storms, reconnects, HTTP load), `soak`/`soak240` (a seek a minute, a
 storm every 15 min), `sstart` (session start timing), `popcheck`,
-`groupstress`, `seekab`, `noisetest`.  DEVICE is `esp`, `tv` or `mac`.
+`groupstress`, `seekab`, `noisetest`, `listen`/`listen30` (passive: no Music
+commands, for recording while someone plays from a phone).  DEVICE is `esp`, `tv` or `mac`.
 `$DEV` in a plan is the device under test; TV volume is capped at 20 %.
 
 - **CAPTURE=1** needs the capture firmware (`GET /api/debug/capture?on=1&mute=1`)
