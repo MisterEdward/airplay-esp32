@@ -277,3 +277,13 @@ PLANS['sstart'] = sstart
 
 
 PLANS['soak240'] = lambda d: soak(d, 240)
+
+
+def listen(dev, minutes=10):
+    """Passive: record capture + journal while someone else (the iPhone)
+    plays.  No Music commands; a mark every minute."""
+    return [(60 * m, f'MARKQ minute-{m}', '') for m in range(1, minutes + 1)]
+
+
+PLANS['listen'] = listen
+PLANS['listen30'] = lambda d: listen(d, 30)
