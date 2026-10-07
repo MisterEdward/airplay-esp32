@@ -3,7 +3,10 @@ dependencies:
     version: "~2.3.0"
     rules:
       - if: "target == esp32s3"
+  # Pinned: 9.6 adds dependency rules on LVGL's own Kconfig ($CONFIG{LV_USE_*})
+  # that the component manager cannot evaluate in an idf.py build
+  # (MissingKconfigError LV_USE_FREETYPE in CI).
   lvgl/lvgl:
-    version: ">=9,<10"
+    version: "9.5.0"
     rules:
       - if: "target == esp32s3"

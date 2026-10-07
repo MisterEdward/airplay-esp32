@@ -70,7 +70,7 @@ dependencies:
       require: private
       version: '>=5.0'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     targets:
     - esp32s2
@@ -120,8 +120,9 @@ direct_dependencies:
 - espressif/led_strip
 - espressif/libsodium
 - espressif/mdns
+- espressif/tinyusb
 - espressif/usb_device_uac
 - lvgl/lvgl
-manifest_hash: 5e907f6a7449f560ee0d6d407fb03dcb729d61b80a1c9ce03ed2d34a9545e5d2
+manifest_hash: ed70cd5f59da63e5c2fafaafe5cba651685493e8685e96966f5f4d7249ec8a80
 target: esp32s3
 version: 2.0.0
