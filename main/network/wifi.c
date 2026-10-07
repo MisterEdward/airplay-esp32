@@ -134,7 +134,8 @@ static void watchdog_callback(void *arg) {
   }
   bool again = s_watchdog_restarts == WATCHDOG_MAGIC;
   ESP_LOGW(TAG, "No WiFi for %lld s (%d attempts): %s", (long long)down_s,
-           s_retry_num, again ? "deep sleep 1 s (radio power-down)" : "restart");
+           s_retry_num,
+           again ? "deep sleep 1 s (radio power-down)" : "restart");
   wifi_shutdown_for_restart();
   if (again) {
     s_watchdog_restarts = 0;

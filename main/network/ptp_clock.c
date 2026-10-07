@@ -589,7 +589,7 @@ static void rejoin_group(int sock) {
 // an hour, the board received zero PTP messages in every later session
 // until it was rebooted (sync_count 0, every anchor fell back to the local
 // timeline after a 1.5 s wait): the group membership had been lost.
-#define PTP_SILENCE_REJOIN_MS 5000
+#define PTP_SILENCE_REJOIN_MS  5000
 #define PTP_REJOIN_INTERVAL_MS 10000
 static void check_ptp_silence(void) {
   if (ptp.expected_clock_id == 0) {
