@@ -132,10 +132,14 @@ set( DEPS
     list(APPEND DEPS esp_eth)
 #endif()
 
+# WHOLE_ARCHIVE: TinyUSB calls back into main (descriptor and HID callbacks in
+# usb/usb_descriptors.c) and nothing else in main references that object, so
+# an idf.py link dropped it before reaching TinyUSB (PlatformIO's link kept it).
 idf_component_register(
     SRCS ${SRC_FILES}
     INCLUDE_DIRS ${INC_DIRS}
     PRIV_REQUIRES ${DEPS}
+    WHOLE_ARCHIVE
 )
 
 if(CONFIG_USB_AUDIO_SOURCE)
