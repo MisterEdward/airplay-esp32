@@ -33,6 +33,7 @@
 #include "rtsp_server.h"
 
 #include "audio_envelope.h"
+#include "audio_meter.h"
 #include "audio_receiver.h"
 #include "audio_resample.h"
 #include "dac.h"
@@ -106,6 +107,12 @@ static TaskHandle_t playback_task_handle = NULL;
 static volatile int source_rate = 44100;
 static volatile bool resample_reinit_needed = false;
 static volatile audio_channel_mode_t channel_mode = AUDIO_CHANNEL_STEREO;
+
+// Passive meters (audio_meter.h): the decoded AirPlay stream before the
+// resampler, and the final block handed to the DAC.  Diagnostic for a report
+// of bass vanishing after hours until the next seek/pause.
+static audio_meter_t s_meter_dec;
+static audio_meter_t s_meter_out;
 
 /* Control plane → render task.  All 32-bit aligned scalars, written by the
  * RTSP/USB/web tasks and polled once per block by the render task.  Ordering
@@ -344,6 +351,7 @@ static void playback_task(void *arg) {
     if (resample_reinit_needed) {
       resample_reinit_needed = false;
       audio_resample_init((uint32_t)source_rate, OUTPUT_RATE, 2);
+      audio_meter_init(&s_meter_dec, (uint32_t)source_rate, 150.0f);
     }
 
     /* ---- control requests ------------------------------------------ */
@@ -403,6 +411,9 @@ static void playback_task(void *arg) {
     int16_t *play = pcm;
     if (active == AUDIO_SOURCE_AIRPLAY) {
       frames = audio_receiver_read_ex(pcm, READ_CAPACITY_FRAMES, &media);
+      if (frames > 0 && media) {
+        audio_meter_feed(&s_meter_dec, pcm, frames);
+      }
       if (frames > 0 && audio_resample_is_active()) {
         frames = audio_resample_process(pcm, frames, resample_buf,
                                         MAX_RESAMPLE_FRAMES);
@@ -439,6 +450,7 @@ static void playback_task(void *arg) {
       }
       audio_envelope_apply(&s_env, play, frames, current_volume_target(active));
       apply_channel_mode(play, frames);
+      audio_meter_feed(&s_meter_out, play, frames);
       s_stats.frames_rendered += frames;
     } else if (!audio_envelope_is_silent(&s_env)) {
       // Scheduled/alignment silence while the envelope is open: the ramp
@@ -514,6 +526,8 @@ esp_err_t audio_output_init(void) {
     channel_mode = AUDIO_CHANNEL_STEREO;
   }
   push_channel_mode_to_dsp(channel_mode);
+  audio_meter_init(&s_meter_dec, 44100, 150.0f);
+  audio_meter_init(&s_meter_out, OUTPUT_RATE, 150.0f);
 
   i2s_chan_config_t chan_cfg =
       I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
@@ -807,4 +821,10 @@ void audio_output_set_channel_mode(audio_channel_mode_t mode) {
 
 audio_channel_mode_t audio_output_get_channel_mode(void) {
   return channel_mode;
+}
+
+void audio_output_get_meters(audio_meter_reading_t *dec,
+                             audio_meter_reading_t *out) {
+  audio_meter_read(&s_meter_dec, dec);
+  audio_meter_read(&s_meter_out, out);
 }

@@ -106,3 +106,9 @@ __attribute__((weak)) void audio_output_set_dac_mute(bool mute) {
 __attribute__((weak)) bool audio_output_get_dac_mute(void) {
   return false;
 }
+
+__attribute__((weak)) void audio_output_get_meters(audio_meter_reading_t *dec,
+                                                   audio_meter_reading_t *out) {
+  memset(dec, 0, sizeof(*dec));
+  memset(out, 0, sizeof(*out));
+}

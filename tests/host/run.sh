@@ -33,3 +33,7 @@ if [ -f "$MBEDTLS/library/bignum.c" ]; then
 else
   echo "test_srp: skipped (no mbedtls at $MBEDTLS)"
 fi
+# Level/bass/correlation meter (audio_meter.c).
+$CC $FLAGS -I main/audio tests/host/test_meter.c main/audio/audio_meter.c -lm \
+  -o "$out/test_meter"
+"$out/test_meter"

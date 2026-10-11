@@ -134,6 +134,12 @@ void audio_output_set_source_volume(audio_source_t source, int32_t volume_q15,
 /** Snapshot of render statistics. */
 void audio_output_get_stats(audio_output_stats_t *out);
 
+#include "audio_meter.h"
+/** Last 1 s window of the decoded-stream meter and the DAC-side meter
+ *  (all zeros on backends without them). */
+void audio_output_get_meters(audio_meter_reading_t *dec,
+                             audio_meter_reading_t *out);
+
 /** Register (or clear, with fn=NULL) the output tap. */
 void audio_output_set_tap(audio_output_tap_fn fn);
 

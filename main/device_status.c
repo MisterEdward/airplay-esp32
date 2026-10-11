@@ -1,5 +1,7 @@
 #include "device_status.h"
 
+#include <math.h>
+
 #include "audio_arbiter.h"
 #include "audio_output.h"
 #include "audio_receiver.h"
@@ -126,6 +128,24 @@ cJSON *device_status_build_json(void) {
   cJSON_AddNumberToObject(output, "source_switches", out.source_switches);
   cJSON_AddNumberToObject(output, "sample_rate", CONFIG_OUTPUT_SAMPLE_RATE_HZ);
   cJSON_AddItemToObject(root, "output", output);
+
+  // ---- meters: decoded stream vs. what reaches the DAC -------------------
+  audio_meter_reading_t mdec, mout;
+  audio_output_get_meters(&mdec, &mout);
+  cJSON *meter = cJSON_CreateObject();
+  const audio_meter_reading_t *mr[2] = {&mdec, &mout};
+  const char *mname[2] = {"decoded", "dac"};
+  for (int i = 0; i < 2; i++) {
+    cJSON *m = cJSON_CreateObject();
+    cJSON_AddNumberToObject(m, "rms_l_db", roundf(mr[i]->rms_l * 10) / 10);
+    cJSON_AddNumberToObject(m, "rms_r_db", roundf(mr[i]->rms_r * 10) / 10);
+    cJSON_AddNumberToObject(m, "bass_l", roundf(mr[i]->bass_l * 1000) / 1000);
+    cJSON_AddNumberToObject(m, "bass_r", roundf(mr[i]->bass_r * 1000) / 1000);
+    cJSON_AddNumberToObject(m, "corr", roundf(mr[i]->corr * 1000) / 1000);
+    cJSON_AddNumberToObject(m, "seconds", mr[i]->seconds);
+    cJSON_AddItemToObject(meter, mname[i], m);
+  }
+  cJSON_AddItemToObject(root, "meter", meter);
 
   audio_arbiter_state_t arb;
   audio_arbiter_get_state(&arb);
