@@ -18,6 +18,9 @@
 #include "rtsp_server.h"
 #include "settings.h"
 #include "source_volume_store.h"
+#ifdef CONFIG_AUDIO_PEQ
+#include "audio_peq_store.h"
+#endif
 #include "web_server.h"
 #include "log_stream.h"
 #include "wifi.h"
@@ -285,6 +288,9 @@ void app_main(void) {
   ESP_ERROR_CHECK(ret);
   ESP_ERROR_CHECK(settings_init());
   source_volume_store_init();
+#ifdef CONFIG_AUDIO_PEQ
+  audio_peq_store_init();
+#endif
 #ifdef CONFIG_DAC_TAS57XX
   // Load persisted sub level offset (pre-init safe; applied on first volume).
   float sub_off;

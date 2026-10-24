@@ -65,6 +65,12 @@ else()
     list(APPEND SRC_FILES "audio/audio_output.c")
 endif()
 
+# Parametric EQ (speaker / room correction) in the I2S render task
+if(CONFIG_AUDIO_PEQ)
+    list(APPEND SRC_FILES "audio/audio_peq.c")
+    list(APPEND SRC_FILES "audio/audio_peq_store.c")
+endif()
+
 # Bluetooth A2DP sink (only available on ESP32 with Classic BT)
 if(CONFIG_BT_A2DP_ENABLE)
     list(APPEND SRC_FILES "audio/a2dp_sink.c")

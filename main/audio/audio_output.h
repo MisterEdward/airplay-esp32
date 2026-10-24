@@ -146,6 +146,16 @@ void audio_output_set_tap(audio_output_tap_fn fn);
 void audio_output_set_dac_mute(bool mute);
 bool audio_output_get_dac_mute(void);
 
+#ifdef CONFIG_AUDIO_PEQ
+#include "audio_peq.h"
+/**
+ * Hand a new EQ design to the render task.  It is copied; the render task
+ * switches to it at its next block, crossfading from the old one over that
+ * block.  Callable from any task.
+ */
+void audio_output_set_peq(const peq_design_t *design);
+#endif
+
 /**
  * Write raw PCM data to the I2S output, bypassing the render task.
  * Used by Bluetooth A2DP when the AirPlay render task is stopped.

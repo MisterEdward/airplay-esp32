@@ -34,6 +34,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#ifdef CONFIG_AUDIO_PEQ
+#include "audio_peq_store.h"
+#include <math.h>
+#endif
+
 #ifdef CONFIG_DAC_TAS58XX
 #include "eq_events.h"
 #include "dac_tas58xx.h"
@@ -1428,6 +1433,218 @@ static esp_err_t fs_list_handler(httpd_req_t *req) {
 }
 
 /* ================================================================== */
+/*  Speaker EQ (parametric, in the render task)                        */
+/* ================================================================== */
+
+#ifdef CONFIG_AUDIO_PEQ
+
+#define PEQ_GRID_POINTS 96
+#define PEQ_JSON_MAX    8192
+#define PEQ_REW_MAX     16384
+
+static double round2(double v) {
+  return round(v * 100.0) / 100.0;
+}
+
+static esp_err_t send_json(httpd_req_t *req, cJSON *json) {
+  char *str = cJSON_PrintUnformatted(json);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  httpd_resp_send(req, str ? str : "{}", HTTPD_RESP_USE_STRLEN);
+  free(str);
+  cJSON_Delete(json);
+  return ESP_OK;
+}
+
+static esp_err_t peq_page_handler(httpd_req_t *req) {
+  return serve_spiffs_file(req, "/spiffs/www/peq.html", "text/html");
+}
+
+/* GET /api/peq: configuration, what the designer made of it, and the
+ * resulting response per channel on a log grid (so the page draws exactly
+ * what the speaker plays). */
+static esp_err_t peq_get_handler(httpd_req_t *req) {
+  peq_config_t *cfg = malloc(sizeof(*cfg));
+  peq_design_t *d = malloc(sizeof(*d));
+  if (!cfg || !d) {
+    free(cfg);
+    free(d);
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
+  audio_peq_store_get(cfg);
+  audio_peq_store_get_design(d);
+  uint32_t rate = audio_peq_store_rate();
+
+  cJSON *json = cJSON_CreateObject();
+  cJSON_AddBoolToObject(json, "enabled", cfg->enabled);
+  cJSON_AddBoolToObject(json, "active", d->active);
+  cJSON_AddNumberToObject(json, "rate", rate);
+  cJSON_AddNumberToObject(json, "max_bands", PEQ_MAX_BANDS);
+  float grid[PEQ_GRID_POINTS];
+  cJSON *jgrid = cJSON_AddArrayToObject(json, "grid");
+  for (int i = 0; i < PEQ_GRID_POINTS; i++) {
+    grid[i] = 20.0f * powf(1000.0f, (float)i / (PEQ_GRID_POINTS - 1));
+    cJSON_AddItemToArray(jgrid, cJSON_CreateNumber(round(grid[i])));
+  }
+  cJSON *chans = cJSON_AddArrayToObject(json, "channels");
+  for (int c = 0; c < PEQ_CHANNELS; c++) {
+    const peq_channel_t *ch = &cfg->ch[c];
+    cJSON *jc = cJSON_CreateObject();
+    cJSON_AddNumberToObject(jc, "preamp_db", round2(ch->preamp_db));
+    cJSON_AddNumberToObject(jc, "applied_preamp_db", round2(d->preamp_db[c]));
+    cJSON_AddNumberToObject(jc, "peak_db", round2(d->peak_db[c]));
+    cJSON *bands = cJSON_AddArrayToObject(jc, "bands");
+    for (int i = 0; i < ch->count; i++) {
+      const peq_band_t *b = &ch->band[i];
+      cJSON *jb = cJSON_CreateObject();
+      cJSON_AddStringToObject(jb, "type", peq_type_name(b->type));
+      cJSON_AddNumberToObject(jb, "fc", round2(b->fc_hz));
+      cJSON_AddNumberToObject(jb, "gain", round2(b->gain_db));
+      cJSON_AddNumberToObject(jb, "q", round(b->q * 1000.0) / 1000.0);
+      cJSON_AddItemToArray(bands, jb);
+    }
+    cJSON *resp = cJSON_AddArrayToObject(jc, "response");
+    for (int i = 0; i < PEQ_GRID_POINTS; i++) {
+      float db = peq_design_response_db(d, c, grid[i], rate);
+      cJSON_AddItemToArray(resp, cJSON_CreateNumber(round2(db)));
+    }
+    cJSON_AddItemToArray(chans, jc);
+  }
+  free(cfg);
+  free(d);
+  return send_json(req, json);
+}
+
+static bool peq_channel_from_json(const cJSON *jc, peq_channel_t *out) {
+  memset(out, 0, sizeof(*out));
+  const cJSON *pre = cJSON_GetObjectItem(jc, "preamp_db");
+  if (cJSON_IsNumber(pre)) {
+    out->preamp_db = (float)pre->valuedouble;
+  }
+  const cJSON *bands = cJSON_GetObjectItem(jc, "bands");
+  if (!cJSON_IsArray(bands) || cJSON_GetArraySize(bands) > PEQ_MAX_BANDS) {
+    return false;
+  }
+  const cJSON *jb;
+  cJSON_ArrayForEach(jb, bands) {
+    const cJSON *type = cJSON_GetObjectItem(jb, "type");
+    const cJSON *fc = cJSON_GetObjectItem(jb, "fc");
+    const cJSON *gain = cJSON_GetObjectItem(jb, "gain");
+    const cJSON *q = cJSON_GetObjectItem(jb, "q");
+    if (!cJSON_IsString(type) || !cJSON_IsNumber(fc)) {
+      return false;
+    }
+    peq_band_t *b = &out->band[out->count++];
+    b->type = (uint8_t)peq_type_from_name(type->valuestring);
+    b->fc_hz = (float)fc->valuedouble;
+    b->gain_db = cJSON_IsNumber(gain) ? (float)gain->valuedouble : 0.0f;
+    b->q = cJSON_IsNumber(q) ? (float)q->valuedouble : 0.7071f;
+  }
+  return true;
+}
+
+/* POST /api/peq: {"enabled": bool} and/or
+ * {"channels": [{"preamp_db": x, "bands": [{type, fc, gain, q}]}, {...}]}.
+ * A single channel object in the array applies to both. */
+static esp_err_t peq_post_handler(httpd_req_t *req) {
+  char *content = recv_body(req, PEQ_JSON_MAX);
+  if (!content) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body required (max 8KB)");
+    return ESP_FAIL;
+  }
+  cJSON *json = cJSON_Parse(content);
+  free(content);
+  if (!json) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+    return ESP_FAIL;
+  }
+  peq_config_t *cfg = malloc(sizeof(*cfg));
+  if (!cfg) {
+    cJSON_Delete(json);
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
+  audio_peq_store_get(cfg);
+
+  bool ok = true;
+  const cJSON *en = cJSON_GetObjectItem(json, "enabled");
+  if (cJSON_IsBool(en)) {
+    cfg->enabled = cJSON_IsTrue(en);
+  }
+  const cJSON *chans = cJSON_GetObjectItem(json, "channels");
+  if (chans) {
+    int n = cJSON_IsArray(chans) ? cJSON_GetArraySize(chans) : 0;
+    if (n == 1 || n == PEQ_CHANNELS) {
+      for (int c = 0; c < PEQ_CHANNELS && ok; c++) {
+        ok = peq_channel_from_json(cJSON_GetArrayItem(chans, n == 1 ? 0 : c),
+                                   &cfg->ch[c]);
+      }
+    } else {
+      ok = false;
+    }
+  }
+  cJSON_Delete(json);
+
+  cJSON *resp = cJSON_CreateObject();
+  if (ok) {
+    esp_err_t err = audio_peq_store_set(cfg);
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddBoolToObject(resp, "saved", err == ESP_OK);
+  } else {
+    cJSON_AddBoolToObject(resp, "success", false);
+    cJSON_AddStringToObject(resp, "error",
+                            "channels: 1 or 2 objects with up to 16 bands of "
+                            "{type: PK|LS|HS|LP|HP, fc, gain, q}");
+  }
+  free(cfg);
+  return send_json(req, resp);
+}
+
+/* POST /api/peq/import?ch=L|R|LR: body is a REW "Filter Settings" export
+ * (or an Equalizer APO config). */
+static esp_err_t peq_import_handler(httpd_req_t *req) {
+  char query[32] = {0};
+  char ch[4] = "LR";
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    httpd_query_key_value(query, "ch", ch, sizeof(ch));
+  }
+  int channel = -1;
+  if (strcmp(ch, "L") == 0) {
+    channel = 0;
+  } else if (strcmp(ch, "R") == 0) {
+    channel = 1;
+  } else if (strcmp(ch, "LR") != 0) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ch must be L, R or LR");
+    return ESP_FAIL;
+  }
+  char *text = recv_body(req, PEQ_REW_MAX);
+  if (!text) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body required (max 16KB)");
+    return ESP_FAIL;
+  }
+  int bands = 0, skipped = 0;
+  esp_err_t err =
+      audio_peq_store_import_rew(text, strlen(text), channel, &bands, &skipped);
+  free(text);
+
+  cJSON *resp = cJSON_CreateObject();
+  cJSON_AddBoolToObject(resp, "success", err == ESP_OK);
+  cJSON_AddNumberToObject(resp, "bands", bands);
+  cJSON_AddNumberToObject(resp, "skipped", skipped);
+  if (err == ESP_ERR_INVALID_SIZE) {
+    cJSON_AddStringToObject(resp, "error", "more than 16 filters");
+  } else if (err == ESP_ERR_NOT_FOUND) {
+    cJSON_AddStringToObject(resp, "error", "no filters found");
+  } else if (err != ESP_OK) {
+    cJSON_AddStringToObject(resp, "error", esp_err_to_name(err));
+  }
+  return send_json(req, resp);
+}
+
+#endif /* CONFIG_AUDIO_PEQ */
+
+/* ================================================================== */
 /*  EQ Page + API  (only when TAS58xx DAC is configured)               */
 /* ================================================================== */
 
@@ -1548,6 +1765,9 @@ esp_err_t web_server_start(uint16_t port) {
   config.max_uri_handlers += 1; // debug seek mode
 #endif
   config.max_uri_handlers += 1; // debug capture / DAC mute
+#ifdef CONFIG_AUDIO_PEQ
+  config.max_uri_handlers += 4; // speaker EQ page, get, set, REW import
+#endif
   config.max_resp_headers = 8;
   config.stack_size = 8192;
 
@@ -1760,6 +1980,25 @@ esp_err_t web_server_start(uint16_t port) {
   httpd_uri_t eq_post_uri = {
       .uri = "/api/eq", .method = HTTP_POST, .handler = eq_post_handler};
   httpd_register_uri_handler(s_server, &eq_post_uri);
+#endif
+
+#ifdef CONFIG_AUDIO_PEQ
+  httpd_uri_t peq_page_uri = {
+      .uri = "/peq", .method = HTTP_GET, .handler = peq_page_handler};
+  httpd_register_uri_handler(s_server, &peq_page_uri);
+
+  httpd_uri_t peq_get_uri = {
+      .uri = "/api/peq", .method = HTTP_GET, .handler = peq_get_handler};
+  httpd_register_uri_handler(s_server, &peq_get_uri);
+
+  httpd_uri_t peq_post_uri = {
+      .uri = "/api/peq", .method = HTTP_POST, .handler = peq_post_handler};
+  httpd_register_uri_handler(s_server, &peq_post_uri);
+
+  httpd_uri_t peq_import_uri = {.uri = "/api/peq/import",
+                                .method = HTTP_POST,
+                                .handler = peq_import_handler};
+  httpd_register_uri_handler(s_server, &peq_import_uri);
 #endif
 
   log_stream_register(s_server);

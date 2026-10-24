@@ -141,6 +141,10 @@ input:focus{outline:none;border-color:#e94560}
 </div>
 <div class='actions'><button class='btn btn-danger' onclick='restart()'>Restart Device</button></div>
 </div>
+<div class='card' id='peq-card' style='display:none'><h2>Speaker EQ</h2>
+<p style='color:#888;font-size:13px;margin-bottom:12px' id='peq-state'>Parametric correction from a Room EQ Wizard measurement</p>
+<a href='/peq' class='btn btn-primary'>Open Speaker EQ</a></div>
+<script>fetch('/api/peq').then(r=>r.ok?r.json():null).then(j=>{if(!j)return;document.getElementById('peq-card').style.display='';document.getElementById('peq-state').textContent='Status: '+(!j.enabled?'bypassed':j.active?'on ('+j.channels.map(c=>c.bands.length).join(' / ')+' bands)':'flat')}).catch(()=>{})</script>
 <div class='card'><h2>System Logs</h2>
 <p style='color:#888;font-size:13px;margin-bottom:12px'>Live ESP log output via WebSocket</p>
 <a href='/logs' class='btn btn-primary'>Open Log Viewer</a></div>

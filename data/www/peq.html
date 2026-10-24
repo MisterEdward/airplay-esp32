@@ -1,0 +1,154 @@
+<!DOCTYPE html><html><head>
+<meta charset='UTF-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Speaker EQ - AirPlay Receiver</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,system-ui,sans-serif;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);min-height:100vh;padding:20px;color:#fff}
+.wrap{max-width:760px;margin:0 auto}
+.header{text-align:center;padding:20px 0}
+.header h1{font-size:24px;font-weight:600;margin-bottom:4px}
+.header p{color:#888;font-size:13px}
+.nav{text-align:center;margin-bottom:16px}
+.nav a{color:#e94560;text-decoration:none;font-size:13px}
+.card{background:rgba(255,255,255,0.05);border-radius:16px;padding:20px;margin-bottom:16px;border:1px solid rgba(255,255,255,0.1)}
+.card h2{font-size:16px;font-weight:600;margin-bottom:12px;color:#e94560}
+.btn{display:inline-block;padding:10px 16px;border:none;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer}
+.btn-primary{background:#e94560;color:#fff}
+.btn-secondary{background:rgba(255,255,255,0.1);color:#fff}
+.btn-big{font-size:16px;padding:14px 22px;min-width:160px}
+.btn.off{background:#555}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.hint{color:#888;font-size:12px;margin-top:8px;line-height:1.5}
+.msg{padding:8px;border-radius:6px;margin-top:10px;font-size:13px}
+.msg.ok{background:rgba(27,67,50,0.5)}
+.msg.err{background:rgba(92,26,26,0.5)}
+canvas{width:100%;height:260px;display:block;background:rgba(0,0,0,0.25);border-radius:10px}
+.legend{display:flex;gap:16px;font-size:12px;color:#aaa;margin-top:8px}
+.legend i{display:inline-block;width:12px;height:3px;margin-right:6px;vertical-align:middle}
+select,input[type=number]{background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#fff;padding:6px 8px;font-size:13px}
+select option{background:#16213e}
+input[type=number]{width:84px}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
+th{color:#888;font-weight:500;text-align:left;padding:4px}
+td{padding:3px 4px}
+.tabs{display:flex;gap:6px;margin-bottom:10px}
+.tab{background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#aaa;padding:7px 14px;font-size:13px;cursor:pointer}
+.tab.on{background:#e94560;border-color:#e94560;color:#fff}
+.slider-row{display:flex;align-items:center;gap:12px;margin-top:6px}
+.slider-row input[type=range]{flex:1;accent-color:#e94560}
+.slider-row span{font-size:14px;min-width:64px;text-align:right}
+.x{background:none;border:none;color:#888;font-size:16px;cursor:pointer}
+</style></head><body>
+<div class='wrap'>
+<div class='header'><h1>Speaker EQ</h1><p>Parametric correction, per channel, applied before volume</p></div>
+<div class='nav'><a href='/'>&larr; Back to settings</a></div>
+
+<div class='card'><h2>A / B</h2>
+<div class='row'>
+<button class='btn btn-primary btn-big' id='ab' onclick='toggleAB()'>…</button>
+<span class='hint' id='pre'></span></div>
+<p class='hint'>Switching is crossfaded on the speaker, so you can flip it while music plays and compare.</p>
+</div>
+
+<div class='card'><h2>Response</h2>
+<canvas id='plot'></canvas>
+<div class='legend'><span><i style='background:#e94560'></i>Left</span><span><i style='background:#4cc9f0'></i>Right</span><span>includes the preamp</span></div>
+</div>
+
+<div class='card'><h2>Treble (by ear)</h2>
+<p class='hint'>A high shelf on both channels, on top of the measured correction.  The MacBook's microphone is not reliable up here, so this one is for your ears.</p>
+<div class='slider-row'><label style='font-size:13px;color:#888;min-width:70px'>Corner</label>
+<select id='tr-fc' onchange='trebleChanged()'><option>3000</option><option>5000</option><option selected>8000</option><option>10000</option></select><span></span></div>
+<div class='slider-row'><label style='font-size:13px;color:#888;min-width:70px'>Gain</label>
+<input type='range' id='tr-gain' min='-6' max='9' step='0.5' value='0' oninput='trebleShow()' onchange='trebleChanged()'><span id='tr-val'>0.0 dB</span></div>
+</div>
+
+<div class='card'><h2>Import from Room EQ Wizard</h2>
+<div class='row'>
+<input type='file' id='rew-file' accept='.txt' style='display:none' onchange='importREW()'>
+<select id='rew-ch'><option value='LR'>Both channels</option><option value='L'>Left</option><option value='R'>Right</option></select>
+<button class='btn btn-primary' onclick='document.getElementById("rew-file").click()'>Choose filter file…</button>
+<button class='btn btn-secondary' onclick='exportREW()'>Export</button>
+</div>
+<p class='hint'>In REW: EQ &rarr; Equaliser <b>Generic</b> &rarr; Match response to target &rarr; Save filter settings to file.  Up to 16 filters.</p>
+<div id='rew-msg'></div>
+</div>
+
+<div class='card'><h2>Filters</h2>
+<div class='tabs'><button class='tab on' id='tab0' onclick='pick(0)'>Left</button><button class='tab' id='tab1' onclick='pick(1)'>Right</button>
+<label class='hint' style='margin:0 0 0 auto;display:flex;align-items:center;gap:6px'><input type='checkbox' id='link'> edit both</label></div>
+<div class='row'><label class='hint' style='margin:0'>Preamp (dB)</label><input type='number' id='preamp' step='0.1' max='0' min='-24'></div>
+<table><thead><tr><th>Type</th><th>Fc (Hz)</th><th>Gain (dB)</th><th>Q</th><th></th></tr></thead><tbody id='bands'></tbody></table>
+<div class='row' style='margin-top:12px'>
+<button class='btn btn-secondary' onclick='addBand()'>+ Band</button>
+<button class='btn btn-primary' onclick='applyBands()'>Apply</button>
+<button class='btn btn-secondary' onclick='clearAll()'>Flat</button></div>
+<div id='band-msg'></div>
+</div>
+</div>
+<script>
+const TYPES=['PK','LS','HS','LP','HP'];
+let st=null,cur=0,trTimer=null;
+function $(i){return document.getElementById(i)}
+function msg(id,ok,t){$(id).innerHTML="<div class='msg "+(ok?'ok':'err')+"'>"+t+"</div>"}
+async function load(){
+  const r=await fetch('/api/peq');st=await r.json();
+  $('ab').textContent=st.enabled?'EQ ON':'BYPASS';$('ab').className='btn btn-big '+(st.enabled?'btn-primary':'off');
+  $('pre').textContent=st.active?'Preamp applied: L '+st.channels[0].applied_preamp_db+' dB, R '+st.channels[1].applied_preamp_db+' dB':(st.enabled?'Flat':'Bypassed: bit-exact');
+  readTreble();draw();table();
+}
+function draw(){
+  const c=$('plot'),dpr=window.devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;
+  c.width=w*dpr;c.height=h*dpr;const g=c.getContext('2d');g.scale(dpr,dpr);
+  const lo=Math.log10(20),hi=Math.log10(20000),ymin=-18,ymax=12;
+  const X=f=>36+(w-44)*(Math.log10(f)-lo)/(hi-lo),Y=d=>8+(h-28)*(ymax-d)/(ymax-ymin);
+  g.font='10px system-ui';g.fillStyle='#777';g.strokeStyle='rgba(255,255,255,0.08)';
+  [20,50,100,200,500,1000,2000,5000,10000,20000].forEach(f=>{g.beginPath();g.moveTo(X(f),8);g.lineTo(X(f),h-20);g.stroke();g.fillText(f>=1000?f/1000+'k':f,X(f)-8,h-6)});
+  for(let d=ymin;d<=ymax;d+=6){g.beginPath();g.moveTo(36,Y(d));g.lineTo(w-8,Y(d));g.strokeStyle=d==0?'rgba(255,255,255,0.25)':'rgba(255,255,255,0.08)';g.stroke();g.fillText((d>0?'+':'')+d,6,Y(d)+3)}
+  ['#e94560','#4cc9f0'].forEach((col,ch)=>{g.strokeStyle=col;g.lineWidth=2;g.beginPath();
+    st.grid.forEach((f,i)=>{const y=Y(Math.max(ymin,Math.min(ymax,st.channels[ch].response[i])));i?g.lineTo(X(f),y):g.moveTo(X(f),y)});g.stroke()});
+}
+function table(){
+  const ch=st.channels[cur];$('preamp').value=ch.preamp_db;
+  $('bands').innerHTML=ch.bands.map((b,i)=>"<tr><td><select data-i='"+i+"' data-k='type'>"+TYPES.map(t=>"<option"+(t==b.type?' selected':'')+">"+t+"</option>").join('')+"</select></td>"+
+   ['fc','gain','q'].map(k=>"<td><input type='number' step='any' data-i='"+i+"' data-k='"+k+"' value='"+b[k]+"'></td>").join('')+
+   "<td><button class='x' onclick='delBand("+i+")'>&times;</button></td></tr>").join('');
+  document.querySelectorAll('#bands [data-k]').forEach(e=>e.onchange=()=>{const b=st.channels[cur].bands[e.dataset.i];b[e.dataset.k]=e.dataset.k=='type'?e.value:parseFloat(e.value)});
+}
+function pick(c){cur=c;$('tab0').className='tab'+(c?'':' on');$('tab1').className='tab'+(c?' on':'');table()}
+function addBand(){if(st.channels[cur].bands.length>=st.max_bands)return;st.channels[cur].bands.push({type:'PK',fc:1000,gain:0,q:1});table()}
+function delBand(i){st.channels[cur].bands.splice(i,1);table()}
+function channelsPayload(){
+  st.channels[cur].preamp_db=parseFloat($('preamp').value)||0;
+  if($('link').checked)st.channels[1-cur]=JSON.parse(JSON.stringify(st.channels[cur]));
+  return st.channels.map(c=>({preamp_db:c.preamp_db,bands:c.bands}));
+}
+async function post(body){const r=await fetch('/api/peq',{method:'POST',body:JSON.stringify(body)});return r.json()}
+async function applyBands(){const j=await post({channels:channelsPayload()});j.success?msg('band-msg',1,'Applied'+(j.saved?' and saved':' (not saved!)')):msg('band-msg',0,j.error);load()}
+async function clearAll(){if(!confirm('Remove every filter on both channels?'))return;await post({channels:[{preamp_db:0,bands:[]}]});load()}
+async function toggleAB(){await post({enabled:!st.enabled});load()}
+function trebleBand(ch){const b=st.channels[ch].bands;for(let i=b.length-1;i>=0;i--)if(b[i].type=='HS'&&b[i].fc>=2000)return b[i];return null}
+function readTreble(){const b=trebleBand(0);if(b){$('tr-gain').value=b.gain;$('tr-fc').value=[3000,5000,8000,10000].reduce((a,f)=>Math.abs(f-b.fc)<Math.abs(a-b.fc)?f:a)}trebleShow()}
+function trebleShow(){const v=parseFloat($('tr-gain').value);$('tr-val').textContent=(v>0?'+':'')+v.toFixed(1)+' dB'}
+function trebleChanged(){clearTimeout(trTimer);trTimer=setTimeout(async()=>{
+  const g=parseFloat($('tr-gain').value),fc=parseFloat($('tr-fc').value);
+  for(let ch=0;ch<2;ch++){let b=trebleBand(ch);const bands=st.channels[ch].bands;
+    if(!b){if(g==0||bands.length>=st.max_bands)continue;b={type:'HS',fc:fc,gain:g,q:0.7071};bands.push(b)}
+    b.fc=fc;b.gain=g;if(g==0)bands.splice(bands.indexOf(b),1)}
+  await post({channels:st.channels.map(c=>({preamp_db:c.preamp_db,bands:c.bands}))});load()},350)}
+async function importREW(){
+  const f=$('rew-file').files[0];if(!f)return;const text=await f.text();
+  const r=await fetch('/api/peq/import?ch='+$('rew-ch').value,{method:'POST',body:text});const j=await r.json();
+  j.success?msg('rew-msg',1,'Imported '+j.bands+' filters'+(j.skipped?' ('+j.skipped+' not supported, skipped)':'')):msg('rew-msg',0,j.error||'Import failed');
+  $('rew-file').value='';load();
+}
+function exportREW(){
+  const ch=st.channels[cur],lines=['Filter Settings file','','Equaliser: Generic',(cur?'Right':'Left')+' channel','Preamp: '+ch.preamp_db+' dB'];
+  ch.bands.forEach((b,i)=>lines.push('Filter '+(i+1)+': ON '+b.type+' Fc '+b.fc+' Hz'+(['PK','LS','HS'].includes(b.type)?' Gain '+b.gain+' dB':'')+' Q '+b.q));
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([lines.join('\r\n')+'\r\n'],{type:'text/plain'}));a.download='speaker-eq-'+(cur?'R':'L')+'.txt';a.click();
+}
+window.onresize=()=>st&&draw();
+load();
+</script>
+</body></html>

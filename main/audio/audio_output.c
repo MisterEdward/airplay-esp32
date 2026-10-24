@@ -119,6 +119,19 @@ static volatile bool s_volume_snap[3];
 static audio_output_pull_fn s_external_pull;
 static void *s_external_ctx;
 
+#ifdef CONFIG_AUDIO_PEQ
+/* EQ hand-off: the control plane writes the latest design under the
+ * spinlock and bumps the sequence; the render task copies it out at a block
+ * boundary when the sequence differs from the one it last took.  The design
+ * stays there, so a render task that is restarted picks it up again. */
+static portMUX_TYPE s_peq_mux = portMUX_INITIALIZER_UNLOCKED;
+static peq_design_t s_peq_latest;
+static volatile uint32_t s_peq_seq;
+static uint32_t s_peq_seen;     // render task only
+static peq_design_t s_peq_next; // render task's copy of the latest design
+static peq_runtime_t s_peq;     // render task only
+#endif
+
 /* Render state, owned by the render task. */
 static audio_envelope_t s_env;
 static size_t s_held_frames; // block held back for transition shaping
@@ -313,6 +326,38 @@ static int32_t current_volume_target(audio_source_t src) {
 #endif
 }
 
+#ifdef CONFIG_AUDIO_PEQ
+static void peq_render(int16_t *pcm, size_t frames) {
+  const peq_design_t *next = NULL;
+  if (s_peq_seq != s_peq_seen) {
+    portENTER_CRITICAL(&s_peq_mux);
+    s_peq_next = s_peq_latest;
+    s_peq_seen = s_peq_seq;
+    portEXIT_CRITICAL(&s_peq_mux);
+    next = &s_peq_next;
+  }
+  peq_process(&s_peq, next, pcm, frames);
+}
+
+static void peq_reset(void) {
+  peq_runtime_reset(&s_peq);
+}
+
+void audio_output_set_peq(const peq_design_t *design) {
+  portENTER_CRITICAL(&s_peq_mux);
+  s_peq_latest = *design;
+  s_peq_seq++;
+  portEXIT_CRITICAL(&s_peq_mux);
+}
+#else
+static inline void peq_render(int16_t *pcm, size_t frames) {
+  (void)pcm;
+  (void)frames;
+}
+static inline void peq_reset(void) {
+}
+#endif
+
 static void playback_task(void *arg) {
   (void)arg;
   int16_t *pcm = malloc((size_t)READ_CAPACITY_FRAMES * 2 * sizeof(int16_t));
@@ -330,6 +375,10 @@ static void playback_task(void *arg) {
   }
 
   audio_envelope_init(&s_env, OUTPUT_RATE, FADE_IN_MS, FADE_OUT_MS);
+#ifdef CONFIG_AUDIO_PEQ
+  peq_runtime_init(&s_peq);
+  s_peq_seen = 0; // take the latest design, if any, on the first block
+#endif
   s_held_frames = 0;
   bool held_media = false;
   uint32_t seen_epoch = s_flush_epoch;
@@ -358,6 +407,7 @@ static void playback_task(void *arg) {
       held_media = false;
       audio_envelope_cut(&s_env);
       audio_resample_reset();
+      peq_reset();
       s_pause_pending = false;
       s_stats.flushes++;
       ESP_LOGD(TAG, "Flush: epoch=%" PRIu32 " (clock continuous)", epoch);
@@ -391,6 +441,7 @@ static void playback_task(void *arg) {
         s_active_source = active;
         switch_pending = false;
         audio_resample_reset();
+        peq_reset();
         audio_envelope_set_volume_now(&s_env, current_volume_target(active));
         s_stats.source_switches++;
         ESP_LOGI(TAG, "Source switch complete: active=%d", active);
@@ -423,6 +474,11 @@ static void playback_task(void *arg) {
       play = pcm;
       media = false;
     }
+
+    /* ---- speaker EQ ------------------------------------------------ */
+    // Before the envelope: the preamp is designed for a full-scale input,
+    // and volume and fades stay plain gains on the corrected signal.
+    peq_render(play, frames);
 
     /* ---- envelope -------------------------------------------------- */
     if (media) {
@@ -466,8 +522,9 @@ static void playback_task(void *arg) {
       // A flush resets the resampler, a pause did not: on resume its filter
       // still held the last music samples and played them, unenveloped, in
       // the first block of scheduled silence -- the click ~0.7 s before the
-      // music on every play after a plain pause.
+      // music on every play after a plain pause.  The EQ's history likewise.
       audio_resample_reset();
+      peq_reset();
       ESP_LOGD(TAG, "Pause: fade complete, receiver paused");
     }
 

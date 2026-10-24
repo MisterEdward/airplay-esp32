@@ -195,6 +195,20 @@ menu "Airplay ESP Configuration"
             Independent from AUDIO_OUTPUT_USB, which sends AirPlay audio TO a
             USB host (the device acts as a microphone there).
 
+    config AUDIO_PEQ
+        bool "Parametric EQ / speaker correction in the render task"
+        default y if IDF_TARGET_ESP32S3
+        default n
+        depends on AUDIO_OUTPUT_I2S && !DAC_TAS58XX
+        help
+            Per-channel cascade of up to 16 biquads (peaking, shelves, high
+            and low pass), loaded from a Room EQ Wizard filter list or edited
+            in the web UI (/peq).  Runs in float on the block that leaves the
+            resampler, before volume, with an automatic clip-proof preamp and
+            TPDF dither back to 16 bits.  Needs an FPU: ~5 % of a core for
+            10 bands per channel on the ESP32-S3.  Stored in NVS; bypass is
+            bit-exact.
+
     config USB_AUDIO_CAPTURE
         bool "USB capture of the rendered audio (debug)"
         default n

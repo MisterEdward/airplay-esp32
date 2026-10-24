@@ -104,6 +104,24 @@ AirPlay is serving.  If it never reaches the network it restarts after
   the HID keyboard → Power Management) for USB wake from sleep.  From fully
   off only Wake-on-LAN works: enter the PC's Ethernet MAC in the web UI.
 
+## Speaker EQ (parametric, `CONFIG_AUDIO_PEQ`)
+
+- Per channel up to 16 biquads (PK, LS, HS, LP, HP; RBJ cookbook) in float,
+  in the render task right after the resampler and before the envelope, so
+  AirPlay and the USB speaker both go through it.  `main/audio/audio_peq.c`
+  is pure C with host tests (`tests/host/test_peq.c`).
+- Preamp: the cascade's peak on a 1024-point log grid + 0.3 dB, or the
+  file's own preamp if that is lower.  Output requantised to 16 bits with
+  TPDF dither; digital silence stays exact zeros.  Bypass is bit-exact.
+- A new design (or bypass) is crossfaded over one block in the render task:
+  A/B while music plays makes no click.
+- Page `/peq` (`data/www/peq.html`, upload it to SPIFFS after OTA): response
+  plot, A/B, REW import per channel, band table, a treble high-shelf slider.
+- API: `GET /api/peq`, `POST /api/peq {"enabled":bool,"channels":[...]}`,
+  `POST /api/peq/import?ch=L|R|LR` with a REW "Filter Settings" file as body.
+- Stored in NVS (`fable/peq_v1`).  Cost: ~15-20 cycles per band per sample,
+  about 7 % of a core for 10 bands per channel.
+
 ## Diagnostics
 
 - `/logs` — live WebSocket viewer with backlog, filter, pause, copy, download
