@@ -119,8 +119,11 @@ AirPlay is serving.  If it never reaches the network it restarts after
   plot, A/B, REW import per channel, band table, a treble high-shelf slider.
 - API: `GET /api/peq`, `POST /api/peq {"enabled":bool,"channels":[...]}`,
   `POST /api/peq/import?ch=L|R|LR` with a REW "Filter Settings" file as body.
-- Stored in NVS (`fable/peq_v1`).  Cost: ~15-20 cycles per band per sample,
-  about 7 % of a core for 10 bands per channel.
+- Stored in NVS (`fable/peq_v1`), written 2 s after the last change and
+  only while nothing plays: an NVS write during playback stepped the playout
+  ~20 ms (measured 2026-10-24).  Cost: ~15-20 cycles per band per sample,
+  about 7 % of a core for 10 bands per channel (estimate, not measured on
+  the board: run-time stats are off).
 
 ## Diagnostics
 

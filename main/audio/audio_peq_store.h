@@ -6,7 +6,9 @@
 /**
  * The speaker's parametric EQ as a setting: owns the configuration, keeps it
  * in NVS, designs the cascade and hands it to the render task.  Every call
- * here is control-plane (web server, boot); none runs per sample.
+ * here is control-plane (web server, boot); none runs per sample.  Changes
+ * apply at once; the NVS write waits until the output is quiet (an NVS write
+ * during playback steps the playout timeline).
  */
 
 /** Load the saved configuration (or a flat one) and apply it. */
@@ -18,15 +20,15 @@ void audio_peq_store_get(peq_config_t *out);
 /** Copy of the design in use (preamp actually applied, peak). */
 void audio_peq_store_get_design(peq_design_t *out);
 
-/** Replace the whole configuration, apply it, persist it. */
+/** Replace the whole configuration and apply it; saved once quiet. */
 esp_err_t audio_peq_store_set(const peq_config_t *cfg);
 
-/** Bypass on/off (A/B), applied and persisted. */
+/** Bypass on/off (A/B), applied; saved once quiet. */
 esp_err_t audio_peq_store_set_enabled(bool enabled);
 
 /**
  * Import a REW / Equalizer APO filter list into one channel (0 = left,
- * 1 = right) or both (-1).  Applied and persisted.
+ * 1 = right) or both (-1).  Applied; saved once quiet.
  *
  * @param bands    filters imported
  * @param skipped  filter lines not understood

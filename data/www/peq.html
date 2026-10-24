@@ -125,7 +125,7 @@ function channelsPayload(){
   return st.channels.map(c=>({preamp_db:c.preamp_db,bands:c.bands}));
 }
 async function post(body){const r=await fetch('/api/peq',{method:'POST',body:JSON.stringify(body)});return r.json()}
-async function applyBands(){const j=await post({channels:channelsPayload()});j.success?msg('band-msg',1,'Applied'+(j.saved?' and saved':' (not saved!)')):msg('band-msg',0,j.error);load()}
+async function applyBands(){const j=await post({channels:channelsPayload()});j.success?msg('band-msg',1,'Applied'+(j.saved?' (saved once the music stops)':' (not saved!)')):msg('band-msg',0,j.error);load()}
 async function clearAll(){if(!confirm('Remove every filter on both channels?'))return;await post({channels:[{preamp_db:0,bands:[]}]});load()}
 async function toggleAB(){await post({enabled:!st.enabled});load()}
 function trebleBand(ch){const b=st.channels[ch].bands;for(let i=b.length-1;i>=0;i--)if(b[i].type=='HS'&&b[i].fc>=2000)return b[i];return null}

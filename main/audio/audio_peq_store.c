@@ -1,10 +1,13 @@
 #include "audio_peq_store.h"
 
+#include "audio_arbiter.h"
+#include "audio_envelope.h"
 #include "audio_output.h"
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "nvs.h"
 #include "sdkconfig.h"
 
@@ -16,9 +19,19 @@ static const char *TAG = "peq";
 #define NVS_KEY       "peq_v1"
 #define PEQ_RATE      CONFIG_OUTPUT_SAMPLE_RATE_HZ
 
+// Changes are applied at once but written to NVS only once the output is
+// quiet, and no sooner than this after the last one (a slider drag is many
+// POSTs).  Measured 2026-10-24: an NVS write that erases a page stalls the
+// flash cache long enough to step the playout ~20 ms (Playout err -20 ms,
+// the servo chasing it, then a re-acquire with dropped=3).  The volume
+// store follows the same rule (rtsp_conn_free()).
+#define PERSIST_DELAY_MS 2000
+
 static SemaphoreHandle_t s_mutex;
 static peq_config_t s_cfg;
 static peq_design_t s_design;
+static bool s_dirty;
+static TaskHandle_t s_persist_task;
 
 uint32_t audio_peq_store_rate(void) {
   return PEQ_RATE;
@@ -44,8 +57,8 @@ static void apply_locked(void) {
   log_design();
 }
 
-// Persist s_cfg.  Mutex held.  The NVS write stalls the flash cache for a
-// few tens of ms; the 42 ms DMA ring rides through it.
+// Persist s_cfg.  Mutex held.  Only from persist_task(): the NVS write stalls
+// the flash cache, which the playout timeline does not ride through.
 static esp_err_t save_locked(void) {
   nvs_handle_t nvs;
   esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
@@ -63,12 +76,52 @@ static esp_err_t save_locked(void) {
   return err;
 }
 
+// Nothing is being timed: no AirPlay stream, no fade in progress.
+static bool output_quiet(void) {
+  audio_arbiter_state_t arb;
+  audio_arbiter_get_state(&arb);
+  audio_output_stats_t st;
+  audio_output_get_stats(&st);
+  return !arb.airplay_playing && st.envelope_state == ENVELOPE_SILENT &&
+         !st.pause_pending;
+}
+
+// Its own task: an NVS write overflows the timer service task's 2 KB stack
+// (that panicked the board).  Woken by every change; saves once
+// PERSIST_DELAY_MS pass without another one and the output is quiet.
+static void persist_task(void *arg) {
+  (void)arg;
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    while (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(PERSIST_DELAY_MS)) > 0 ||
+           !output_quiet()) {
+    }
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_dirty && save_locked() == ESP_OK) {
+      s_dirty = false;
+      ESP_LOGI(TAG, "EQ saved");
+    }
+    xSemaphoreGive(s_mutex);
+  }
+}
+
+// A change was applied: save it once the output is quiet.  Mutex held.
+static esp_err_t mark_dirty_locked(void) {
+  s_dirty = true;
+  if (!s_persist_task) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  xTaskNotifyGive(s_persist_task);
+  return ESP_OK;
+}
+
 esp_err_t audio_peq_store_init(void) {
   if (s_mutex) {
     return ESP_OK;
   }
   s_mutex = xSemaphoreCreateMutex();
-  if (!s_mutex) {
+  if (!s_mutex || xTaskCreate(persist_task, "peq_save", 4096, NULL, 1,
+                              &s_persist_task) != pdPASS) {
     return ESP_ERR_NO_MEM;
   }
   peq_config_default(&s_cfg);
@@ -107,7 +160,7 @@ esp_err_t audio_peq_store_set(const peq_config_t *cfg) {
   xSemaphoreTake(s_mutex, portMAX_DELAY);
   s_cfg = *cfg;
   apply_locked();
-  esp_err_t err = save_locked();
+  esp_err_t err = mark_dirty_locked();
   xSemaphoreGive(s_mutex);
   return err;
 }
@@ -116,7 +169,7 @@ esp_err_t audio_peq_store_set_enabled(bool enabled) {
   xSemaphoreTake(s_mutex, portMAX_DELAY);
   s_cfg.enabled = enabled;
   apply_locked();
-  esp_err_t err = save_locked();
+  esp_err_t err = mark_dirty_locked();
   xSemaphoreGive(s_mutex);
   return err;
 }
@@ -146,7 +199,7 @@ esp_err_t audio_peq_store_import_rew(const char *text, size_t len, int channel,
   }
   s_cfg.enabled = true;
   apply_locked();
-  esp_err_t err = save_locked();
+  esp_err_t err = mark_dirty_locked();
   xSemaphoreGive(s_mutex);
   ESP_LOGI(TAG, "Imported %d REW filters into %s (%d skipped)", n,
            channel < 0 ? "both channels" : (channel ? "R" : "L"), bad);
