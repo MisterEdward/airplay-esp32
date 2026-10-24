@@ -29,6 +29,7 @@
 #include "rtsp_server.h"
 #include "audio_output.h"
 #include "audio_receiver.h"
+#include "audio_decoder.h"
 #include "esp_app_desc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -1199,6 +1200,17 @@ static esp_err_t seek_mode_handler(httpd_req_t *req) {
   return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
 
+/* Diagnostic: GET /api/debug/decoder_reset
+ * Reopens the AAC decoder before its next frame (same as after a corrupt
+ * frame).  When the bass vanishes mid-stream: if this brings it back, the
+ * fault is ours; if not, it comes from the sender. */
+static esp_err_t decoder_reset_handler(httpd_req_t *req) {
+  audio_decoder_request_reset();
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, "{\"decoder_reset\":\"requested\"}",
+                         HTTPD_RESP_USE_STRLEN);
+}
+
 /* Diagnostic: GET /api/debug/capture[?on=0|1][&mute=0|1]
  * on   = USB capture tap (the host records what the DAC is given)
  * mute = DAC mute test mode (zeros to I2S, the tap still gets the audio)
@@ -1548,6 +1560,7 @@ esp_err_t web_server_start(uint16_t port) {
   config.max_uri_handlers += 1; // debug seek mode
 #endif
   config.max_uri_handlers += 1; // debug capture / DAC mute
+  config.max_uri_handlers += 1; // debug decoder reset
   config.max_resp_headers = 8;
   config.stack_size = 8192;
 
@@ -1673,6 +1686,11 @@ esp_err_t web_server_start(uint16_t port) {
                                .method = HTTP_GET,
                                .handler = seek_mode_handler};
   httpd_register_uri_handler(s_server, &seek_mode_uri);
+
+  httpd_uri_t decoder_reset_uri = {.uri = "/api/debug/decoder_reset",
+                                   .method = HTTP_GET,
+                                   .handler = decoder_reset_handler};
+  httpd_register_uri_handler(s_server, &decoder_reset_uri);
 
   httpd_uri_t capture_uri = {.uri = "/api/debug/capture",
                              .method = HTTP_GET,

@@ -1,4 +1,5 @@
 #include <netinet/in.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,6 +33,10 @@ struct audio_decoder {
 };
 
 static const char *TAG = "audio_dec";
+
+// Set by audio_decoder_request_reset() from any task; the decode path (the
+// only user of the codec handle) consumes it before the next AAC frame.
+static atomic_bool s_reset_requested;
 
 // Reopen the AAC decoder to reset its internal state after a corrupt frame.
 // The codec's state machine can get stuck after certain errors (e.g. error 20)
@@ -282,6 +287,14 @@ int audio_decoder_decode(audio_decoder_t *decoder, const uint8_t *input,
         .decoded_size = 0};
     esp_audio_dec_info_t dec_info = {0};
 
+    if (atomic_exchange(&s_reset_requested, false)) {
+      ESP_LOGW(TAG, "AAC decoder reset requested (diagnostic)");
+      aac_decoder_reset(decoder);
+      if (!decoder->aac_decoder) {
+        return -1;
+      }
+    }
+
     esp_audio_err_t err =
         esp_aac_dec_decode(decoder->aac_decoder, &raw, &frame, &dec_info);
     if (err != ESP_AUDIO_ERR_OK) {
@@ -316,4 +329,8 @@ bool audio_decoder_is_aac(const audio_decoder_t *decoder) {
 
 bool audio_decoder_is_alac(const audio_decoder_t *decoder) {
   return decoder && decoder->kind == AUDIO_DECODER_ALAC;
+}
+
+void audio_decoder_request_reset(void) {
+  atomic_store(&s_reset_requested, true);
 }

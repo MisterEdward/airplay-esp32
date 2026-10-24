@@ -798,19 +798,26 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
           }
           ptp_stats_t ps;
           ptp_clock_get_stats(&ps);
+          // Decoded-stream meter (before the resampler): bass share in
+          // permille and level in dBFS, to date a "bass disappears" onset.
+          audio_meter_reading_t mdec, mout;
+          audio_output_get_meters(&mdec, &mout);
+          int bass_pm = (int)((mdec.bass_l + mdec.bass_r) * 500.0f + 0.5f);
+          int rms_db = (int)((mdec.rms_l + mdec.rms_r) * 0.5f);
           int64_t ptp_gap_us =
               (ps.last_offset_ns - ps.filtered_offset_ns) / 1000LL;
           ESP_LOGI(
               TAG,
               "Playout: err=%+lld us filt=%+lld us servo=%s/%u trims=%" PRIu32
               " buffered=%d depth=%lld ms ptp_gap=%lld us outliers=%" PRIu32
-              " gaps=%" PRIu32 " under=%" PRIu32 " domain=%s rtp=%" PRIu32,
+              " gaps=%" PRIu32 " under=%" PRIu32 " domain=%s rtp=%" PRIu32
+              " bass=%d rms=%d",
               (long long)on_time_err_us, (long long)timing->pos_err_filtered_us,
               timing->servo_engaged ? "on" : "off", timing->servo_interval,
               timing->servo_trims, buffered_frames, (long long)depth_ms,
               (long long)ptp_gap_us, ps.outlier_count, timing->gaps,
               audio_output_get_underruns(), audio_timing_sync_mode_name(timing),
-              played_rtp_timestamp);
+              played_rtp_timestamp, bass_pm, rms_db);
         }
 
         int64_t innovation = on_time_err_us - timing->pos_err_filtered_us;

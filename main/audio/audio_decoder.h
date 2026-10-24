@@ -24,4 +24,11 @@ int audio_decoder_decode(audio_decoder_t *decoder, const uint8_t *input,
                          audio_decode_info_t *info);
 
 bool audio_decoder_is_aac(const audio_decoder_t *decoder);
+
+/**
+ * Diagnostic: reopen the AAC decoder before the next frame it decodes, as the
+ * corrupt-frame path does.  Safe from any task.  Used to tell a decoder fault
+ * from a sender fault when the bass disappears mid-stream.
+ */
+void audio_decoder_request_reset(void);
 bool audio_decoder_is_alac(const audio_decoder_t *decoder);
