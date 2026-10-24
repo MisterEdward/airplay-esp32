@@ -2,6 +2,7 @@
 // against minimal fakes.  Covers the master-timescale step: follow a real
 // step, never a congested link.
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
