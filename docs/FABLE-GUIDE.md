@@ -296,6 +296,9 @@ AirPlayXPCHelper (debug lines are not persisted, stream them live).
 Plugging the board into the Mac once left it in ROM download mode
 (303a:1001, `boot:0x0`): press RESET.
 
+**Speaker response:** `scripts/fable/measure/` (README there) measures at the
+listening position with the MacBook mic and fits filters for `/peq`.
+
 **Log lines that matter** (tags `audio_buf`, `audio_recv`, `audio_time`,
 `rtsp_handlers`):
 
