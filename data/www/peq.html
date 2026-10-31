@@ -39,10 +39,18 @@ td{padding:3px 4px}
 .slider-row input[type=range]{flex:1;accent-color:#e94560}
 .slider-row span{font-size:14px;min-width:64px;text-align:right}
 .x{background:none;border:none;color:#888;font-size:16px;cursor:pointer}
+.presets{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+.preset{background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.1);border-radius:10px;color:#ddd;padding:12px 8px;font-size:14px;font-weight:500;cursor:pointer}
+.preset.on{background:#e94560;border-color:#e94560;color:#fff}
 </style></head><body>
 <div class='wrap'>
 <div class='header'><h1>Speaker EQ</h1><p>Parametric correction, per channel, applied before volume</p></div>
 <div class='nav'><a href='/'>&larr; Back to settings</a></div>
+
+<div class='card'><h2>Presets</h2>
+<div class='presets' id='presets'></div>
+<p class='hint' id='preset-desc'>Measured at the listening position.  Switching is crossfaded: flip between them while music plays.</p>
+</div>
 
 <div class='card'><h2>A / B</h2>
 <div class='row'>
@@ -89,6 +97,19 @@ td{padding:3px 4px}
 </div>
 <script>
 const TYPES=['PK','LS','HS','LP','HP'];
+const PRESETS=[{"name": "Original", "desc": "No EQ: the speakers as they are", "cfg": {"enabled": false}}, {"name": "Boom fix", "desc": "Only the 1-2 worst bass resonances per side", "cfg": {"enabled": true, "channels": [{"preamp_db": 0, "bands": [{"type": "PK", "fc": 189.1, "gain": -6.95, "q": 5.32}, {"type": "PK", "fc": 247.4, "gain": -7.35, "q": 4.11}]}, {"preamp_db": 0, "bands": [{"type": "PK", "fc": 103.7, "gain": -8.0, "q": 3.23}, {"type": "PK", "fc": 191.3, "gain": -5.58, "q": 2.57}]}]}}, {"name": "Warm", "desc": "Full bass, the boomy notes tamed", "cfg": {"enabled": true, "channels": [{"preamp_db": 0, "bands": [{"type": "PK", "fc": 102.4, "gain": -1.63, "q": 6.0}, {"type": "PK", "fc": 188.7, "gain": -7.22, "q": 5.75}, {"type": "PK", "fc": 233.4, "gain": -5.47, "q": 6.0}, {"type": "PK", "fc": 266.3, "gain": -5.19, "q": 6.0}]}, {"preamp_db": 0, "bands": [{"type": "PK", "fc": 96.3, "gain": -5.83, "q": 6.0}, {"type": "PK", "fc": 111.0, "gain": -6.6, "q": 4.74}, {"type": "PK", "fc": 182.1, "gain": -6.54, "q": 6.0}, {"type": "PK", "fc": 240.1, "gain": -5.52, "q": 6.0}]}]}}, {"name": "Balanced", "desc": "Less bass, cleaner low-mids", "cfg": {"enabled": true, "channels": [{"preamp_db": 0, "bands": [{"type": "PK", "fc": 102.1, "gain": -6.06, "q": 6.0}, {"type": "PK", "fc": 154.3, "gain": -3.99, "q": 6.0}, {"type": "PK", "fc": 188.4, "gain": -7.49, "q": 5.19}, {"type": "PK", "fc": 230.4, "gain": -6.0, "q": 4.35}, {"type": "PK", "fc": 268.2, "gain": -6.9, "q": 4.56}]}, {"preamp_db": 0, "bands": [{"type": "PK", "fc": 94.8, "gain": -6.08, "q": 6.0}, {"type": "PK", "fc": 111.3, "gain": -8.44, "q": 3.36}, {"type": "PK", "fc": 180.7, "gain": -8.54, "q": 3.98}, {"type": "PK", "fc": 242.8, "gain": -7.97, "q": 6.0}, {"type": "PK", "fc": 947.1, "gain": -2.61, "q": 2.5}]}]}}, {"name": "Warm + air", "desc": "Warm, +3 dB above 6 kHz (about 3 dB quieter overall)", "cfg": {"enabled": true, "channels": [{"preamp_db": 0, "bands": [{"type": "PK", "fc": 102.4, "gain": -1.63, "q": 6.0}, {"type": "PK", "fc": 188.7, "gain": -7.22, "q": 5.75}, {"type": "PK", "fc": 233.4, "gain": -5.47, "q": 6.0}, {"type": "PK", "fc": 266.3, "gain": -5.19, "q": 6.0}, {"type": "HS", "fc": 6000, "gain": 3, "q": 0.71}]}, {"preamp_db": 0, "bands": [{"type": "PK", "fc": 96.3, "gain": -5.83, "q": 6.0}, {"type": "PK", "fc": 111.0, "gain": -6.6, "q": 4.74}, {"type": "PK", "fc": 182.1, "gain": -6.54, "q": 6.0}, {"type": "PK", "fc": 240.1, "gain": -5.52, "q": 6.0}, {"type": "HS", "fc": 6000, "gain": 3, "q": 0.71}]}]}}];
+function bandKey(bs){return bs.map(b=>b.type+Number(b.fc).toFixed(1)+'/'+Number(b.gain).toFixed(1)+'/'+Number(b.q).toFixed(2)).join(',')}
+function presetIndex(){
+  if(!st.enabled)return 0;
+  const cur=st.channels.map(c=>bandKey(c.bands)).join('|');
+  return PRESETS.findIndex(p=>p.cfg.channels&&p.cfg.channels.map(c=>bandKey(c.bands)).join('|')==cur);
+}
+function renderPresets(){
+  const on=presetIndex();
+  $('presets').innerHTML=PRESETS.map((p,i)=>"<button class='preset"+(i==on?' on':'')+"' title='"+p.desc+"' onclick='applyPreset("+i+")'>"+p.name+"</button>").join('');
+  $('preset-desc').textContent=on>=0?PRESETS[on].name+': '+PRESETS[on].desc+'.  Switching is crossfaded: flip between them while music plays.':'Custom settings.  Switching is crossfaded: flip between them while music plays.';
+}
+async function applyPreset(i){await post(PRESETS[i].cfg);load()}
 let st=null,cur=0,trTimer=null;
 function $(i){return document.getElementById(i)}
 function msg(id,ok,t){$(id).innerHTML="<div class='msg "+(ok?'ok':'err')+"'>"+t+"</div>"}
@@ -96,7 +117,7 @@ async function load(){
   const r=await fetch('/api/peq');st=await r.json();
   $('ab').textContent=st.enabled?'EQ ON':'BYPASS';$('ab').className='btn btn-big '+(st.enabled?'btn-primary':'off');
   $('pre').textContent=st.active?'Preamp applied: L '+st.channels[0].applied_preamp_db+' dB, R '+st.channels[1].applied_preamp_db+' dB':(st.enabled?'Flat':'Bypassed: bit-exact');
-  readTreble();draw();table();
+  readTreble();draw();table();renderPresets();
 }
 function draw(){
   const c=$('plot'),dpr=window.devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;
