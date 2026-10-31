@@ -70,11 +70,14 @@ pops — "behave like an Apple product".
 
 ### Handover — start the next session here (as of 2026-09-28)
 
-1. **The board runs `main`** (capture build, see above).  The old
-   `wip/ptp-grandmaster` tag is merged as 81d7d12.
+1. **The board runs `main`** (the EQ build, flashed 2026-10-24: no capture
+   and no level meters).  The old `wip/ptp-grandmaster` tag is merged as
+   81d7d12.  Unmerged work lives in tags, not branches:
+   `archive/ci-fix` (CI never passed on it), `archive/diag-bass-meter`,
+   `archive/perf-session-start-rtsp-path`, `archive/proto-fast-pairing`.
 2. **Next audio work, in order**: the fade cut at seek (§7), then the
    iPhone-only short dropouts (§7, needs Edward and the phone), then the
-   session-start follow-ups on branch `perf/session-start-rtsp-path`
+   session-start follow-ups in tag `archive/perf-session-start-rtsp-path`
    (event port 100 ms, keep packet pool, accept in 10 ms, warm PTP re-lock;
    the last one touches sync, so ear test).  Measure with plan `sstart`.
 3. **Hardware plans discussed** (not started): Seeed XIAO ESP32-S3 Plus with
@@ -411,7 +414,7 @@ jump).  Watch for `Master timescale stepped` right *after* an `Anchor:`.
   iPhone dropouts); a grandmaster change mid-play once gave `Anchor 12242 ms in
   the future`; the first acquisition after a rapid reconnect can be off by up
   to -7.7 ms (corrected by the next re-acquire); each disconnect blocks ~1 s on
-  the event port (fix on `perf/session-start-rtsp-path`).
+  the event port (fix in tag `archive/perf-session-start-rtsp-path`).
 - A small click on play after a pause was reported once; the resume there
   re-acquired with `trimmed=116 dropped=2` (anchor 55 ms in the past).  The
   PCM5102A's own zero-data auto-mute is the other suspect.  Not isolated.
