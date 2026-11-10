@@ -450,6 +450,49 @@ unscheduled (`No anchor 8007 ms after the flush`, `domain=local`): sound
 while paused.  And at a gapless track change the playout error stepped to
 -15 ms and the servo engaged; the pause came 1.5 s later, so not followed up.
 
+### Session start: where the time goes (2026-11-11)
+
+`python3 scripts/fable/sstart.py TAG 6` (journal only, works at volume 0).
+Mac Music, six sessions each, medians in ms:
+
+| Build | SETUP handled | data connection | connect -> sound | TEARDOWN -> closed | event-port timeouts |
+|---|---|---|---|---|---|
+| before | 70 | 95 | 1430 | 1130 | 5 of 6 |
+| + d6a2ca2 event port | 70 | 100 | 1490 | 240 | 0 |
+| + f2dceb6 keep the pool | 10 | 90 | 1410 | 245 | 0 |
+| + 005fba3 accept per tick | 10 | 30 | 1370 | 180 | 0 |
+| + 21ce667 start trace | 10 | 25 | 1470 | 200 | 0 |
+
+Stopping a session is ~0.9 s faster and the warning is gone.  Starting one
+is not measurably faster: the trace (`sid=N start #k … sender S ms, handled
+in H ms`) puts ~1.0 s of the 1.2 s from connect to the first anchor on the
+sender (0.58 s between our reply to its last /command and its stream SETUP)
+and ~0.19 s on us, of which 0.145 s is the pair-setup M3 modexp.  PTP locks
+~0.75 s after "Tracking PTP source", about when the anchor arrives, and the
+first frame is due 120-250 ms after the anchor, so no session waited for
+the lock: `0ac2b57` (warm PTP re-lock, still only in the archive tag) would
+have gained nothing here and risks a start on an offset up to 1.2 ms stale.
+Not ported.
+
+### Pair-setup failed once in ~128 connects (fixed 2026-11-11)
+
+"Client proof verification failed": the sender hashes the salt whole and
+pads A and B to 384 bytes in M1/M2, `srp.c` used the shortest form of all
+three, and the two differ when one starts with a zero byte.  Proven with
+`GET /api/debug/srp?force=1|2|3` (salt / B / both start with a zero byte;
+0 = normal, the default): before 0 of 4 and 0 of 3 pair-setups from a Mac,
+after 10 of 10.  A cannot be forced from our side; a fallback accepts its
+short form and logs `matched the fallback encoding` if that ever happens.
+
+### The router refused the speaker for ~5.5 min after a reboot (twice)
+
+2026-11-10 23:55 and 2026-11-11 00:09, after the 7th and 8th OTA reboot of
+the evening: every auth attempt failed (reasons 2, 205, 202, 4) for the
+whole first boot, the Wi-Fi watchdog restarted after 180 s, and the second
+boot joined at its 11th attempt, ~150 s in, both times.  The reboots before
+and the one after joined in 13-43 s.  Looks like the access point holding
+the station off; not investigated.  The watchdog did its job.
+
 ### Music's idle-timeout disconnect (sender side)
 
 After some scripted seeks Music arms an idle timer that is not cancelled and
