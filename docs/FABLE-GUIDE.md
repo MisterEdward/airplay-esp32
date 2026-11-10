@@ -309,6 +309,19 @@ reader's next packet arrives (it may sit in `recv()` for seconds while the
 sender idles), and only dries the ring if it outlasts the lead: 7 s of PCM
 plus up to 16 s of compressed audio from a Mac.
 
+**The Mac as a receiver logs its own sync (2026-11-10).**  When the iPhone
+plays to the Mac and the speaker, the Mac's AirPlay receiver (process
+ControlCenter, subsystem `com.apple.airplay`, persisted, so `log show` works
+afterwards) logs `New anchor data: net … media … wall …` for every anchor,
+once a second `Network Time … SynchronizerTime …`, and
+`Drift from remote timebase exceeded by X secs` once it is more than 15 ms
+off.  `media` is rtp/44100, so it compares directly with the speaker's
+`Anchor:` and `Playout: … rtp=` lines (map the journal to wall time with
+`firmware.log_ms` in watch.py's status.jsonl).  In a 35-minute session the
+Mac drifted steadily to -49 ms (about 1.4 ms a minute, never corrected until
+the next anchor) while the speaker stayed within +0.8..+2.5 ms of the same
+anchor.  Check this before blaming the speaker for an echo in a group.
+
 **Speaker response:** `scripts/fable/measure/` (README there) measures at the
 listening position with the MacBook mic and fits filters for `/peq`.
 
