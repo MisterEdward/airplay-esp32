@@ -296,6 +296,19 @@ AirPlayXPCHelper (debug lines are not persisted, stream them live).
 Plugging the board into the Mac once left it in ROM download mode
 (303a:1001, `boot:0x0`): press RESET.
 
+**Dropouts (2026-11-10):** the journal holds only 15-20 min of playback, so
+keep it while someone listens: `python3 scripts/fable/watch.py --also PHONE_IP`
+follows the journal (`/api/logs?after=`), polls `/api/status` and pings the
+speaker and the sender, all with the Mac's clock, into `$FABLE_RUNS/watch-*`.
+`/api/status` has an `rx` object (packet/byte age, reader and decoder state,
+free/ready slots, the data connection's TCP window as lwIP announces it,
+episode counters).  `GET /api/debug/stall?ms=N` (max 30000, 0 cancels) makes
+the buffered reader stop reading: `scripts/fable/stalltest.sh TAG 30000`
+plays from Music, stalls, and keeps everything.  The stall starts when the
+reader's next packet arrives (it may sit in `recv()` for seconds while the
+sender idles), and only dries the ring if it outlasts the lead: 7 s of PCM
+plus up to 16 s of compressed audio from a Mac.
+
 **Speaker response:** `scripts/fable/measure/` (README there) measures at the
 listening position with the MacBook mic and fits filters for `/peq`.
 
@@ -317,6 +330,13 @@ listening position with the MacBook mic and fits filters for `/peq`.
 | `Master timescale stepped by … following it` | only while/after a pause |
 | `Deferred flush done: dropped N packets of [a, b)` | N = 0 is normal |
 | `ptp_gap` in Playout, `ptp.steps` in `/api/status` | gap within ±10 ms |
+| `audio_rxmon: Ring low / Ring DRY while playing … Ring recovered` | never; one line a second while the PCM ring is below 450 frames or empty with a valid anchor |
+
+Reading an `audio_rxmon` line: `reader=slot_wait` or `tcp ann=0` means we
+closed the TCP window; `ooseq>0` with `in=0 B/s` means a lost segment is
+waiting for the sender's retransmission; window open, `ooseq=0` and
+`in=0 B/s` means the sender is not sending; `ptp age` in seconds means the
+whole link is down.
 
 ---
 
@@ -386,6 +406,36 @@ decoder reset on the 36-byte packet at `untilSeq` (every seek logs one decode
 error), or a quick start with only 1-2 frames buffered starving.  To capture:
 board on the Mac's USB, `CAPTURE=1 python3 run.py phoneN esp listen30` while
 Edward plays from the phone, then `python3 holes.py $FABLE_RUNS/phoneN`.
+
+### Dropouts: silence while "playing" (open, 2026-11-10)
+
+Edward's symptoms: (a) 1-3 s of silence that ends by itself, (b) silence
+until pause/play.  One (b) is in the journal of 2026-11-10 (iPhone, sid=4,
+86 407-86 468 s): PTP arrived 1.2-2.8 s late for 8 s, recovered, and from
+then on the audio connection delivered ~3 packets a second (it needs 43), in
+bursts ~4.7 s apart, for 54 s until TEARDOWN; `stalls=0`, no reader warning,
+RTSP and PTP fine.  So the link came back and one TCP connection did not.
+~5 s is also the period of the sender's zero-window probes (seen with
+`/api/debug/stall`), which makes the TCP state between the phone and lwIP
+the suspect (our side: no SACK, 4 out-of-order pbufs, 24-entry recv mbox).
+Not proven: the next episode's `audio_rxmon` lines decide.
+
+Measured with `/api/debug/stall` and Music on the Mac (runs `stall-a2`,
+`stall-a3`): when the reader stops for 27-28 s the ring is dry for 21-23 s
+and the speaker plays again by itself 1.3-1.5 s after data returns
+(`Gap: … concealing`, `dropped=757`, `Acquired … re-acquire`, `domain=ptp`).
+But the re-acquire is not always exact: once on schedule (-36 us), once
+14.7 ms late with 16 frames in the ring, and the servo needed 13.5 s and
+617 trims to bring it back.  Starting with an almost empty ring while the
+decoder is still catching up is the lead; the same may be behind the
+iPhone's 60-70 ms holes above.
+
+Also seen there: a pause from Music within ~2 s of a track change arrives as
+`FLUSHBUFFERED immediate` plus 25 packets of the next track, with no rate=0
+and no anchor.  Eight seconds later the anchor timeout plays those 0.6 s
+unscheduled (`No anchor 8007 ms after the flush`, `domain=local`): sound
+while paused.  And at a gapless track change the playout error stepped to
+-15 ms and the servo engaged; the pause came 1.5 s later, so not followed up.
 
 ### Music's idle-timeout disconnect (sender side)
 

@@ -42,8 +42,11 @@ static const char *TAG = "audio_rxmon";
 #define RING_OK_FRAMES  800
 #define RING_LOW_FRAMES 450
 // An empty ring is normal for a moment after a seek or at session start
-// (sound comes 0.4-0.9 s after the flush), so only report it after this.
-#define DRY_GRACE_MS 2000
+// (sound comes 0.4-0.9 s after the flush; the first audio of a session took
+// 2.8 s), so a dry ring is reported after this long once audio has played
+// under the current anchor, and after DRY_GRACE_START_MS if it never did.
+#define DRY_GRACE_MS       2000
+#define DRY_GRACE_START_MS 6000
 // Hovering above the low mark this long also ends an episode (a sender that
 // keeps a short lead never reaches RING_OK_FRAMES).
 #define STEADY_MS 5000
@@ -56,6 +59,8 @@ typedef struct {
   uint32_t ooseq_bytes;
   bool refused;
   uint32_t rcv_nxt;
+  uint32_t taken_ms;
+  uint32_t bytes_per_s; // in-order data since the previous snapshot
 } tcp_snapshot_t;
 
 static audio_receiver_state_t *s_state;
@@ -70,12 +75,10 @@ static struct {
   uint32_t rate_ms;
   uint32_t rate_bytes;
   uint32_t rx_bytes_per_s;
-  uint32_t rate_rcv_nxt;
-  bool rate_tcp_valid;
-  uint32_t tcp_bytes_per_s;
 
   uint32_t generation;
-  bool armed; // the ring has been full since the last seek/pause
+  bool armed;  // the ring has been full since the last seek/pause
+  bool played; // audio has played since the last seek/pause
   uint32_t dry_since_ms;
   uint32_t steady_since_ms;
   uint32_t prev_tick_ms;
@@ -140,6 +143,7 @@ static void tcp_snapshot_cb(void *ctx) {
       snap.rcv_wnd = pcb->rcv_wnd;
       snap.ann_wnd = pcb->rcv_ann_wnd;
       snap.rcv_nxt = pcb->rcv_nxt;
+      snap.taken_ms = rx_now_ms();
       snap.refused = pcb->refused_data != NULL;
 #if TCP_QUEUE_OOSEQ
       for (struct tcp_seg *seg = pcb->ooseq; seg; seg = seg->next) {
@@ -149,6 +153,13 @@ static void tcp_snapshot_cb(void *ctx) {
 #endif
       break;
     }
+  }
+  // Only this thread writes the numbers in s_tcp (the monitor just clears
+  // `valid`), so the previous snapshot can be read unlocked.
+  uint32_t span_ms = snap.taken_ms - s_tcp.taken_ms;
+  if (snap.valid && s_tcp.valid && span_ms > 0) {
+    snap.bytes_per_s =
+        (uint32_t)((uint64_t)(snap.rcv_nxt - s_tcp.rcv_nxt) * 1000 / span_ms);
   }
   portENTER_CRITICAL(&s_mux);
   s_tcp = snap;
@@ -205,7 +216,7 @@ void audio_receiver_get_rx_diag(audio_rx_diag_t *out) {
     out->tcp_ooseq_segs = tcp.ooseq_segs;
     out->tcp_ooseq_bytes = tcp.ooseq_bytes;
     out->tcp_refused = tcp.refused;
-    out->tcp_bytes_per_s = m.tcp_bytes_per_s;
+    out->tcp_bytes_per_s = tcp.bytes_per_s;
   } else if (running) {
     out->last_packet_age_ms = age_ms(now_ms, m.last_packet_change_ms);
   }
@@ -270,15 +281,6 @@ static void update_rates(audio_receiver_state_t *state, uint32_t now_ms) {
   m.rate_bytes = bytes;
   m.rate_ms = now_ms;
 
-  tcp_snapshot_t tcp = tcp_snapshot_get();
-  if (tcp.valid && m.rate_tcp_valid) {
-    m.tcp_bytes_per_s =
-        (uint32_t)((uint64_t)(tcp.rcv_nxt - m.rate_rcv_nxt) * 1000 / span_ms);
-  } else {
-    m.tcp_bytes_per_s = 0;
-  }
-  m.rate_tcp_valid = tcp.valid;
-  m.rate_rcv_nxt = tcp.rcv_nxt;
   // Ask for the next snapshot while a data connection exists.  One message a
   // second to the tcpip thread; if its mailbox is full the old snapshot
   // simply stays.  The message is allocated here, not at init: a connection
@@ -301,7 +303,12 @@ static void update_episode(audio_receiver_state_t *state, uint32_t now_ms) {
   audio_stream_t *stream = state->stream;
   bool running = stream && stream->running;
   bool buffered = running && stream->type == AUDIO_STREAM_BUFFERED;
-  bool playing = running && state->timing.playing;
+  // "Playing" here means the sender has scheduled audio: rate 1, a valid
+  // anchor, and not between a flush and its anchor.  Without a schedule an
+  // empty ring is the sender's choice (Music pauses at a track change with a
+  // flush and no rate=0), and the decoder's own anchor timeout reports it.
+  bool playing = running && state->timing.playing &&
+                 state->timing.anchor_valid && !state->discard_all_until_anchor;
   int frames = audio_buffer_get_frame_count(&state->buffer);
   bool dry = frames == 0 && !state->timing.pending_valid;
   uint32_t generation = state->buffered_generation;
@@ -312,11 +319,12 @@ static void update_episode(audio_receiver_state_t *state, uint32_t now_ms) {
   // dropout: whatever was going on ends here, and the ring starts over.
   if (!playing || generation != m.generation) {
     if (m.active) {
-      log_state(playing ? "Episode ended by a seek" : "Episode ended by pause");
+      log_state("Episode ended by pause, seek or stop");
       end_episode(now_ms);
     }
     m.generation = generation;
     m.armed = false;
+    m.played = false;
     m.dry_since_ms = 0;
     m.steady_since_ms = 0;
     return;
@@ -325,13 +333,17 @@ static void update_episode(audio_receiver_state_t *state, uint32_t now_ms) {
   if (buffered && frames >= RING_OK_FRAMES) {
     m.armed = true;
   }
+  if (state->timing.acquired && frames > 0) {
+    m.played = true;
+  }
   if (!dry) {
     m.dry_since_ms = 0;
   } else if (m.dry_since_ms == 0) {
     m.dry_since_ms = now_ms;
   }
   bool low = buffered && m.armed && frames < RING_LOW_FRAMES;
-  bool dry_long = dry && now_ms - m.dry_since_ms >= DRY_GRACE_MS;
+  bool dry_long = dry && now_ms - m.dry_since_ms >=
+                             (m.played ? DRY_GRACE_MS : DRY_GRACE_START_MS);
 
   if (!m.active) {
     if (!low && !dry_long) {
@@ -385,9 +397,10 @@ static void update_episode(audio_receiver_state_t *state, uint32_t now_ms) {
     return;
   }
 
-  // A line a second for the first 30 s, then every 10 s, then every minute:
-  // a session left "playing" with nothing to play must not fill the journal.
-  uint32_t interval_ms = m.lines < 30 ? 1000 : (m.lines < 60 ? 10000 : 60000);
+  // A line a second for the first 20 s, then every 10 s for two minutes,
+  // then every minute: a session left "playing" with nothing to play must
+  // not fill the journal.
+  uint32_t interval_ms = m.lines < 20 ? 1000 : (m.lines < 32 ? 10000 : 60000);
   if (now_ms - m.last_line_ms >= interval_ms) {
     m.last_line_ms = now_ms;
     m.lines++;
