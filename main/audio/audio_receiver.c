@@ -123,6 +123,7 @@ esp_err_t audio_receiver_init(void) {
       sizeof(audio_frame_header_t) +
       ((size_t)MAX_SAMPLES_PER_FRAME * AUDIO_MAX_CHANNELS * sizeof(int16_t));
   audio_timing_init(&receiver.timing, pending_capacity);
+  audio_rx_monitor_start(&receiver);
   audio_timing_set_format(&receiver.timing, &receiver.stream->format);
 
   receiver.buffered_listen_socket = -1;
@@ -762,6 +763,21 @@ void audio_receiver_seek_flush_until(uint32_t until_seq, uint32_t until_ts) {
   receiver.flush_until_seq = until_seq & 0x7FFFFF;
   receiver.flush_until_ts = until_ts;
   receiver.flush_until_active = true;
+}
+
+uint32_t audio_receiver_debug_stall(int ms) {
+  if (ms > 30000) {
+    ms = 30000;
+  }
+  if (ms >= 0) {
+    uint32_t until_ms = ms > 0 ? rx_now_ms() + (uint32_t)ms : 0;
+    // 0 means "off"; skip the one deadline that would read as that.
+    receiver.buffered_debug_stall_until_ms =
+        (ms > 0 && until_ms == 0) ? 1 : until_ms;
+  }
+  uint32_t until_ms = receiver.buffered_debug_stall_until_ms;
+  int32_t left_ms = until_ms ? (int32_t)(until_ms - rx_now_ms()) : 0;
+  return left_ms > 0 ? (uint32_t)left_ms : 0;
 }
 
 void audio_receiver_set_seek_hold_mode(int mode) {

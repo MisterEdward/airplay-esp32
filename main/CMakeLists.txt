@@ -8,6 +8,7 @@ set( SRC_FILES
     "audio/audio_stream.c"
     "audio/audio_stream_realtime.c"
     "audio/audio_stream_buffered.c"
+    "audio/audio_rx_monitor.c"
     "audio/audio_decoder.c"
     "audio/audio_buffer.c"
     "audio/audio_timing.c"

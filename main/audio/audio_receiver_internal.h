@@ -6,6 +6,7 @@
 
 #include "lwip/sockets.h"
 
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -34,6 +35,28 @@ typedef struct {
 // Signed distance a - b in the sender's 23-bit sequence space.
 static inline int32_t seq23_diff(uint32_t a, uint32_t b) {
   return (int32_t)(((a - b) & 0x7FFFFF) << 9) >> 9;
+}
+
+// What the buffered reader and decoder tasks are doing right now.
+typedef enum {
+  BUFFERED_READER_IDLE = 0,    // no data connection
+  BUFFERED_READER_RECV,        // in recv(): the TCP window is ours to fill
+  BUFFERED_READER_SLOT_WAIT,   // no free slot: the TCP window is closing
+  BUFFERED_READER_DEBUG_STALL, // /api/debug/stall
+} buffered_reader_state_t;
+
+typedef enum {
+  BUFFERED_DECODER_IDLE = 0,    // ready queue empty
+  BUFFERED_DECODER_HOLD_ANCHOR, // post-seek packet, waiting for the anchor
+  BUFFERED_DECODER_RING_FULL,   // PCM ring full: normal back-pressure
+  BUFFERED_DECODER_DECODING,
+} buffered_decoder_state_t;
+
+// Milliseconds since boot, 32-bit (wraps after 49 days; compare by
+// subtraction).  0 is reserved for "never".
+static inline uint32_t rx_now_ms(void) {
+  uint32_t ms = (uint32_t)(esp_timer_get_time() / 1000LL);
+  return ms ? ms : 1;
 }
 
 typedef struct {
@@ -80,6 +103,18 @@ typedef struct {
   uint32_t buffered_pre_anchor_drops; // hold queue full before anchor
   int64_t buffered_last_packet_us;
   int64_t buffered_flush_us; // when the last seek flush happened
+  // Dropout diagnostics, read from other tasks (audio_rx_monitor.c): 32-bit
+  // so a read is never torn.  Times are rx_now_ms().
+  volatile uint8_t buffered_reader_state;         // buffered_reader_state_t
+  volatile uint8_t buffered_decoder_state;        // buffered_decoder_state_t
+  volatile uint32_t buffered_bytes_received;      // off the socket; wraps
+  volatile uint32_t buffered_last_byte_ms;        // last recv() with data
+  volatile uint32_t buffered_last_packet_ms;      // last complete packet
+  volatile uint32_t buffered_decoder_progress_ms; // last frame into the ring
+  // /api/debug/stall: the reader does not call recv() until this time
+  // (rx_now_ms(); 0 = off).  Test knob, never set by the firmware itself.
+  volatile uint32_t buffered_debug_stall_until_ms;
+  uint32_t buffered_debug_stalls;
 
   // Immediate FLUSHBUFFERED names the first sequence number of the new
   // position (flushUntilSeq).  Everything below it is old backlog still in
@@ -210,6 +245,15 @@ bool audio_stream_process_accepted_frame(audio_receiver_state_t *state,
 bool audio_stream_process_frame(audio_receiver_state_t *state,
                                 uint32_t timestamp, const uint8_t *audio_data,
                                 size_t audio_len);
+
+// Slots in the buffered free and ready queues; false when there are none
+// (no buffered stream).  Safe against a concurrent stream stop.
+bool audio_stream_buffered_queue_depths(audio_receiver_state_t *state,
+                                        int *free_slots, int *ready);
+
+// Dropout monitor (audio_rx_monitor.c): logs when the PCM ring runs low or
+// dry while playing, and backs audio_receiver_get_rx_diag().
+void audio_rx_monitor_start(audio_receiver_state_t *state);
 
 static inline audio_receiver_state_t *
 audio_stream_state(audio_stream_t *stream) {

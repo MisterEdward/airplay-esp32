@@ -197,6 +197,44 @@ cJSON *device_status_build_json(void) {
   cJSON_AddNumberToObject(timing, "decrypt_errors", diag.decrypt_errors);
   cJSON_AddItemToObject(root, "timing", timing);
 
+  // ---- Receive side: what a dropout needs (audio_rx_monitor.c) ----------
+  audio_rx_diag_t rx;
+  audio_receiver_get_rx_diag(&rx);
+  cJSON *rxo = cJSON_CreateObject();
+  cJSON_AddStringToObject(rxo, "stream", rx.stream);
+  cJSON_AddBoolToObject(rxo, "data_connected", rx.data_connected);
+  // Ages: -1 = never.
+  cJSON_AddNumberToObject(rxo, "last_packet_age_ms",
+                          (double)(int32_t)rx.last_packet_age_ms);
+  cJSON_AddNumberToObject(rxo, "last_byte_age_ms",
+                          (double)(int32_t)rx.last_byte_age_ms);
+  cJSON_AddNumberToObject(rxo, "bytes", rx.bytes_received);
+  cJSON_AddNumberToObject(rxo, "bytes_per_s", rx.rx_bytes_per_s);
+  cJSON_AddStringToObject(rxo, "reader", rx.reader);
+  cJSON_AddNumberToObject(rxo, "free_slots", rx.free_slots);
+  cJSON_AddNumberToObject(rxo, "ready_packets", rx.ready_packets);
+  cJSON_AddStringToObject(rxo, "decoder", rx.decoder);
+  cJSON_AddNumberToObject(rxo, "decoder_age_ms",
+                          (double)(int32_t)rx.decoder_age_ms);
+  cJSON_AddNumberToObject(rxo, "stall_timeouts", rx.stall_timeouts);
+  cJSON_AddNumberToObject(rxo, "debug_stalls", rx.debug_stalls);
+  cJSON_AddNumberToObject(rxo, "debug_stall_left_ms", rx.debug_stall_left_ms);
+  cJSON *tcp = cJSON_CreateObject();
+  cJSON_AddBoolToObject(tcp, "valid", rx.tcp_valid);
+  cJSON_AddNumberToObject(tcp, "rcv_wnd", rx.tcp_rcv_wnd);
+  cJSON_AddNumberToObject(tcp, "ann_wnd", rx.tcp_ann_wnd);
+  cJSON_AddNumberToObject(tcp, "ooseq_segs", rx.tcp_ooseq_segs);
+  cJSON_AddNumberToObject(tcp, "ooseq_bytes", rx.tcp_ooseq_bytes);
+  cJSON_AddBoolToObject(tcp, "refused", rx.tcp_refused);
+  cJSON_AddNumberToObject(tcp, "bytes_per_s", rx.tcp_bytes_per_s);
+  cJSON_AddItemToObject(rxo, "tcp", tcp);
+  cJSON_AddNumberToObject(rxo, "episodes", rx.episodes);
+  cJSON_AddNumberToObject(rxo, "dry_episodes", rx.dry_episodes);
+  cJSON_AddBoolToObject(rxo, "episode_active", rx.episode_active);
+  cJSON_AddNumberToObject(rxo, "last_episode_ms", rx.last_episode_ms);
+  cJSON_AddNumberToObject(rxo, "last_dry_ms", rx.last_dry_ms);
+  cJSON_AddItemToObject(root, "rx", rxo);
+
   ptp_stats_t ps;
   ptp_clock_get_stats(&ps);
   cJSON *ptp = cJSON_CreateObject();
@@ -209,6 +247,8 @@ cJSON *device_status_build_json(void) {
   cJSON_AddNumberToObject(ptp, "outliers", ps.outlier_count);
   cJSON_AddNumberToObject(ptp, "steps", ps.step_count);
   cJSON_AddNumberToObject(ptp, "rejoins", ps.rejoin_count);
+  cJSON_AddNumberToObject(ptp, "last_sync_age_ms",
+                          (double)(int32_t)ps.last_sync_age_ms);
   cJSON_AddNumberToObject(
       ptp, "gap_us",
       (double)((ps.last_offset_ns - ps.filtered_offset_ns) / 1000LL));
@@ -287,6 +327,8 @@ cJSON *device_status_build_json(void) {
   }
   cJSON_AddNumberToObject(fw, "uptime_s",
                           (double)(esp_timer_get_time() / 1000000LL));
+  // The journal's own timestamp clock: maps its lines to wall time.
+  cJSON_AddNumberToObject(fw, "log_ms", (double)esp_log_timestamp());
   cJSON_AddNumberToObject(fw, "log_journal_kb",
                           log_stream_journal_used() / 1024);
   cJSON_AddItemToObject(root, "firmware", fw);

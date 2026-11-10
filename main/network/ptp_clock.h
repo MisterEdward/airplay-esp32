@@ -74,6 +74,7 @@ typedef struct {
   uint32_t outlier_count;     // Samples rejected as outliers since start
   uint32_t step_count;        // Master timescale steps followed
   uint32_t rejoin_count;      // Multicast re-joins after a PTP silence
+  uint32_t last_sync_age_ms;  // Since the last SYNC; UINT32_MAX = none yet
 } ptp_stats_t;
 
 void ptp_clock_get_stats(ptp_stats_t *stats);

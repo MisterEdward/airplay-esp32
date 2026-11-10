@@ -79,6 +79,47 @@ typedef struct {
 
 void audio_receiver_get_diag(audio_receiver_diag_t *out);
 
+/** Receive-side diagnostics for the status API: what a dropout needs.
+ *  Ages are in ms, UINT32_MAX = never. */
+typedef struct {
+  const char *stream; // "buffered", "realtime" or "none"
+  bool data_connected;
+  int ring_frames;
+  uint32_t last_packet_age_ms;
+  uint32_t last_byte_age_ms; // buffered: last recv() that returned data
+  uint32_t bytes_received;   // buffered, off the socket; wraps
+  uint32_t rx_bytes_per_s;
+  const char *reader;      // idle, recv, slot_wait, debug_stall
+  const char *decoder;     // idle, hold_anchor, ring_full, decoding
+  uint32_t decoder_age_ms; // since the last frame went into the PCM ring
+  int free_slots;          // -1 = no buffered stream
+  int ready_packets;
+  uint32_t late_frames;
+  uint32_t stall_timeouts;
+  uint32_t debug_stalls;
+  uint32_t debug_stall_left_ms;
+  // TCP receive side of the buffered data connection, sampled once a second.
+  bool tcp_valid;
+  uint32_t tcp_rcv_wnd;
+  uint32_t tcp_ann_wnd;
+  uint32_t tcp_ooseq_segs; // out-of-order segments waiting for a hole
+  uint32_t tcp_ooseq_bytes;
+  bool tcp_refused; // data lwIP could not hand to the socket yet
+  uint32_t tcp_bytes_per_s;
+  // Episodes: the PCM ring low or dry while playing.
+  uint32_t episodes;
+  uint32_t dry_episodes;
+  bool episode_active;
+  uint32_t last_episode_ms;
+  uint32_t last_dry_ms;
+} audio_rx_diag_t;
+
+void audio_receiver_get_rx_diag(audio_rx_diag_t *out);
+
+/** Test knob: the buffered reader stops reading the data socket for `ms`
+ *  (capped at 30 s); 0 cancels.  Returns the time left in ms. */
+uint32_t audio_receiver_debug_stall(int ms);
+
 /**
  * Initialize audio receiver
  */

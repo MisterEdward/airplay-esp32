@@ -1204,6 +1204,28 @@ static esp_err_t seek_mode_handler(httpd_req_t *req) {
   return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
 
+/* Test knob: GET /api/debug/stall[?ms=N]
+ * The buffered reader stops reading the AirPlay data socket for N ms (at most
+ * 30000; 0 cancels), as a stuck reader would: a reproducible dropout.  Without
+ * ms it only reports the time left. */
+static esp_err_t debug_stall_handler(httpd_req_t *req) {
+  char query[32] = {0};
+  char value[12] = {0};
+  int ms = -1;
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+      httpd_query_key_value(query, "ms", value, sizeof(value)) == ESP_OK) {
+    ms = atoi(value);
+    if (ms < 0) {
+      ms = 0;
+    }
+  }
+  char body[48];
+  snprintf(body, sizeof(body), "{\"stall_left_ms\":%u}",
+           (unsigned)audio_receiver_debug_stall(ms));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+}
+
 /* Diagnostic: GET /api/debug/capture[?on=0|1][&mute=0|1]
  * on   = USB capture tap (the host records what the DAC is given)
  * mute = DAC mute test mode (zeros to I2S, the tap still gets the audio)
@@ -1765,6 +1787,7 @@ esp_err_t web_server_start(uint16_t port) {
   config.max_uri_handlers += 1; // debug seek mode
 #endif
   config.max_uri_handlers += 1; // debug capture / DAC mute
+  config.max_uri_handlers += 1; // debug stall
 #ifdef CONFIG_AUDIO_PEQ
   config.max_uri_handlers += 4; // speaker EQ page, get, set, REW import
 #endif
@@ -1893,6 +1916,11 @@ esp_err_t web_server_start(uint16_t port) {
                                .method = HTTP_GET,
                                .handler = seek_mode_handler};
   httpd_register_uri_handler(s_server, &seek_mode_uri);
+
+  httpd_uri_t debug_stall_uri = {.uri = "/api/debug/stall",
+                                 .method = HTTP_GET,
+                                 .handler = debug_stall_handler};
+  httpd_register_uri_handler(s_server, &debug_stall_uri);
 
   httpd_uri_t capture_uri = {.uri = "/api/debug/capture",
                              .method = HTTP_GET,

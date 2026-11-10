@@ -176,6 +176,8 @@ static ssize_t read_exact(audio_stream_t *stream, audio_receiver_state_t *state,
     ssize_t n = recv(sock, buf + total, len - total, 0);
     if (n > 0) {
       total += (size_t)n;
+      state->buffered_bytes_received += (uint32_t)n;
+      state->buffered_last_byte_ms = rx_now_ms();
     } else if (n == 0) {
       ESP_LOGI(TAG, "Buffered audio connection closed by peer");
       return 0;
@@ -252,8 +254,10 @@ static void buffered_decoder_task(void *pvParameters) {
     uint16_t index = 0;
     if (xQueueReceive(state->buffered_ready_queue, &index, pdMS_TO_TICKS(20)) !=
         pdTRUE) {
+      state->buffered_decoder_state = BUFFERED_DECODER_IDLE;
       continue;
     }
+    state->buffered_decoder_state = BUFFERED_DECODER_DECODING;
     buffered_slot_t *slot = slot_at(state, index);
 
     // Pre-seek packet: belongs to the old position.  Drop.
@@ -281,6 +285,7 @@ static void buffered_decoder_task(void *pvParameters) {
       if (!held) {
         held = true;
         state->buffered_held_packets++;
+        state->buffered_decoder_state = BUFFERED_DECODER_HOLD_ANCHOR;
       }
       /*
        * Give up eventually.  Measured on a seek near the end of a track:
@@ -330,12 +335,14 @@ static void buffered_decoder_task(void *pvParameters) {
     // reader stops taking free slots.
     while (stream->running && audio_buffer_is_nearly_full(&state->buffer) &&
            slot->generation == state->buffered_generation) {
+      state->buffered_decoder_state = BUFFERED_DECODER_RING_FULL;
       vTaskDelay(pdMS_TO_TICKS(10));
     }
     if (!stream->running || slot->generation != state->buffered_generation) {
       xQueueSend(state->buffered_free_queue, &index, 0);
       continue;
     }
+    state->buffered_decoder_state = BUFFERED_DECODER_DECODING;
 
     // RTP gates, in decode order, before any crypto/decoder work.
     if (!audio_stream_accept_timestamp(state, slot->timestamp)) {
@@ -375,6 +382,9 @@ static void buffered_decoder_task(void *pvParameters) {
       audio_buffer_flush(&state->buffer);
       queued = false;
     }
+    if (queued) {
+      state->buffered_decoder_progress_ms = rx_now_ms();
+    }
     if (!queued) {
       state->stats.packets_dropped++;
     } else if (logged_generation != generation_before) {
@@ -395,6 +405,7 @@ static void buffered_decoder_task(void *pvParameters) {
     xQueueSend(state->buffered_free_queue, &index, 0);
   }
 
+  state->buffered_decoder_state = BUFFERED_DECODER_IDLE;
   state->buffered_decoder_task_handle = NULL;
   vTaskDelete(NULL);
 }
@@ -402,6 +413,34 @@ static void buffered_decoder_task(void *pvParameters) {
 /* ------------------------------------------------------------------ */
 /*  Reader task                                                        */
 /* ------------------------------------------------------------------ */
+
+// /api/debug/stall: stop taking bytes from the socket for a while, as a
+// stuck reader would.  lwIP keeps ACKing until its receive window (24 KiB)
+// is full, then the window closes and the sender has to wait: the same
+// thing the sender sees when the reader is out of slots.  It does not
+// imitate a radio stall (nothing is lost, PTP keeps arriving).
+static void debug_stall(audio_stream_t *stream, audio_receiver_state_t *state) {
+  uint32_t until_ms = state->buffered_debug_stall_until_ms;
+  if (until_ms == 0) {
+    return;
+  }
+  uint32_t started_ms = rx_now_ms();
+  state->buffered_debug_stalls++;
+  state->buffered_reader_state = BUFFERED_READER_DEBUG_STALL;
+  ESP_LOGW(TAG, "Debug stall: reader stops reading for %ld ms",
+           (long)(int32_t)(until_ms - started_ms));
+  // Re-read the deadline each pass so ms=0 cancels a stall in progress.
+  while (stream->running) {
+    until_ms = state->buffered_debug_stall_until_ms;
+    if (until_ms == 0 || (int32_t)(until_ms - rx_now_ms()) <= 0) {
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+  state->buffered_debug_stall_until_ms = 0;
+  ESP_LOGW(TAG, "Debug stall over after %lu ms: reading again",
+           (unsigned long)(rx_now_ms() - started_ms));
+}
 
 static void buffered_audio_task(void *pvParameters) {
   audio_stream_t *stream = (audio_stream_t *)pvParameters;
@@ -424,6 +463,8 @@ static void buffered_audio_task(void *pvParameters) {
     state->buffered_client_socket = client_sock;
     state->buffered_connections++;
     state->buffered_last_packet_us = esp_timer_get_time();
+    state->buffered_last_packet_ms = rx_now_ms();
+    state->buffered_last_byte_ms = state->buffered_last_packet_ms;
     ESP_LOGI(TAG, "Buffered data connection #%" PRIu32 " from %s:%u",
              state->buffered_connections, inet_ntoa(client_addr.sin_addr),
              (unsigned)ntohs(client_addr.sin_port));
@@ -455,6 +496,8 @@ static void buffered_audio_task(void *pvParameters) {
     }
 
     while (stream->running) {
+      debug_stall(stream, state);
+      state->buffered_reader_state = BUFFERED_READER_RECV;
       uint8_t len_buf[2];
       if (read_exact(stream, state, client_sock, len_buf, 2) != 2) {
         break;
@@ -472,6 +515,7 @@ static void buffered_audio_task(void *pvParameters) {
 
       state->stats.packets_received++;
       state->buffered_last_packet_us = esp_timer_get_time();
+      state->buffered_last_packet_ms = rx_now_ms();
 
       if (packet_len < 12) {
         state->stats.packets_dropped++;
@@ -709,6 +753,7 @@ static void buffered_audio_task(void *pvParameters) {
           got_slot = true;
           break;
         }
+        state->buffered_reader_state = BUFFERED_READER_SLOT_WAIT;
         int64_t now_us = esp_timer_get_time();
         int64_t waited_us = now_us - wait_started_us;
         // Waiting for the anchor: never close the TCP window.  The sender
@@ -771,9 +816,11 @@ static void buffered_audio_task(void *pvParameters) {
 
     close(client_sock);
     state->buffered_client_socket = -1;
+    state->buffered_reader_state = BUFFERED_READER_IDLE;
     ESP_LOGI(TAG, "Buffered data connection closed; listener remains active");
   }
 
+  state->buffered_reader_state = BUFFERED_READER_IDLE;
   state->buffered_task_handle = NULL;
   vTaskDelete(NULL);
 }
@@ -792,14 +839,37 @@ static bool buffered_wait_for_tasks_stopped(audio_receiver_state_t *state,
          state->buffered_decoder_task_handle == NULL;
 }
 
-static void buffered_free_queues(audio_receiver_state_t *state) {
-  if (state->buffered_free_queue) {
-    vQueueDelete(state->buffered_free_queue);
-    state->buffered_free_queue = NULL;
+// Guards the two queue handles against the monitor task and /api/status,
+// which read the depths while the RTSP task may be tearing the stream down.
+static portMUX_TYPE s_queue_mux = portMUX_INITIALIZER_UNLOCKED;
+
+bool audio_stream_buffered_queue_depths(audio_receiver_state_t *state,
+                                        int *free_slots, int *ready) {
+  bool ok = false;
+  portENTER_CRITICAL(&s_queue_mux);
+  if (state->buffered_free_queue && state->buffered_ready_queue) {
+    *free_slots = (int)uxQueueMessagesWaiting(state->buffered_free_queue);
+    *ready = (int)uxQueueMessagesWaiting(state->buffered_ready_queue);
+    ok = true;
   }
-  if (state->buffered_ready_queue) {
-    vQueueDelete(state->buffered_ready_queue);
-    state->buffered_ready_queue = NULL;
+  portEXIT_CRITICAL(&s_queue_mux);
+  return ok;
+}
+
+static void buffered_free_queues(audio_receiver_state_t *state) {
+  // Unpublish under the lock, delete outside it: after this nobody can
+  // reach the handles, and vQueueDelete() must not run in a critical section.
+  portENTER_CRITICAL(&s_queue_mux);
+  QueueHandle_t free_queue = state->buffered_free_queue;
+  QueueHandle_t ready_queue = state->buffered_ready_queue;
+  state->buffered_free_queue = NULL;
+  state->buffered_ready_queue = NULL;
+  portEXIT_CRITICAL(&s_queue_mux);
+  if (free_queue) {
+    vQueueDelete(free_queue);
+  }
+  if (ready_queue) {
+    vQueueDelete(ready_queue);
   }
   if (state->buffered_packet_pool) {
     heap_caps_free(state->buffered_packet_pool);
@@ -860,6 +930,9 @@ static esp_err_t buffered_start(audio_stream_t *stream, uint16_t port) {
 
   state->buffered_connections = 0;
   state->buffered_stall_timeouts = 0;
+  state->buffered_debug_stall_until_ms = 0;
+  state->buffered_reader_state = BUFFERED_READER_IDLE;
+  state->buffered_decoder_state = BUFFERED_DECODER_IDLE;
   state->buffered_held_packets = 0;
   state->buffered_generation_drops = 0;
   state->buffered_pre_anchor_drops = 0;
