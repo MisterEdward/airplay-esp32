@@ -88,17 +88,6 @@ static int mpi_to_bytes_padded(const mbedtls_mpi *mpi, uint8_t *buf,
   return mbedtls_mpi_write_binary(mpi, buf + (len - mpi_size), mpi_size);
 }
 
-// Helper: trim leading zeros from buffer
-static void trim_leading_zeros(const uint8_t *in, size_t in_len,
-                               const uint8_t **out, size_t *out_len) {
-  while (in_len > 1 && *in == 0) {
-    in++;
-    in_len--;
-  }
-  *out = in;
-  *out_len = in_len;
-}
-
 // Compute M1 = H(H(N)^H(g) || H(I) || s || A || B || K)
 static void compute_m1(uint8_t *out, const uint8_t *h_Ng_xor,
                        const uint8_t *h_I, const uint8_t *salt, size_t salt_len,
@@ -244,6 +233,19 @@ void srp_session_free(srp_session_t *session) {
   }
 }
 
+// Test knob (/api/debug/srp): produce on purpose the encodings that happen
+// by chance once in 256 pair-setups.  Bit 0: the salt starts with a zero
+// byte.  Bit 1: B does (b is redrawn until it does, ~256 tries).
+static volatile int g_debug_force;
+
+void srp_debug_force(int flags) {
+  g_debug_force = flags;
+}
+
+int srp_debug_get_force(void) {
+  return g_debug_force;
+}
+
 esp_err_t srp_start(srp_session_t *session, const char *username,
                     const char *password) {
   if (!session || !username || !password) {
@@ -268,6 +270,9 @@ esp_err_t srp_start(srp_session_t *session, const char *username,
 
   // Generate random salt
   esp_fill_random(session->salt, SRP_SALT_BYTES);
+  if (g_debug_force & 1) {
+    session->salt[0] = 0;
+  }
 
   // x = H(s || H(I || ":" || P))
   {
@@ -300,23 +305,30 @@ esp_err_t srp_start(srp_session_t *session, const char *username,
   // Server secret b: 256 random bits (RFC 5054 asks for at least 256; Apple's
   // HomeKit ADK uses 32 bytes).  The accelerator's time follows the exponent
   // length, so this is 12x cheaper than a 3072-bit b for g^b and S.
-  esp_fill_random(session->server_secret, SRP_SECRET_BYTES);
-  MBEDTLS_MPI_CHK(
-      mbedtls_mpi_read_binary(&b, session->server_secret, SRP_SECRET_BYTES));
-  if (mbedtls_mpi_cmp_int(&b, 0) == 0) {
-    ret = MBEDTLS_ERR_MPI_BAD_INPUT_DATA;
-    goto cleanup;
-  }
+  for (int tries = 0;; tries++) {
+    esp_fill_random(session->server_secret, SRP_SECRET_BYTES);
+    MBEDTLS_MPI_CHK(
+        mbedtls_mpi_read_binary(&b, session->server_secret, SRP_SECRET_BYTES));
+    if (mbedtls_mpi_cmp_int(&b, 0) == 0) {
+      ret = MBEDTLS_ERR_MPI_BAD_INPUT_DATA;
+      goto cleanup;
+    }
 
-  // B = (k*v + g^b) mod N
-  MBEDTLS_MPI_CHK(mbedtls_mpi_exp_mod(&tmp, &g, &b, &g_N, &g_rr));
-  t2 = esp_timer_get_time();
-  MBEDTLS_MPI_CHK(mbedtls_mpi_mul_mpi(&B, &g_k, &v));
-  MBEDTLS_MPI_CHK(mbedtls_mpi_add_mpi(&B, &B, &tmp));
-  MBEDTLS_MPI_CHK(srp_mod_n(&B, &B));
-  if (mbedtls_mpi_cmp_int(&B, 0) == 0) {
-    ret = MBEDTLS_ERR_MPI_BAD_INPUT_DATA;
-    goto cleanup;
+    // B = (k*v + g^b) mod N
+    MBEDTLS_MPI_CHK(mbedtls_mpi_exp_mod(&tmp, &g, &b, &g_N, &g_rr));
+    t2 = esp_timer_get_time();
+    MBEDTLS_MPI_CHK(mbedtls_mpi_mul_mpi(&B, &g_k, &v));
+    MBEDTLS_MPI_CHK(mbedtls_mpi_add_mpi(&B, &B, &tmp));
+    MBEDTLS_MPI_CHK(srp_mod_n(&B, &B));
+    if (mbedtls_mpi_cmp_int(&B, 0) == 0) {
+      ret = MBEDTLS_ERR_MPI_BAD_INPUT_DATA;
+      goto cleanup;
+    }
+    // Test knob only: redraw b until B is a byte short.
+    if (!(g_debug_force & 2) || tries >= 2000 ||
+        mbedtls_mpi_size(&B) < SRP_PRIME_BYTES) {
+      break;
+    }
   }
 
   MBEDTLS_MPI_CHK(mpi_to_bytes_padded(&v, session->verifier, SRP_PRIME_BYTES));
@@ -441,48 +453,99 @@ esp_err_t srp_verify_client(srp_session_t *session,
   session->t2_us = t3 - t2;
   session->t3_us = t2 - t1;
 
-  // K = H(S)
+  // K = H(S), S in its shortest form (Apple's HomeKit ADK strips the
+  // premaster secret's leading zeros before hashing it).
   uint8_t S_bytes[SRP_PRIME_BYTES];
+  uint8_t K_padded[64]; // H(PAD(S)): fallback only, see below
   size_t S_len = mpi_to_bytes_min(&S, S_bytes, sizeof(S_bytes));
   crypto_hash_sha512(session->session_key, S_bytes, S_len);
+  MBEDTLS_MPI_CHK(mpi_to_bytes_padded(&S, S_bytes, SRP_PRIME_BYTES));
+  crypto_hash_sha512(K_padded, S_bytes, SRP_PRIME_BYTES);
   sodium_memzero(S_bytes, sizeof(S_bytes));
   session->session_key_len = 64;
 
-  // Compute expected M1 = H(H(N)^H(g) || H(I) || s || A || B || K)
-  uint8_t expected_m1[64];
+  // A leading zero byte in the salt, A, B or S is where SRP implementations
+  // disagree (hash the padded number, or its shortest form?).  Each happens
+  // once in 256 pair-setups, so a wrong choice is a connect that fails
+  // "at random".  Measured against a Mac on 2026-11-11 with /api/debug/srp:
+  //
+  //   salt  all 16 bytes     trimmed: 0 of 4 pair-setups, whole: 4 of 4
+  //   B     padded to 384    shortest form: 0 of 3
+  //   A     padded to 384    not forceable from here; the sender hashes it
+  //                          next to B, and the ADK pads both
+  //   S     shortest form    not forceable from here; as the ADK does
+  //
+  // This file used the shortest form for all four.  The two that could not
+  // be measured keep the other encoding as a fallback, and say so when it
+  // is the one that matched.
+  bool z_salt = session->salt[0] == 0;
+  bool z_A = mbedtls_mpi_size(&A) < SRP_PRIME_BYTES;
+  bool z_B = mbedtls_mpi_size(&B) < SRP_PRIME_BYTES;
+  bool z_S = mbedtls_mpi_size(&S) < SRP_PRIME_BYTES;
+
+  uint8_t A_min[SRP_PRIME_BYTES];
+  size_t A_min_len = mpi_to_bytes_min(&A, A_min, sizeof(A_min));
+  bool a_short = false;
+  bool k_padded = false;
+  bool matched = false;
   {
     // H(I) where I = "Pair-Setup"
     uint8_t h_I[64];
+    uint8_t expected_m1[64];
     crypto_hash_sha512(h_I, (const uint8_t *)"Pair-Setup", 10);
-
-    // Get minimal representations
-    const uint8_t *salt_ptr;
-    size_t salt_len;
-    trim_leading_zeros(session->salt, SRP_SALT_BYTES, &salt_ptr, &salt_len);
-
-    uint8_t A_bytes[SRP_PRIME_BYTES];
-    uint8_t B_bytes[SRP_PRIME_BYTES];
-    size_t A_len = mpi_to_bytes_min(&A, A_bytes, sizeof(A_bytes));
-    size_t B_len = mpi_to_bytes_min(&B, B_bytes, sizeof(B_bytes));
-
-    compute_m1(expected_m1, g_h_ng, h_I, salt_ptr, salt_len, A_bytes, A_len,
-               B_bytes, B_len, session->session_key, 64);
+    // M1 = H(H(N)^H(g) || H(I) || s || A || B || K).  Variant 0 is the
+    // expected encoding; 1-3 differ from it only when A or S has a leading
+    // zero byte.
+    for (int variant = 0; variant < 4 && !matched; variant++) {
+      bool try_a_short = (variant & 1) != 0;
+      bool try_k_padded = (variant & 2) != 0;
+      if ((try_a_short && !z_A) || (try_k_padded && !z_S)) {
+        continue;
+      }
+      compute_m1(expected_m1, g_h_ng, h_I, session->salt, SRP_SALT_BYTES,
+                 try_a_short ? A_min : session->client_public_key,
+                 try_a_short ? A_min_len : SRP_PRIME_BYTES,
+                 session->server_public_key, SRP_PRIME_BYTES,
+                 try_k_padded ? K_padded : session->session_key, 64);
+      if (sodium_memcmp(client_proof, expected_m1, SRP_PROOF_BYTES) == 0) {
+        matched = true;
+        a_short = try_a_short;
+        k_padded = try_k_padded;
+      }
+    }
   }
 
-  // Verify client proof
-  if (sodium_memcmp(client_proof, expected_m1, SRP_PROOF_BYTES) != 0) {
-    ESP_LOGE(TAG, "Client proof verification failed");
+  if (!matched) {
+    ESP_LOGE(TAG,
+             "Client proof verification failed (leading zero byte: salt=%d "
+             "A=%d B=%d S=%d; A sent as %u bytes)",
+             z_salt, z_A, z_B, z_S, (unsigned)client_pk_len);
     goto cleanup;
   }
+  if (a_short || k_padded) {
+    ESP_LOGW(TAG,
+             "Client proof matched the fallback encoding (A short=%d, K from "
+             "padded S=%d): make it the expected one",
+             a_short, k_padded);
+  } else if (z_salt || z_A || z_B || z_S) {
+    ESP_LOGI(TAG,
+             "Client proof verified with a leading zero byte in: salt=%d "
+             "A=%d B=%d S=%d",
+             z_salt, z_A, z_B, z_S);
+  }
+  if (k_padded) {
+    memcpy(session->session_key, K_padded, sizeof(K_padded));
+  }
+  sodium_memzero(K_padded, sizeof(K_padded));
 
+  // M2 = H(A || M1 || K), A encoded as the sender encoded it in M1.
   memcpy(session->proof_m1, client_proof, SRP_PROOF_BYTES);
   {
-    uint8_t A_bytes[SRP_PRIME_BYTES];
-    size_t A_len = mpi_to_bytes_min(&A, A_bytes, sizeof(A_bytes));
-
     crypto_hash_sha512_state state;
     crypto_hash_sha512_init(&state);
-    crypto_hash_sha512_update(&state, A_bytes, A_len);
+    crypto_hash_sha512_update(&state,
+                              a_short ? A_min : session->client_public_key,
+                              a_short ? A_min_len : SRP_PRIME_BYTES);
     crypto_hash_sha512_update(&state, session->proof_m1, SRP_PROOF_BYTES);
     crypto_hash_sha512_update(&state, session->session_key,
                               session->session_key_len);

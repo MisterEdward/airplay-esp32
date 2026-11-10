@@ -91,6 +91,17 @@ void srp_pool_start(void) {
   xTaskNotifyGive(s_task);
 }
 
+void srp_pool_flush(void) {
+  if (!s_task) {
+    return;
+  }
+  xSemaphoreTake(s_lock, portMAX_DELAY);
+  sodium_memzero(&s_spare, sizeof(s_spare));
+  s_spare_ready = false;
+  xSemaphoreGive(s_lock);
+  xTaskNotifyGive(s_task);
+}
+
 bool srp_pool_take(srp_session_t *session, const char *username,
                    const char *password) {
   if (!s_task || !session || !username || !password ||

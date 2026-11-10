@@ -82,6 +82,39 @@ static void test_kat(void) {
   srp_session_free(copy);
 }
 
+// The encodings that only matter once in 256 pair-setups each: a salt, an A
+// or a B that starts with a zero byte.  The sender hashes all 16 salt bytes
+// and pads A and B to 384 bytes in M1 and M2; srp.c used the shortest form
+// of all three and rejected the proof.
+static void check_vector(const uint8_t *salt, const uint8_t *b,
+                         const uint8_t *A, const uint8_t *B, const uint8_t *M1,
+                         const uint8_t *M2, const uint8_t *K) {
+  srp_session_t *s = srp_session_create();
+  assert(s);
+  fake_random_queue(salt, 16);
+  fake_random_queue(b, 32);
+  assert(srp_start(s, "Pair-Setup", "3939") == ESP_OK);
+  size_t len = 0;
+  assert(memcmp(srp_get_salt(s), salt, 16) == 0);
+  assert(memcmp(srp_get_public_key(s, &len), B, 384) == 0);
+  assert(srp_verify_client(s, A, 384, M1, 64) == ESP_OK);
+  size_t klen = 0;
+  assert(memcmp(srp_get_proof(s), M2, 64) == 0);
+  assert(memcmp(srp_get_session_key(s, &klen), K, 64) == 0);
+  srp_session_free(s);
+}
+
+static void test_kat_leading_zeros(void) {
+  assert(kat0_salt[0] == 0);
+  check_vector(kat0_salt, kat0_b, kat0_A, kat0_B, kat0_M1, kat0_M2, kat0_K);
+  assert(katA0_A[0] == 0 && katA0_B[0] != 0);
+  check_vector(katA0_salt, katA0_b, katA0_A, katA0_B, katA0_M1, katA0_M2,
+               katA0_K);
+  assert(katB0_B[0] == 0 && katB0_A[0] != 0);
+  check_vector(katB0_salt, katB0_b, katB0_A, katB0_B, katB0_M1, katB0_M2,
+               katB0_K);
+}
+
 // N is static in srp.c; recover it as x - (x mod N) with x = 2^3072 - 1
 // (N > 2^3071, so x mod N = x - N).
 static void get_n(mbedtls_mpi *n) {
@@ -195,6 +228,7 @@ static void test_rejects(void) {
 int main(void) {
   assert(srp_global_init() == ESP_OK);
   test_kat();
+  test_kat_leading_zeros();
   test_rejects();
   test_barrett();
   printf("test_srp: all passed\n");

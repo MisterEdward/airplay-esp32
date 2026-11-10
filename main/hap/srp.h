@@ -135,5 +135,15 @@ int srp_mod_n(mbedtls_mpi *r, const mbedtls_mpi *x);
  * follows.
  */
 void srp_pool_start(void);
+
+/** Drop the spare keys and compute new ones (after srp_debug_force()). */
+void srp_pool_flush(void);
+
+/**
+ * Test knob: force the rare encodings on purpose.  Bit 0: the salt starts
+ * with a zero byte.  Bit 1: B does.  0 = normal.  Not persisted.
+ */
+void srp_debug_force(int flags);
+int srp_debug_get_force(void);
 bool srp_pool_take(srp_session_t *session, const char *username,
                    const char *password);

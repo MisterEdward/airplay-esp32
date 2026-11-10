@@ -13,6 +13,7 @@
 #include "esp_wifi.h"
 
 #include "settings.h"
+#include "srp.h"
 #include "led.h"
 #include "wifi.h"
 #include "ethernet.h"
@@ -1226,6 +1227,24 @@ static esp_err_t debug_stall_handler(httpd_req_t *req) {
   return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
 
+/* Test knob: GET /api/debug/srp[?force=N]
+ * Pair-setup encodings that happen by chance once in 256 sessions, on
+ * purpose: bit 0 = the salt starts with a zero byte, bit 1 = B does.
+ * 0 = normal (the default after every boot). */
+static esp_err_t debug_srp_handler(httpd_req_t *req) {
+  char query[32] = {0};
+  char value[8] = {0};
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+      httpd_query_key_value(query, "force", value, sizeof(value)) == ESP_OK) {
+    srp_debug_force(atoi(value) & 3);
+    srp_pool_flush();
+  }
+  char body[32];
+  snprintf(body, sizeof(body), "{\"force\":%d}", srp_debug_get_force());
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+}
+
 /* Diagnostic: GET /api/debug/capture[?on=0|1][&mute=0|1]
  * on   = USB capture tap (the host records what the DAC is given)
  * mute = DAC mute test mode (zeros to I2S, the tap still gets the audio)
@@ -1788,6 +1807,7 @@ esp_err_t web_server_start(uint16_t port) {
 #endif
   config.max_uri_handlers += 1; // debug capture / DAC mute
   config.max_uri_handlers += 1; // debug stall
+  config.max_uri_handlers += 1; // debug srp
 #ifdef CONFIG_AUDIO_PEQ
   config.max_uri_handlers += 4; // speaker EQ page, get, set, REW import
 #endif
@@ -1921,6 +1941,11 @@ esp_err_t web_server_start(uint16_t port) {
                                  .method = HTTP_GET,
                                  .handler = debug_stall_handler};
   httpd_register_uri_handler(s_server, &debug_stall_uri);
+
+  httpd_uri_t debug_srp_uri = {.uri = "/api/debug/srp",
+                               .method = HTTP_GET,
+                               .handler = debug_srp_handler};
+  httpd_register_uri_handler(s_server, &debug_srp_uri);
 
   httpd_uri_t capture_uri = {.uri = "/api/debug/capture",
                              .method = HTTP_GET,
