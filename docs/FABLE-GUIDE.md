@@ -501,6 +501,24 @@ then plays on the Mac's own speakers or shows "playing" with no session.
 The AirPlay side of a fatal seek is identical to a good one.  Workaround in
 tests: `scripts/fable/stress/guard.sh` reselects the speaker.
 
+### Mac first, speaker added or removed: ~1 s of silence on the Mac (sender side)
+
+Reported 2026-11-11 (iPhone as sender, the MacBook as an AirPlay receiver).
+With the speaker first, adding or removing the Mac is seamless: the speaker
+only gets a SETPEERS and keeps playing.  With the Mac first, adding or
+removing the speaker makes the iPhone tear down the Mac's stream and set it
+up again (twice), then re-anchor.  The Mac's own log shows it (`log show`,
+subsystem `com.apple.airplay`, lines `Tearing down stream type 103`,
+`Setting up stream`, `Updating hose state`): hose stopped 09:25:50.51,
+started 09:25:51.52 at the join; stopped 09:25:44.71, started 09:25:45.70 at
+the removal.  Alone, the Mac is driven with `SetRate ... get anchor` (it
+picks its own anchor); in a group with `SetRateAndAnchorTime`, as the
+speaker always is, so only the Mac changes mode.  At the join the speaker
+sees the same shape (stream SETUP, TEARDOWN, SETUP, anchor) and spends
+~60 ms of that second handling it; at the removal it is already gone.
+Nothing to fix in the firmware.  Not known: whether two Apple receivers
+show the same gap.
+
 ### WiFi 2.4 GHz collapse and PTP
 
 See §1.  Firmware only mitigates: clean deauth before restarts, a watchdog
@@ -522,8 +540,12 @@ jump).  Watch for `Master timescale stepped` right *after* an `Anchor:`.
   one AAC decode error on the 36-byte packet at `untilSeq` (may relate to the
   iPhone dropouts); a grandmaster change mid-play once gave `Anchor 12242 ms in
   the future`; the first acquisition after a rapid reconnect can be off by up
-  to -7.7 ms (corrected by the next re-acquire); each disconnect blocks ~1 s on
-  the event port (fix in tag `archive/perf-session-start-rtsp-path`).
+  to -7.7 ms (corrected by the next re-acquire).  (The ~1 s each disconnect
+  blocked on the event port is fixed, 2026-11-11.)
+- NVS writes that still happen at once, also during playback: LED
+  brightness, the Wake-on-LAN MAC and the USB feedback mode (settings page).
+  The channel mode is saved once the output is quiet (2026-11-11), like the
+  EQ and the volume.
 - A small click on play after a pause was reported once; the resume there
   re-acquired with `trimmed=116 dropped=2` (anchor 55 ms in the past).  The
   PCM5102A's own zero-data auto-mute is the other suspect.  Not isolated.
