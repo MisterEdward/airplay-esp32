@@ -516,8 +516,8 @@ picks its own anchor); in a group with `SetRateAndAnchorTime`, as the
 speaker always is, so only the Mac changes mode.  At the join the speaker
 sees the same shape (stream SETUP, TEARDOWN, SETUP, anchor) and spends
 ~60 ms of that second handling it; at the removal it is already gone.
-Nothing to fix in the firmware.  Not known: whether two Apple receivers
-show the same gap.
+Nothing to fix in the firmware.  Edward confirms the same gap, a little
+shorter, with Apple receivers only (the Mac first, an AirPlay TV added).
 
 ### WiFi 2.4 GHz collapse and PTP
 
