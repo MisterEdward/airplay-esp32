@@ -1,8 +1,13 @@
 #include "settings.h"
 
+#include "audio_arbiter.h"
+#include "audio_envelope.h"
+#include "audio_output.h"
 #include "dac.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs.h"
 #include <stdio.h>
 #include <string.h>
@@ -523,23 +528,28 @@ bool settings_has_eq(void) {
 /*  Output channel mode                                                */
 /* ================================================================== */
 
-esp_err_t settings_get_channel_mode(uint8_t *mode) {
-  if (!mode) {
-    return ESP_ERR_INVALID_ARG;
-  }
+// The caller applies a new mode at once; the NVS write waits until nothing is
+// being timed, and at least this long after the last change (the button
+// cycles through the modes).  A flash write stalls the cache, which has
+// stepped the playout ~20 ms (measured for the EQ: audio_peq_store.c follows
+// the same rule).
+#define CHANNEL_SAVE_DELAY_MS 2000
 
-  nvs_handle_t nvs;
-  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs);
-  if (err != ESP_OK) {
-    return ESP_ERR_NOT_FOUND;
-  }
+static volatile uint8_t g_channel_mode;
+static volatile bool g_channel_mode_dirty;
+static TaskHandle_t g_channel_save_task;
 
-  err = nvs_get_u8(nvs, NVS_KEY_CHANNEL_MODE, mode);
-  nvs_close(nvs);
-  return err;
+// Nothing is being timed: no AirPlay stream, no fade in progress.
+static bool output_quiet(void) {
+  audio_arbiter_state_t arb;
+  audio_arbiter_get_state(&arb);
+  audio_output_stats_t st;
+  audio_output_get_stats(&st);
+  return !arb.airplay_playing && st.envelope_state == ENVELOPE_SILENT &&
+         !st.pause_pending;
 }
 
-esp_err_t settings_set_channel_mode(uint8_t mode) {
+static esp_err_t channel_mode_write(uint8_t mode) {
   nvs_handle_t nvs;
   esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
   if (err != ESP_OK) {
@@ -559,6 +569,76 @@ esp_err_t settings_set_channel_mode(uint8_t mode) {
     ESP_LOGE(TAG, "Failed to save channel mode: %s", esp_err_to_name(err));
   }
   return err;
+}
+
+// Its own task: an NVS write needs more stack than the button or timer
+// tasks have.  Woken by every change; started by the first one.
+static void channel_save_task(void *arg) {
+  (void)arg;
+  for (;;) {
+    if (!g_channel_mode_dirty) {
+      ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    }
+    while (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(CHANNEL_SAVE_DELAY_MS)) > 0 ||
+           !output_quiet()) {
+    }
+    // Clear before reading: a change that lands after the read sets it again
+    // and wakes the task for another save.
+    g_channel_mode_dirty = false;
+    channel_mode_write(g_channel_mode);
+  }
+}
+
+static bool channel_save_task_start(void) {
+  static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+  static bool started;
+  portENTER_CRITICAL(&mux);
+  bool mine = !started;
+  started = true;
+  portEXIT_CRITICAL(&mux);
+  if (mine && xTaskCreate(channel_save_task, "chan_save", 4096, NULL, 1,
+                          &g_channel_save_task) != pdPASS) {
+    portENTER_CRITICAL(&mux);
+    started = false;
+    portEXIT_CRITICAL(&mux);
+    return false;
+  }
+  return true;
+}
+
+esp_err_t settings_get_channel_mode(uint8_t *mode) {
+  if (!mode) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  if (g_channel_mode_dirty) {
+    *mode = g_channel_mode; // set but not written yet
+    return ESP_OK;
+  }
+
+  nvs_handle_t nvs;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs);
+  if (err != ESP_OK) {
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  err = nvs_get_u8(nvs, NVS_KEY_CHANNEL_MODE, mode);
+  nvs_close(nvs);
+  return err;
+}
+
+esp_err_t settings_set_channel_mode(uint8_t mode) {
+  g_channel_mode = mode;
+  g_channel_mode_dirty = true;
+  if (!channel_save_task_start()) {
+    ESP_LOGE(TAG, "Channel mode %d is applied but will not be saved", mode);
+    return ESP_ERR_NO_MEM;
+  }
+  // The task handle is published by xTaskCreate(); a caller that races the
+  // first one may not see it yet, and the task checks the flag when it starts.
+  if (g_channel_save_task) {
+    xTaskNotifyGive(g_channel_save_task);
+  }
+  return ESP_OK;
 }
 
 /* ================================================================== */
